@@ -1,5 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { accounts, formatCurrency } from "@/data/kam-data";
+import { useQuery } from "@tanstack/react-query";
+import { formatCurrency } from "@/data/kam-data";
+import { fetchAccounts } from "@/services/db";
+import { useAuth } from "@/context/AuthContext";
 
 export const Route = createFileRoute("/strategy")({
   head: () => ({
@@ -12,6 +15,11 @@ export const Route = createFileRoute("/strategy")({
 });
 
 function StrategyPage() {
+  const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const userId = profile?.id;
+  const { data: accounts = [] } = useQuery({ queryKey: ["accounts", userId, role], queryFn: () => fetchAccounts({ role, userId }) });
+
   return (
     <div className="flex flex-col">
       <header className="h-16 bg-card border-b flex items-center justify-between px-8 sticky top-0 z-10">

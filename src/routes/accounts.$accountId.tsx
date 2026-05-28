@@ -1,14 +1,10 @@
-import { createFileRoute, Link, notFound } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
-import type { Account, HealthBlock, SubScore } from "@/data/kam-data";
-import {
-  canEdit,
-  currentUser,
-  escalations,
-  formatCurrency,
-  getAccount,
-  getOpportunities,
-} from "@/data/kam-data";
+import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
+import { useMemo, useState, useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Account, Escalation, HealthBlock, SubScore, Opportunity } from "@/data/kam-data";
+import { ROLE_PERMISSIONS, formatCurrency } from "@/data/kam-data";
+import { fetchAccount, fetchEscalations, fetchOpportunities, fetchKamUsers, updateAccountKam, updateAccountKyc, updateHealthBlock } from "@/services/db";
+import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft,
   Building2,
@@ -33,26 +29,18 @@ import {
   Upload,
   Sparkles,
   Lightbulb,
+  Loader2,
 } from "lucide-react";
 
 export const Route = createFileRoute("/accounts/$accountId")({
-  head: ({ params }) => {
-    const account = getAccount(params.accountId);
-    const title = account ? `${account.name} — Aether KAM` : "Account — Aether KAM";
-    return {
-      meta: [
-        { title },
-        {
-          name: "description",
-          content: account
-            ? `Client 360 for ${account.name}: KYC, scoring matrix, activities, retention vs growth, education and escalation.`
-            : "Client 360 detail view.",
-        },
-      ],
-    };
-  },
-  loader: ({ params }) => {
-    const account = getAccount(params.accountId);
+  head: ({ params }) => ({
+    meta: [
+      { title: `Account ${params.accountId} — Aether KAM` },
+      { name: "description", content: "Client 360 detail view." },
+    ],
+  }),
+  loader: async ({ params }) => {
+    const account = await fetchAccount(params.accountId);
     if (!account) throw notFound();
     return { account };
   },
@@ -81,10 +69,20 @@ const TABS = [
 type Tab = (typeof TABS)[number];
 
 function AccountDetailPage() {
-  const { account } = Route.useLoaderData();
+  const { account } = Route.useLoaderData() as { account: Account };
+  const { profile } = useAuth();
   const [tab, setTab] = useState<Tab>("Overview");
-  const accountEscalations = escalations.filter((e) => e.accountId === account.id);
-  const editable = canEdit(account.id);
+  const { data: accountEscalations = [] } = useQuery({
+    queryKey: ["escalations", account.id],
+    queryFn: () => fetchEscalations(account.id),
+  });
+  const { data: accountOpportunities = [] } = useQuery({
+    queryKey: ["opportunities", account.id],
+    queryFn: () => fetchOpportunities(account.id),
+  });
+  const role = profile?.role ?? "KAM";
+  const perms = ROLE_PERMISSIONS[role];
+  const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
 
   return (
     <div className="flex flex-col">
@@ -112,7 +110,7 @@ function AccountDetailPage() {
         <div className="flex gap-3 items-center justify-end">
           {!editable && (
             <span className="flex items-center gap-1 text-[10px] text-muted-foreground uppercase tracking-wider font-bold">
-              <Lock className="size-3" /> Read-only ({currentUser.role})
+              <Lock className="size-3" /> Read-only ({role})
             </span>
           )}
           <div className="flex flex-col items-end gap-1">
@@ -195,7 +193,7 @@ function AccountDetailPage() {
         <div className="py-8 pb-16">
           {tab === "Overview" && <OverviewTab account={account} />}
           {tab === "Score Marking Matrics" && <ScoreMatricsTab account={account} />}
-          {tab === "Activity to Increase Score" && <ActivityTab account={account} />}
+          {tab === "Activity to Increase Score" && <ActivityTab account={account} opportunities={accountOpportunities} />}
           {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} />}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
@@ -208,20 +206,76 @@ function AccountDetailPage() {
 /* ============================== TAB 1: Overview (KYC) ============================== */
 
 function OverviewTab({ account }: { account: Account }) {
-  const editable = canEdit(account.id);
+  const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const isHead = role === "Head of KAM" || role === "CEO";
+  const editable = ROLE_PERMISSIONS[role].write;
+  const queryClient = useQueryClient();
 
-  // Editable KYC field state — front-end only (would be persisted later)
-  const [fields, setFields] = useState<Record<string, string>>({
-    industry: `${account.industry} · ${account.region}`,
+  const { data: kamUsers = [] } = useQuery({
+    queryKey: ["kamUsers"],
+    queryFn: fetchKamUsers,
+    enabled: isHead,
+  });
+
+  const [assignedKamId, setAssignedKamId] = useState<string | null>(account.assignedKamId ?? null);
+
+  const { mutate: assignKam } = useMutation({
+    mutationFn: (kamId: string) => updateAccountKam(account.id, kamId),
+    onSuccess: (_, kamId) => {
+      setAssignedKamId(kamId);
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+    },
+  });
+
+  const initialFields = useMemo(() => ({
+    industry: account.industry,
     business: account.businessInfo,
     history: account.clientHistory,
-    revenue: `${account.revenue} · Our ARR: ${formatCurrency(account.arr)}`,
+    revenue: account.revenue,
     mrrArr: account.isStartup && account.mrrArr ? account.mrrArr : "N/A — not a startup client",
-    primary: `${account.primaryContact.name} — ${account.primaryContact.role}`,
-    tenure: `${account.engagementTenure} · Founded ${account.founded} · ${account.employees} employees`,
-    team: `${account.teamSize} resources deployed`,
+    primary: account.primaryContact.name,
+    tenure: account.engagementTenure,
+    team: String(account.teamSize),
     competitors: account.competitors.join(", "),
     flow: account.mainBusinessFlow,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [account.id]);
+
+  const [fields, setFields] = useState(initialFields);
+  const [savedSnapshot, setSavedSnapshot] = useState(initialFields);
+  const [showSaved, setShowSaved] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isDirty = JSON.stringify(fields) !== JSON.stringify(savedSnapshot);
+
+  // Auto-hide the "saved" confirmation after 3 s
+  useEffect(() => {
+    if (showSaved) {
+      savedTimerRef.current = setTimeout(() => setShowSaved(false), 3000);
+    }
+    return () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); };
+  }, [showSaved]);
+
+  const { mutate: saveKyc, isPending: savingKyc } = useMutation({
+    mutationFn: () => {
+      const teamNum = parseInt(fields.team);
+      return updateAccountKyc(account.id, {
+        industry: fields.industry,
+        business_info: fields.business,
+        client_history: fields.history,
+        revenue: fields.revenue,
+        mrr_arr: fields.mrrArr.startsWith("N/A") ? null : fields.mrrArr,
+        primary_contact_name: fields.primary,
+        engagement_tenure: fields.tenure,
+        ...(isNaN(teamNum) ? {} : { team_size: teamNum }),
+        competitors: fields.competitors.split(",").map((s) => s.trim()).filter(Boolean),
+        main_business_flow: fields.flow,
+      });
+    },
+    onSuccess: () => {
+      setSavedSnapshot({ ...fields });
+      setShowSaved(true);
+    },
   });
 
   // OCR file state
@@ -302,6 +356,41 @@ function OverviewTab({ account }: { account: Account }) {
         )}
       </div>
 
+      {/* Assigned KAM */}
+      <div className="border rounded-xl p-5 bg-card flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+            <User className="size-4" />
+          </span>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Assigned KAM</p>
+            {isHead ? (
+              <select
+                value={assignedKamId ?? ""}
+                onChange={(e) => assignKam(e.target.value)}
+                className="mt-1 text-sm font-semibold bg-transparent border-b border-muted focus:outline-none focus:border-accent cursor-pointer"
+              >
+                <option value="" disabled>— unassigned —</option>
+                {kamUsers.map((u) => (
+                  <option key={u.id} value={u.id}>{u.name}</option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-sm font-semibold mt-0.5">
+                {kamUsers.find((u) => u.id === assignedKamId)?.name
+                  ?? profile?.name
+                  ?? "—"}
+              </p>
+            )}
+          </div>
+        </div>
+        {isHead && (
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">
+            Head of KAM can reassign
+          </span>
+        )}
+      </div>
+
       {/* 12-field KYC grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <KycField n={1} label="Account Status" icon={<CheckCircle2 className="size-4" />} editable={false}>
@@ -348,6 +437,38 @@ function OverviewTab({ account }: { account: Account }) {
         <KycField n={12} label="Main Business Flow" icon={<Workflow className="size-4" />} editable={editable} wide
           value={fields.flow} onChange={(v) => setFields((f) => ({ ...f, flow: v }))} multiline />
       </div>
+
+      {/* Fixed save bar — visible while dirty or briefly after save */}
+      {editable && (isDirty || showSaved) && (
+        <div className="fixed bottom-0 left-0 md:left-64 right-0 z-50 border-t bg-card px-6 py-3 flex items-center justify-between shadow-lg">
+          <p className={`text-xs font-medium ${showSaved && !isDirty ? "text-success" : "text-muted-foreground"}`}>
+            {showSaved && !isDirty
+              ? "✓ KYC fields saved successfully"
+              : "You have unsaved changes in KYC fields"}
+          </p>
+          <div className="flex gap-2">
+            {isDirty && (
+              <button
+                onClick={() => { setFields(savedSnapshot); setShowSaved(false); }}
+                className="px-3 py-1.5 text-xs border rounded-md hover:bg-muted transition-colors"
+              >
+                Discard
+              </button>
+            )}
+            {isDirty && (
+              <button
+                onClick={() => saveKyc()}
+                disabled={savingKyc}
+                className="px-3 py-1.5 text-xs bg-accent text-white rounded-md disabled:opacity-50 flex items-center gap-1.5 transition-opacity"
+              >
+                {savingKyc
+                  ? <><Loader2 className="size-3 animate-spin" /> Saving…</>
+                  : <><CheckCircle2 className="size-3" /> Save KYC</>}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Full stakeholders detail */}
       <Card title="Stakeholders — full detail">
@@ -467,9 +588,9 @@ function KycField({
 /* ============================== TAB 2: Score Marking Matrics ============================== */
 
 function ScoreMatricsTab({ account }: { account: Account }) {
-  const [expanded, setExpanded] = useState<null | { title: string; hint: string; block: HealthBlock }>(null);
-  const open = (title: string, hint: string, block: HealthBlock) =>
-    setExpanded({ title, hint, block });
+  const [expanded, setExpanded] = useState<null | { title: string; hint: string; block: HealthBlock; area: string }>(null);
+  const open = (title: string, hint: string, block: HealthBlock, area: string) =>
+    setExpanded({ title, hint, block, area });
 
   return (
     <div className="space-y-6">
@@ -479,22 +600,23 @@ function ScoreMatricsTab({ account }: { account: Account }) {
         <ScoreCard title="Risk" score={account.riskScoring.score} subtitle="Lower = riskier" inverse />
       </div>
 
-      <ScoreBlock title="Relationship Health" hint="Meetups, monthly meetings, director meetings, cooperation" block={account.relationshipHealth} onExpand={() => open("Relationship Health", "Meetups, monthly meetings, director meetings, cooperation", account.relationshipHealth)} />
-      <ScoreBlock title="Project Health" hint="Deliverables, feedback, quality/defects, scope & change" block={account.projectHealth} onExpand={() => open("Project Health", "Deliverables, feedback, quality/defects, scope & change", account.projectHealth)} />
-      <ScoreBlock title="White Space Analysis" hint="Meeting cadence, upsell capacity, services penetration" block={account.whiteSpace} onExpand={() => open("White Space Analysis", "Meeting cadence, upsell capacity, services penetration", account.whiteSpace)} />
+      <ScoreBlock title="Relationship Health" hint="Meetups, monthly meetings, director meetings, cooperation" block={account.relationshipHealth} onExpand={() => open("Relationship Health", "Meetups, monthly meetings, director meetings, cooperation", account.relationshipHealth, "relationship")} />
+      <ScoreBlock title="Project Health" hint="Deliverables, feedback, quality/defects, scope & change" block={account.projectHealth} onExpand={() => open("Project Health", "Deliverables, feedback, quality/defects, scope & change", account.projectHealth, "project")} />
+      <ScoreBlock title="White Space Analysis" hint="Meeting cadence, upsell capacity, services penetration" block={account.whiteSpace} onExpand={() => open("White Space Analysis", "Meeting cadence, upsell capacity, services penetration", account.whiteSpace, "white_space")} />
 
       <ContractScoringBlock account={account} />
 
-      <ScoreBlock title="Customer Satisfaction Score" hint="NPS, surveys, ticket CSAT, exec sentiment" block={account.csat} onExpand={() => open("Customer Satisfaction Score", "NPS, surveys, ticket CSAT, exec sentiment", account.csat)} />
-      <ScoreBlock title="Risk Scoring" hint="Competitors, geopolitical, POC churn, payments, C-level changes" block={account.riskScoring} onExpand={() => open("Risk Scoring", "Competitors, geopolitical, POC churn, payments, C-level changes", account.riskScoring)} />
+      <ScoreBlock title="Customer Satisfaction Score" hint="NPS, surveys, ticket CSAT, exec sentiment" block={account.csat} onExpand={() => open("Customer Satisfaction Score", "NPS, surveys, ticket CSAT, exec sentiment", account.csat, "csat")} />
+      <ScoreBlock title="Risk Scoring" hint="Competitors, geopolitical, POC churn, payments, C-level changes" block={account.riskScoring} onExpand={() => open("Risk Scoring", "Competitors, geopolitical, POC churn, payments, C-level changes", account.riskScoring, "risk")} />
       <ResourceHealthBlock account={account} />
-      <ScoreBlock title="Financial Health" hint="Revenue generation & resource allocation efficiency" block={account.financialHealth} onExpand={() => open("Financial Health", "Revenue generation & resource allocation efficiency", account.financialHealth)} />
+      <ScoreBlock title="Financial Health" hint="Revenue generation & resource allocation efficiency" block={account.financialHealth} onExpand={() => open("Financial Health", "Revenue generation & resource allocation efficiency", account.financialHealth, "financial")} />
 
       {expanded && (
         <KpiEditorModal
           title={expanded.title}
           hint={expanded.hint}
           block={expanded.block}
+          area={expanded.area}
           accountId={account.id}
           onClose={() => setExpanded(null)}
         />
@@ -548,35 +670,41 @@ function ScoreBlock({ title, hint, block, onExpand }: { title: string; hint: str
 /* ----- KPI Editor Modal (dynamic weighted checkbox scoring) ----- */
 
 type KpiField = { id: string; label: string; weight: number; checked: boolean };
-type KpiSection = { id: string; name: string; fields: KpiField[] };
+type KpiSection = { id: string; metricId?: string; name: string; fields: KpiField[] };
 
 function KpiEditorModal({
   title,
   hint,
   block,
+  area,
   accountId,
   onClose,
 }: {
   title: string;
   hint: string;
   block: HealthBlock;
+  area: string;
   accountId: string;
   onClose: () => void;
 }) {
-  const editable = canEdit(accountId);
+  const { profile } = useAuth();
+  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
+  const router = useRouter();
 
-  // Seed one KPI section per existing metric, with 3 default weighted dependent fields.
-  const [sections, setSections] = useState<KpiSection[]>(() =>
-    block.metrics.map((m, i) => ({
+  // Load from persisted kpiData if available, otherwise seed from metrics.
+  const [sections, setSections] = useState<KpiSection[]>(() => {
+    if (block.kpiData) return block.kpiData as KpiSection[];
+    return block.metrics.map((m, i) => ({
       id: `kpi-${i}`,
+      metricId: m.id,
       name: m.label,
       fields: [
         { id: `${i}-a`, label: "Monthly meeting held on schedule", weight: 50, checked: true },
         { id: `${i}-b`, label: "Director-level participation",      weight: 25, checked: false },
         { id: `${i}-c`, label: "Action items closed before next cycle", weight: 25, checked: false },
       ],
-    })),
-  );
+    }));
+  });
 
   function updateSection(id: string, fn: (s: KpiSection) => KpiSection) {
     setSections((prev) => prev.map((s) => (s.id === id ? fn(s) : s)));
@@ -620,6 +748,23 @@ function KpiEditorModal({
     sectionScores.length > 0
       ? sectionScores.reduce((acc, s) => acc + s.scoreOutOfFive, 0) / sectionScores.length
       : 0;
+
+  const { mutate: saveKpi, isPending: savingKpi } = useMutation({
+    mutationFn: () => {
+      const metricUpdates = sections
+        .map((s, idx) =>
+          s.metricId
+            ? { id: s.metricId, label: s.name, value: sectionScores[idx].scoreOutOfFive * 2 }
+            : null,
+        )
+        .filter(Boolean) as Array<{ id: string; label: string; value: number }>;
+      return updateHealthBlock(accountId, area, overallOutOfFive * 2, metricUpdates, sections);
+    },
+    onSuccess: () => {
+      router.invalidate();
+      onClose();
+    },
+  });
 
   return (
     <div
@@ -750,12 +895,23 @@ function KpiEditorModal({
           <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
             Scoring is dynamic · checked weights ÷ total weight × 5
           </p>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md hover:opacity-90 transition-opacity"
-          >
-            Done
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => saveKpi()}
+              disabled={savingKpi || !editable}
+              className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:opacity-90 transition-opacity"
+            >
+              {savingKpi
+                ? <><Loader2 className="size-3 animate-spin" /> Saving…</>
+                : <><CheckCircle2 className="size-3" /> Save & Close</>}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -845,10 +1001,12 @@ function ResourceHealthBlock({ account }: { account: Account }) {
 
 /* ============================== TAB 3: Activity to Increase Score ============================== */
 
-function ActivityTab({ account }: { account: Account }) {
+function ActivityTab({ account, opportunities }: { account: Account; opportunities: Opportunity[] }) {
+  const { profile } = useAuth();
+  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
   const ragColor: Record<string, string> = { R: "bg-crit", A: "bg-warn", G: "bg-success" };
   const areas = ["Profit", "Project", "Resource", "Financial", "Relationship"] as const;
-  const accountOpportunities = getOpportunities(account.id);
+  const accountOpportunities = opportunities;
   return (
     <div className="space-y-6">
       {/* Opportunities — new signals KAM can crack */}
@@ -891,7 +1049,7 @@ function ActivityTab({ account }: { account: Account }) {
                     +{formatCurrency(o.potential)}
                   </span>
                   <button
-                    disabled={!canEdit(account.id)}
+                    disabled={!editable}
                     className="text-[10px] font-bold uppercase tracking-wider text-accent disabled:opacity-40 whitespace-nowrap"
                   >
                     Pursue →
@@ -941,7 +1099,7 @@ function ActivityTab({ account }: { account: Account }) {
             </p>
           </div>
           <button
-            disabled={!canEdit(account.id)}
+            disabled={!editable}
             className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40"
           >
             Re-run extraction
@@ -965,7 +1123,7 @@ function ActivityTab({ account }: { account: Account }) {
                 {it.lift}
               </span>
               <button
-                disabled={!canEdit(account.id)}
+                disabled={!editable}
                 className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40 whitespace-nowrap"
               >
                 + Add
@@ -982,7 +1140,7 @@ function ActivityTab({ account }: { account: Account }) {
             <p className="text-[11px] text-muted-foreground">Improvement actions for profit, project, resource, financial & relationship health</p>
           </div>
           <div className="flex flex-col items-end gap-1">
-            <button disabled={!canEdit(account.id)} className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40">
+            <button disabled={!editable} className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40">
               + Add Activity
             </button>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
@@ -1031,6 +1189,8 @@ function ActivityTab({ account }: { account: Account }) {
 /* ============================== TAB 4: Retention VS Growth ============================== */
 
 function RetentionGrowthTab({ account }: { account: Account }) {
+  const { profile } = useAuth();
+  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
   const delivered = account.retentionGrowth.filter((s) => s.delivered);
   const offeredNotDelivered = account.retentionGrowth.filter((s) => s.offered && !s.delivered);
   const whiteSpace = account.retentionGrowth.filter((s) => !s.offered && s.applicable);
@@ -1076,7 +1236,7 @@ function RetentionGrowthTab({ account }: { account: Account }) {
                   <p className="text-sm font-semibold">{s.service}</p>
                   <p className="text-[11px] text-muted-foreground">{s.trackingNote}</p>
                 </div>
-                <button disabled={!canEdit(account.id)} className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40">
+                <button disabled={!editable} className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40">
                   Plan pitch →
                 </button>
               </li>
@@ -1124,6 +1284,8 @@ function RetentionGrowthTab({ account }: { account: Account }) {
 /* ============================== TAB 5: Educate client ============================== */
 
 function EducateTab({ account }: { account: Account }) {
+  const { profile } = useAuth();
+  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <div className="lg:col-span-2 space-y-6">
@@ -1169,11 +1331,11 @@ function EducateTab({ account }: { account: Account }) {
           Recommended approach: 30-min exec brief + 1-pager. Store outcome in Education History.
         </p>
         <div className="flex flex-col gap-2 pt-1">
-          <button disabled={!canEdit(account.id)} className="px-4 py-2 bg-white text-primary text-xs font-bold rounded-md disabled:opacity-40">
+          <button disabled={!editable} className="px-4 py-2 bg-white text-primary text-xs font-bold rounded-md disabled:opacity-40">
             Schedule Session
           </button>
           <button
-            disabled={!canEdit(account.id)}
+            disabled={!editable}
             className="px-4 py-2 bg-[#25D366] text-white text-xs font-bold rounded-md disabled:opacity-40 flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
           >
             <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" aria-hidden="true">
@@ -1189,7 +1351,7 @@ function EducateTab({ account }: { account: Account }) {
 
 /* ============================== TAB 6: Escalation ============================== */
 
-function EscalationsTab({ list }: { list: typeof escalations }) {
+function EscalationsTab({ list }: { list: Escalation[] }) {
   if (!list.length) {
     return (
       <div className="bg-card border rounded-xl p-12 text-center">

@@ -4,12 +4,16 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
+  useNavigate,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
+import { useEffect } from "react";
 
 import appCss from "../styles.css?url";
 import { AppSidebar } from "@/components/layout/AppSidebar";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
 
 function NotFoundComponent() {
   return (
@@ -125,12 +129,42 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <div className="min-h-screen flex w-full bg-background text-foreground">
-        <AppSidebar />
-        <main className="flex-1 min-w-0 overflow-x-hidden pt-14 md:pt-0">
-          <Outlet />
-        </main>
-      </div>
+      <AuthProvider>
+        <AppShell />
+      </AuthProvider>
     </QueryClientProvider>
+  );
+}
+
+function AppShell() {
+  const { session, loading } = useAuth();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const navigate = useNavigate();
+  const isAuthPage = pathname === "/login";
+
+  useEffect(() => {
+    if (loading) return;
+    if (!session && !isAuthPage) navigate({ to: "/login" });
+    if (session && isAuthPage) navigate({ to: "/" });
+  }, [loading, session, isAuthPage]);
+
+  // Full-screen spinner while session is being resolved
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="size-6 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+      </div>
+    );
+  }
+
+  if (isAuthPage) return <Outlet />;
+
+  return (
+    <div className="min-h-screen flex w-full bg-background text-foreground">
+      <AppSidebar />
+      <main className="flex-1 min-w-0 overflow-x-hidden pt-14 md:pt-0">
+        <Outlet />
+      </main>
+    </div>
   );
 }

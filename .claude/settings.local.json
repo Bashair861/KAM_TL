@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:PATH = $env:PATH + \";C:\\\\Program Files\\\\Git\\\\cmd;C:\\\\Program Files\\\\Git\\\\bin\"; git --version)",
+      "PowerShell(Get-Command git -ErrorAction SilentlyContinue; \\(Get-ChildItem \"C:\\\\Program Files\\\\Git\" -Recurse -Filter \"git.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1\\).FullName)"
+    ]
+  }
+}

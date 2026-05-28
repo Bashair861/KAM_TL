@@ -1,5 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { accounts, formatCurrency } from "@/data/kam-data";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { formatCurrency } from "@/data/kam-data";
+import { fetchAccounts, fetchKamUsers, updateAccountKam } from "@/services/db";
+import { useAuth } from "@/context/AuthContext";
 import { TrendingDown, TrendingUp } from "lucide-react";
 
 export const Route = createFileRoute("/accounts/")({
@@ -13,12 +16,37 @@ export const Route = createFileRoute("/accounts/")({
 });
 
 function AccountsListPage() {
+  const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const userId = profile?.id;
+  const isHead = role === "Head of KAM" || role === "CEO";
+  const queryClient = useQueryClient();
+
+  const { data: accounts = [], isLoading } = useQuery({
+    queryKey: ["accounts", userId, role],
+    queryFn: () => fetchAccounts({ role, userId }),
+  });
+
+  const { data: kamUsers = [] } = useQuery({
+    queryKey: ["kamUsers"],
+    queryFn: fetchKamUsers,
+    enabled: isHead,
+  });
+
+  const { mutate: assignKam } = useMutation({
+    mutationFn: ({ accountId, kamId }: { accountId: string; kamId: string }) =>
+      updateAccountKam(accountId, kamId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+
   return (
     <div className="flex flex-col">
       <header className="h-16 bg-card border-b flex items-center justify-between px-8 sticky top-0 z-10">
         <div>
           <h1 className="font-semibold text-lg">Accounts Portfolio</h1>
-          <p className="text-xs text-muted-foreground">{accounts.length} active accounts · sorted by health</p>
+          <p className="text-xs text-muted-foreground">
+            {isLoading ? "Loading…" : `${accounts.length} active accounts · sorted by health`}
+          </p>
         </div>
         <div className="flex gap-2">
           <input
@@ -41,6 +69,7 @@ function AccountsListPage() {
                 <th className="px-6 py-3">Health</th>
                 <th className="px-6 py-3">Trend</th>
                 <th className="px-6 py-3">Contract</th>
+                <th className="px-6 py-3">Assigned KAM</th>
                 <th className="px-6 py-3 text-right">ARR</th>
                 <th className="px-6 py-3 text-right">Renewal</th>
                 <th className="px-6 py-3 text-right">Last Touch</th>
@@ -87,6 +116,24 @@ function AccountsListPage() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-xs">{a.contractType}</td>
+                  <td className="px-6 py-4">
+                    {isHead ? (
+                      <select
+                        value={a.assignedKamId ?? ""}
+                        onChange={(e) => assignKam({ accountId: a.id, kamId: e.target.value })}
+                        className="text-xs bg-card border rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
+                      >
+                        <option value="" disabled>— unassigned —</option>
+                        {kamUsers.map((u) => (
+                          <option key={u.id} value={u.id}>{u.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        {kamUsers.find((u) => u.id === a.assignedKamId)?.name ?? "—"}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-6 py-4 text-right font-semibold">{formatCurrency(a.arr)}</td>
                   <td className="px-6 py-4 text-right text-xs">
                     <span className={a.renewalDays < 30 ? "text-warn font-semibold" : "text-muted-foreground"}>

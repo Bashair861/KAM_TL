@@ -9,14 +9,16 @@ export type Stakeholder = {
 };
 
 export type SubScore = {
+  id?: string;   // health_metrics UUID — present when loaded from DB
   label: string;
   value: number; // 0-10
   hint?: string;
 };
 
 export type HealthBlock = {
-  score: number; // 0-10 overall
+  score: number;   // 0-10 overall
   metrics: SubScore[];
+  kpiData?: unknown; // persisted KpiSection[] JSON from health_scores.kpi_data
 };
 
 export type Activity = {
@@ -59,6 +61,7 @@ export type Account = {
   id: string;
   name: string;
   shortCode: string;
+  assignedKamId?: string | null;
   industry: string;
   tier: "Enterprise" | "Growth" | "Strategic";
   health: number;

@@ -1,5 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { escalations, getAccount } from "@/data/kam-data";
+import { useQuery } from "@tanstack/react-query";
+import { getAccount } from "@/data/kam-data";
+import { fetchEscalations } from "@/services/db";
+import type { Escalation } from "@/data/kam-data";
 import { CheckCircle2, Circle, Clock } from "lucide-react";
 
 export const Route = createFileRoute("/escalations")({
@@ -13,6 +16,8 @@ export const Route = createFileRoute("/escalations")({
 });
 
 function EscalationsPage() {
+  const { data: escalations = [] } = useQuery({ queryKey: ["escalations"], queryFn: () => fetchEscalations() });
+
   const columns: { title: string; status: "open" | "in_progress" | "resolved" }[] = [
     { title: "Triage (< 24h)", status: "open" },
     { title: "In Progress", status: "in_progress" },
@@ -81,7 +86,7 @@ function Kpi({ label, value, color }: { label: string; value: string; color: str
   );
 }
 
-function EscalationCard({ esc }: { esc: (typeof escalations)[number] }) {
+function EscalationCard({ esc }: { esc: Escalation }) {
   const acc = getAccount(esc.accountId);
   return (
     <div className="bg-card border rounded-lg p-4 hover:shadow-md transition-shadow">

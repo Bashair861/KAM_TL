@@ -1,6 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { accounts, portfolioTotals, formatCurrency, escalations, portfolioNews, openActionItems, getAccount, calendarSources, globalCalendar } from "@/data/kam-data";
+import { useQuery } from "@tanstack/react-query";
+import { formatCurrency, portfolioNews, openActionItems, getAccount, calendarSources, globalCalendar } from "@/data/kam-data";
+import { fetchAccounts, fetchEscalations } from "@/services/db";
 import { StatCard } from "@/components/shared/StatCard";
+import { useAuth } from "@/context/AuthContext";
 import { ArrowUpRight, TrendingUp, TrendingDown, AlertTriangle, Newspaper, ListChecks, UserPlus, UserCog, Calendar, Trophy, ShieldAlert, CalendarDays, Plus } from "lucide-react";
 
 export const Route = createFileRoute("/")({
@@ -14,8 +17,27 @@ export const Route = createFileRoute("/")({
 });
 
 function DashboardPage() {
+  const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const userId = profile?.id;
+  const { data: accounts = [], error: accountsError } = useQuery({ queryKey: ["accounts", userId, role], queryFn: () => fetchAccounts({ role, userId }) });
+  const { data: escalations = [] } = useQuery({ queryKey: ["escalations"], queryFn: () => fetchEscalations() });
+
+  const portfolioTotals = {
+    totalARR: accounts.reduce((s, a) => s + a.arr, 0),
+    atRiskARR: accounts.filter((a) => a.status !== "healthy").reduce((s, a) => s + a.arr, 0),
+    growthUpside: accounts.reduce((s, a) => s + a.growthUpside, 0),
+    avgHealth: accounts.length ? Math.round(accounts.reduce((s, a) => s + a.health, 0) / accounts.length) : 0,
+    activeEscalations: escalations.length,
+  };
+
   return (
     <div className="flex flex-col">
+      {accountsError && (
+        <div className="m-4 p-3 bg-crit/10 border border-crit/30 rounded-lg text-xs text-crit font-mono whitespace-pre-wrap">
+          DB error: {JSON.stringify(accountsError, null, 2)}
+        </div>
+      )}
       <header className="bg-card border-b flex flex-col md:flex-row md:h-16 md:items-center md:justify-between px-4 md:px-8 py-3 md:py-0 gap-2 sticky top-14 md:top-0 z-10">
         <div>
           <h1 className="font-semibold text-base md:text-lg">Portfolio Dashboard</h1>

@@ -13,7 +13,10 @@ import {
   Menu,
   X,
 } from "lucide-react";
-import { notifications as initialNotifications, currentUser, ROLE_PERMISSIONS, getAccount } from "@/data/kam-data";
+import { notifications as initialNotifications, ROLE_PERMISSIONS, getAccount } from "@/data/kam-data";
+import { useAuth } from "@/context/AuthContext";
+import { signOut } from "@/services/auth";
+import { LogOut } from "lucide-react";
 
 const items = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -26,11 +29,13 @@ const items = [
 
 export function AppSidebar() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
+  const { profile } = useAuth();
   const [notifs, setNotifs] = useState(initialNotifications);
   const [showNotifs, setShowNotifs] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const unread = notifs.filter((n) => !n.read).length;
-  const perms = ROLE_PERMISSIONS[currentUser.role];
+  const role = profile?.role ?? "KAM";
+  const perms = ROLE_PERMISSIONS[role];
 
   // close mobile drawer on navigation
   useEffect(() => {
@@ -127,24 +132,31 @@ export function AppSidebar() {
         })}
       </nav>
 
-      <div className="p-4 border-t border-white/10 space-y-3">
-        <button className="w-full flex items-center gap-3 px-3 py-2 text-xs text-slate-400 hover:text-white transition-colors">
+      <div className="p-4 border-t border-white/10 space-y-2">
+        <button className="w-full flex items-center gap-3 px-3 py-2 text-xs text-slate-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">
           <Settings className="size-4" /> Settings
         </button>
-        <div className="flex items-center gap-3 px-3">
-          <div className="size-8 rounded-full bg-accent/20 border border-accent/40 flex items-center justify-center text-[10px] text-white font-semibold">
-            {currentUser.initials}
+        <div className="flex items-center gap-3 px-3 py-1">
+          <div className="size-8 rounded-full bg-accent/20 border border-accent/40 flex items-center justify-center text-[10px] text-white font-semibold shrink-0">
+            {profile?.initials ?? "?"}
           </div>
           <div className="text-xs min-w-0 flex-1">
-            <p className="font-medium text-white truncate">{currentUser.name}</p>
+            <p className="font-medium text-white truncate">{profile?.name ?? "Loading…"}</p>
             <div className="flex items-center gap-1 text-slate-500">
               <Shield className="size-3" />
-              <span className="truncate">{currentUser.role}</span>
+              <span className="truncate">{role}</span>
               <span className={`ml-1 px-1 py-px rounded text-[9px] font-bold uppercase ${perms.write ? "bg-success/20 text-success" : "bg-muted/20 text-slate-300"}`}>
                 {perms.write ? "RW" : "RO"}
               </span>
             </div>
           </div>
+          <button
+            onClick={() => signOut()}
+            title="Sign out"
+            className="shrink-0 size-7 rounded-md hover:bg-white/10 flex items-center justify-center text-slate-500 hover:text-crit transition-colors"
+          >
+            <LogOut className="size-3.5" />
+          </button>
         </div>
       </div>
     </>

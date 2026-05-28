@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as StrategyRouteImport } from './routes/strategy'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as EscalationsRouteImport } from './routes/escalations'
 import { Route as EducateRouteImport } from './routes/educate'
 import { Route as ContractsRouteImport } from './routes/contracts'
@@ -20,6 +21,11 @@ import { Route as AccountsAccountIdRouteImport } from './routes/accounts.$accoun
 const StrategyRoute = StrategyRouteImport.update({
   id: '/strategy',
   path: '/strategy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EscalationsRoute = EscalationsRouteImport.update({
@@ -58,6 +64,7 @@ export interface FileRoutesByFullPath {
   '/contracts': typeof ContractsRoute
   '/educate': typeof EducateRoute
   '/escalations': typeof EscalationsRoute
+  '/login': typeof LoginRoute
   '/strategy': typeof StrategyRoute
   '/accounts/$accountId': typeof AccountsAccountIdRoute
   '/accounts/': typeof AccountsIndexRoute
@@ -67,6 +74,7 @@ export interface FileRoutesByTo {
   '/contracts': typeof ContractsRoute
   '/educate': typeof EducateRoute
   '/escalations': typeof EscalationsRoute
+  '/login': typeof LoginRoute
   '/strategy': typeof StrategyRoute
   '/accounts/$accountId': typeof AccountsAccountIdRoute
   '/accounts': typeof AccountsIndexRoute
@@ -77,6 +85,7 @@ export interface FileRoutesById {
   '/contracts': typeof ContractsRoute
   '/educate': typeof EducateRoute
   '/escalations': typeof EscalationsRoute
+  '/login': typeof LoginRoute
   '/strategy': typeof StrategyRoute
   '/accounts/$accountId': typeof AccountsAccountIdRoute
   '/accounts/': typeof AccountsIndexRoute
@@ -88,6 +97,7 @@ export interface FileRouteTypes {
     | '/contracts'
     | '/educate'
     | '/escalations'
+    | '/login'
     | '/strategy'
     | '/accounts/$accountId'
     | '/accounts/'
@@ -97,6 +107,7 @@ export interface FileRouteTypes {
     | '/contracts'
     | '/educate'
     | '/escalations'
+    | '/login'
     | '/strategy'
     | '/accounts/$accountId'
     | '/accounts'
@@ -106,6 +117,7 @@ export interface FileRouteTypes {
     | '/contracts'
     | '/educate'
     | '/escalations'
+    | '/login'
     | '/strategy'
     | '/accounts/$accountId'
     | '/accounts/'
@@ -116,6 +128,7 @@ export interface RootRouteChildren {
   ContractsRoute: typeof ContractsRoute
   EducateRoute: typeof EducateRoute
   EscalationsRoute: typeof EscalationsRoute
+  LoginRoute: typeof LoginRoute
   StrategyRoute: typeof StrategyRoute
   AccountsAccountIdRoute: typeof AccountsAccountIdRoute
   AccountsIndexRoute: typeof AccountsIndexRoute
@@ -128,6 +141,13 @@ declare module '@tanstack/react-router' {
       path: '/strategy'
       fullPath: '/strategy'
       preLoaderRoute: typeof StrategyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/escalations': {
@@ -180,6 +200,7 @@ const rootRouteChildren: RootRouteChildren = {
   ContractsRoute: ContractsRoute,
   EducateRoute: EducateRoute,
   EscalationsRoute: EscalationsRoute,
+  LoginRoute: LoginRoute,
   StrategyRoute: StrategyRoute,
   AccountsAccountIdRoute: AccountsAccountIdRoute,
   AccountsIndexRoute: AccountsIndexRoute,
