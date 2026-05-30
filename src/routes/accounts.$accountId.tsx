@@ -3,7 +3,8 @@ import { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Account, Escalation, HealthBlock, SubScore, Opportunity } from "@/data/kam-data";
 import { ROLE_PERMISSIONS, formatCurrency } from "@/data/kam-data";
-import { fetchAccount, fetchEscalations, fetchOpportunities, fetchKamUsers, updateAccountKam, updateAccountKyc, updateHealthBlock } from "@/services/db";
+import { fetchAccount, fetchEscalations, fetchOpportunities, fetchKamUsers, updateAccountKam, updateAccountKyc, updateHealthBlock, fetchAccountHistory, logAccountChanges } from "@/services/db";
+import type { HistoryEntry } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft,
@@ -65,6 +66,7 @@ const TABS = [
   "Retention VS Growth",
   "Educate client",
   "Escalation",
+  "Client History",
 ] as const;
 type Tab = (typeof TABS)[number];
 
@@ -197,6 +199,7 @@ function AccountDetailPage() {
           {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} />}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
+          {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
         </div>
       </div>
     </div>
@@ -221,7 +224,16 @@ function OverviewTab({ account }: { account: Account }) {
   const [assignedKamId, setAssignedKamId] = useState<string | null>(account.assignedKamId ?? null);
 
   const { mutate: assignKam } = useMutation({
-    mutationFn: (kamId: string) => updateAccountKam(account.id, kamId),
+    mutationFn: async (kamId: string) => {
+      const oldName = kamUsers.find((u) => u.id === assignedKamId)?.name ?? "Unassigned";
+      const newName = kamUsers.find((u) => u.id === kamId)?.name ?? kamId;
+      await updateAccountKam(account.id, kamId);
+      await logAccountChanges(
+        account.id,
+        [{ field: "Assigned KAM", oldValue: oldName, newValue: newName }],
+        profile?.name ?? "Unknown",
+      );
+    },
     onSuccess: (_, kamId) => {
       setAssignedKamId(kamId);
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
@@ -256,10 +268,17 @@ function OverviewTab({ account }: { account: Account }) {
     return () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); };
   }, [showSaved]);
 
+  const KYC_LABELS: Record<string, string> = {
+    industry: "Industry Info", business: "Business Info", history: "Client History Notes",
+    revenue: "Revenue Info", mrrArr: "MRR / ARR", primary: "Primary Contact",
+    tenure: "Engagement Tenure", team: "Team Size", competitors: "Competitors",
+    flow: "Main Business Flow",
+  };
+
   const { mutate: saveKyc, isPending: savingKyc } = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const teamNum = parseInt(fields.team);
-      return updateAccountKyc(account.id, {
+      await updateAccountKyc(account.id, {
         industry: fields.industry,
         business_info: fields.business,
         client_history: fields.history,
@@ -271,6 +290,10 @@ function OverviewTab({ account }: { account: Account }) {
         competitors: fields.competitors.split(",").map((s) => s.trim()).filter(Boolean),
         main_business_flow: fields.flow,
       });
+      const diffs = (Object.keys(fields) as Array<keyof typeof fields>)
+        .filter((k) => fields[k] !== savedSnapshot[k])
+        .map((k) => ({ field: KYC_LABELS[k] ?? k, oldValue: savedSnapshot[k], newValue: fields[k] }));
+      await logAccountChanges(account.id, diffs, profile?.name ?? "Unknown");
     },
     onSuccess: () => {
       setSavedSnapshot({ ...fields });
@@ -689,6 +712,7 @@ function KpiEditorModal({
 }) {
   const { profile } = useAuth();
   const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
+  const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
 
   // Load from persisted kpiData if available, otherwise seed from metrics.
@@ -750,7 +774,8 @@ function KpiEditorModal({
       : 0;
 
   const { mutate: saveKpi, isPending: savingKpi } = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
+      const newScore = overallOutOfFive * 2;
       const metricUpdates = sections
         .map((s, idx) =>
           s.metricId
@@ -758,7 +783,12 @@ function KpiEditorModal({
             : null,
         )
         .filter(Boolean) as Array<{ id: string; label: string; value: number }>;
-      return updateHealthBlock(accountId, area, overallOutOfFive * 2, metricUpdates, sections);
+      await updateHealthBlock(accountId, area, newScore, metricUpdates, sections);
+      await logAccountChanges(
+        accountId,
+        [{ field: `Score: ${title}`, oldValue: block.score.toFixed(1), newValue: newScore.toFixed(1) }],
+        editorUser,
+      );
     },
     onSuccess: () => {
       router.invalidate();
@@ -1439,6 +1469,99 @@ function EscalationsTab({ list }: { list: Escalation[] }) {
       ))}
     </div>
   );
+}
+
+/* ============================== TAB 7: Client History ============================== */
+
+function ClientHistoryTab({ accountId }: { accountId: string }) {
+  const { data: history = [], isLoading } = useQuery({
+    queryKey: ["account-history", accountId],
+    queryFn: () => fetchAccountHistory(accountId),
+  });
+
+  if (isLoading) {
+    return <div className="py-16 text-center text-xs text-muted-foreground">Loading history…</div>;
+  }
+
+  if (history.length === 0) {
+    return (
+      <div className="bg-card border rounded-xl p-12 text-center">
+        <Clock className="size-6 text-muted-foreground mx-auto mb-2" />
+        <p className="text-sm text-muted-foreground">No changes recorded yet.</p>
+        <p className="text-[11px] text-muted-foreground mt-1">
+          Every time a KYC field, KAM assignment, or score is updated, it will appear here.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-card border rounded-xl overflow-hidden">
+      <div className="px-6 py-4 border-b">
+        <h3 className="text-sm font-bold">Change Log</h3>
+        <p className="text-[11px] text-muted-foreground mt-0.5">
+          All edits to this account — most recent first.
+        </p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm text-left min-w-[640px]">
+          <thead>
+            <tr className="bg-muted/30 border-b text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              <th className="px-6 py-3">Field</th>
+              <th className="px-6 py-3">Old Value</th>
+              <th className="px-6 py-3">New Value</th>
+              <th className="px-6 py-3">Edited By</th>
+              <th className="px-6 py-3 text-right">Time</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {history.map((entry) => (
+              <HistoryRow key={entry.id} entry={entry} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function HistoryRow({ entry }: { entry: HistoryEntry }) {
+  return (
+    <tr className="hover:bg-muted/20 transition-colors align-top">
+      <td className="px-6 py-3 text-xs font-semibold whitespace-nowrap">{entry.fieldName}</td>
+      <td className="px-6 py-3 text-xs text-muted-foreground max-w-[200px]">
+        <span className="line-clamp-2 block">{entry.oldValue ?? <span className="italic">—</span>}</span>
+      </td>
+      <td className="px-6 py-3 text-xs text-foreground max-w-[200px]">
+        <span className="line-clamp-2 block">{entry.newValue ?? <span className="italic">—</span>}</span>
+      </td>
+      <td className="px-6 py-3 text-xs font-medium whitespace-nowrap">
+        <div className="flex items-center gap-1.5">
+          <div className="size-5 rounded-full bg-accent/10 text-accent flex items-center justify-center text-[9px] font-bold shrink-0">
+            {entry.editedBy.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase()}
+          </div>
+          {entry.editedBy}
+        </div>
+      </td>
+      <td className="px-6 py-3 text-right text-[11px] text-muted-foreground whitespace-nowrap">
+        {formatHistoryTime(entry.editedAt)}
+      </td>
+    </tr>
+  );
+}
+
+function formatHistoryTime(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const mins = Math.floor(diffMs / 60_000);
+  const hours = Math.floor(diffMs / 3_600_000);
+  const days = Math.floor(diffMs / 86_400_000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  if (days < 7) return `${days}d ago`;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 /* ============================== Shared atoms ============================== */

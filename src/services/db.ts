@@ -319,6 +319,91 @@ export async function fetchOpportunities(accountId?: string): Promise<Opportunit
   }));
 }
 
+// ─── fetch contracts (accounts + contract_details joined) ────────────────────
+
+export type ContractRow = FlatAccount & {
+  duration: string;
+  autoRenew: boolean;
+  nonTerminator: boolean;
+  priceHike: string;
+};
+
+export async function fetchContracts(opts?: { role?: string; userId?: string }): Promise<ContractRow[]> {
+  let q = supabase
+    .from("accounts")
+    .select("*, contract_details(duration, auto_renew, non_terminator, price_hike)");
+
+  if (opts?.role === "KAM" && opts.userId) {
+    q = q.eq("assigned_kam_id", opts.userId);
+  }
+
+  const { data, error } = await q;
+  if (error) throw error;
+
+  return (data ?? []).map((row) => {
+    const cd = (row.contract_details as Array<{
+      duration: string;
+      auto_renew: boolean;
+      non_terminator: boolean;
+      price_hike: string;
+    }> | null)?.[0];
+
+    return {
+      ...mapFlatAccount(row as Record<string, unknown>),
+      duration: cd?.duration ?? "—",
+      autoRenew: cd?.auto_renew ?? false,
+      nonTerminator: cd?.non_terminator ?? false,
+      priceHike: cd?.price_hike ?? "—",
+    };
+  });
+}
+
+// ─── account history (audit log) ─────────────────────────────────────────────
+
+export type HistoryEntry = {
+  id: string;
+  fieldName: string;
+  oldValue: string | null;
+  newValue: string | null;
+  editedBy: string;
+  editedAt: string;
+};
+
+export async function fetchAccountHistory(accountId: string): Promise<HistoryEntry[]> {
+  const { data, error } = await supabase
+    .from("account_history")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("edited_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((h) => ({
+    id: h.id as string,
+    fieldName: h.field_name as string,
+    oldValue: h.old_value as string | null,
+    newValue: h.new_value as string | null,
+    editedBy: h.edited_by as string,
+    editedAt: h.edited_at as string,
+  }));
+}
+
+export async function logAccountChanges(
+  accountId: string,
+  changes: Array<{ field: string; oldValue: string; newValue: string }>,
+  editedBy: string,
+): Promise<void> {
+  if (changes.length === 0) return;
+  const { error } = await supabase.from("account_history").insert(
+    changes.map((c) => ({
+      account_id: accountId,
+      field_name: c.field,
+      old_value: c.oldValue,
+      new_value: c.newValue,
+      edited_by: editedBy,
+    })),
+  );
+  if (error) throw error;
+}
+
 // ─── fetch notifications ──────────────────────────────────────────────────────
 
 export async function fetchNotifications(): Promise<Notification[]> {
