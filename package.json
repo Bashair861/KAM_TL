@@ -1,5 +1,5 @@
 {
-  "name": "tanstack_start_ts",
+  "name": "tanstack_start_js",
   "private": true,
   "sideEffects": false,
   "type": "module",
@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "seed": "tsx src/db/seed.ts"
+    "seed": "node src/db/seed.js"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.25.5",
