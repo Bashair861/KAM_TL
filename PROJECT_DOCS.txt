@@ -1,0 +1,392 @@
+================================================================================
+  AETHER KAM — PROJECT DOCUMENTATION
+  Purpose: Technical reference for database, configs, setup, and architecture.
+  Keep this file updated after every major phase.
+  Last updated: Phase 2 — Auth Backend Complete
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. TECH STACK VERSIONS
+────────────────────────────────────────────────────────────────────────────────
+React                    19.2.0
+TypeScript               5.8.3
+Vite                     7.3.1
+TanStack Router          1.168.25
+TanStack Start           1.167.50
+TanStack React Query     5.83.0
+@supabase/supabase-js    2.50.2
+Tailwind CSS             4.2.1
+Lucide React             0.575.0
+tsx                      4.22.3  (runs .ts scripts in Node.js)
+dotenv                   17.4.2  (used in seed.ts)
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. ENVIRONMENT VARIABLES
+────────────────────────────────────────────────────────────────────────────────
+File: .env  (root of project, gitignored — NEVER commit to git)
+
+  VITE_SUPABASE_URL=https://ogkxkfhigejggnoobypk.supabase.co
+  VITE_SUPABASE_ANON_KEY=sb_publishable_m_Mu_xwMRxt6KVk8LFZ2Rw_RoD0TODA
+  SUPABASE_SERVICE_ROLE_KEY=sb_secret_97DMfBbEE-oww-Ts5DJa_A_zd8Xezq1
+
+Rules:
+  - VITE_ prefix = exposed to browser. OK for anon/publishable keys only.
+  - No VITE_ prefix = server/Node.js only. Required for service role key.
+  - Service role key bypasses all RLS. It is only used in src/db/seed.ts.
+  - Never add the service role key to any VITE_ variable.
+
+How env vars are consumed:
+  - Browser (app):   src/lib/supabase.ts reads VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
+  - Seed script:     src/db/seed.ts reads SUPABASE_SERVICE_ROLE_KEY via process.env
+                     (falls back to VITE_SUPABASE_ANON_KEY if service key absent)
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. SUPABASE PROJECT
+────────────────────────────────────────────────────────────────────────────────
+Provider:      Supabase (free tier)
+Project URL:   https://ogkxkfhigejggnoobypk.supabase.co
+Dashboard:     https://supabase.com/dashboard/project/ogkxkfhigejggnoobypk
+Database:      PostgreSQL (hosted by Supabase)
+Auth:          Supabase Auth (email + password, signInWithPassword)
+Storage:       Not used
+Realtime:      Not used (yet)
+
+Connection from app:
+  File: src/lib/supabase.ts
+  -------------------------------------------------------
+  import { createClient } from "@supabase/supabase-js";
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  -------------------------------------------------------
+  This single client instance is imported everywhere in the app.
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. DATABASE SCHEMA
+────────────────────────────────────────────────────────────────────────────────
+Full schema file: src/db/schema.sql
+Run in: Supabase SQL Editor (Project → SQL Editor → New query → paste → Run)
+
+13 TABLES:
+
+┌─────────────────────┬────────────────────────────────────────────────────────┐
+│ Table               │ Description                                            │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ profiles            │ App users: id (UUID), name, initials, role, email      │
+│ accounts            │ Client accounts (core table, ~40 columns)              │
+│ stakeholders        │ Contacts at each account                               │
+│ health_scores       │ One row per (account, health_area) with a score        │
+│ health_metrics      │ Individual metric rows under each health_score         │
+│ contract_details    │ Contract specifics + SWOT per account                  │
+│ activities          │ Tasks/activities per account (area, RAG, owner, due)   │
+│ retention_growth    │ Services: delivered / offered / white-space / N/A      │
+│ education_log       │ Education history per account                          │
+│ escalations         │ Escalation tickets with priority + status              │
+│ escalation_action_items │ Sub-tasks under each escalation                    │
+│ opportunities       │ Growth opportunities surfaced for accounts             │
+│ notifications       │ In-app notification records                            │
+└─────────────────────┴────────────────────────────────────────────────────────┘
+
+ENUMS (PostgreSQL custom types):
+  account_status    → 'healthy' | 'at-risk' | 'critical'
+  retention_risk    → 'Low' | 'Medium' | 'High'
+  contract_type     → 'Staff Augmented' | 'Time Based' | 'Retainer' | 'Project'
+  account_tier      → 'Enterprise' | 'Growth' | 'Strategic'
+  influence_type    → 'Champion' | 'Decision Maker' | 'Influencer' | 'Blocker'
+  health_area       → 'relationship' | 'project' | 'white_space' | 'contract'
+                      | 'csat' | 'risk' | 'resource' | 'financial'
+  activity_area     → 'Relationship' | 'Project' | 'Resource' | 'Financial' | 'Profit'
+  activity_status   → 'Open' | 'In Progress' | 'Done'
+  rag_status        → 'R' | 'A' | 'G'
+  priority_level    → 'P1' | 'P2' | 'P3'
+  notif_type        → 'action' | 'alert' | 'info'
+  confidence_level  → 'Low' | 'Medium' | 'High'
+  user_role         → 'CEO' | 'Head of KAM' | 'KAM'
+
+KEY RELATIONSHIPS:
+  stakeholders.account_id         → accounts.id   (cascade delete)
+  health_scores.account_id        → accounts.id   (cascade delete)
+  health_metrics.health_score_id  → health_scores.id (cascade delete)
+  contract_details.account_id     → accounts.id   (unique, cascade delete)
+  activities.account_id           → accounts.id   (cascade delete)
+  retention_growth.account_id     → accounts.id   (cascade delete)
+  education_log.account_id        → accounts.id   (cascade delete)
+  escalations.account_id          → accounts.id   (cascade delete)
+  escalation_action_items.escalation_id → escalations.id (cascade delete)
+  opportunities.account_id        → accounts.id   (cascade delete)
+  notifications.account_id        → accounts.id   (nullable, no FK constraint)
+
+NOTE: profiles.id is a plain UUID primary key. It is manually set during seed
+(static values) and should be updated to match real Supabase Auth user UUIDs
+after creating users. The app handles the mismatch by falling back to email
+lookup in AuthContext.tsx.
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. ROW LEVEL SECURITY (RLS)
+────────────────────────────────────────────────────────────────────────────────
+RLS is ENABLED on all 13 tables.
+Current policies: public SELECT (anon + authenticated can read all rows)
+Write policies: NOT YET CREATED (Phase 3 will add INSERT/UPDATE policies)
+
+How to enable RLS + add read policies:
+  Run src/db/enable-rls.sql in Supabase SQL Editor.
+  This script does: ALTER TABLE ... ENABLE ROW LEVEL SECURITY
+  + CREATE POLICY "public read" ON <table> FOR SELECT USING (true)
+
+Additional grants (run src/db/grant-read.sql):
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO anon;
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated;
+
+Without RLS enabled + policies: the anon key returns 0 rows (blocked).
+Without RLS at all: Supabase shows critical security warnings in dashboard.
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. SQL SCRIPTS (src/db/)
+────────────────────────────────────────────────────────────────────────────────
+schema.sql
+  Purpose:  Create all tables, enums, and constraints.
+  Run:      Supabase SQL Editor. Run once per fresh setup.
+  Notes:    Uses CREATE TABLE IF NOT EXISTS — safe to run multiple times
+            but does NOT add new columns if table already exists.
+            If schema changes, run reset.sql first then re-run schema.sql.
+
+reset.sql
+  Purpose:  Drop all 13 tables and all enums in correct dependency order.
+  Run:      Supabase SQL Editor. Run BEFORE schema.sql when resetting DB.
+  WARNING:  Destroys all data. Only use during dev/reset.
+
+enable-rls.sql
+  Purpose:  Enable RLS + add public SELECT policy on every table.
+  Run:      Supabase SQL Editor. Run once after schema.sql.
+  Safe:     Uses CREATE POLICY IF NOT EXISTS pattern.
+
+grant-read.sql
+  Purpose:  Grant SELECT privilege to anon + authenticated roles.
+  Run:      Supabase SQL Editor. Run once after enable-rls.sql.
+
+seed.ts
+  Purpose:  Populate DB with all mock data (idempotent via upsert).
+  Run:      npm run seed  (requires .env with SUPABASE_SERVICE_ROLE_KEY)
+  Notes:    Uses service role key to bypass RLS.
+            Uses upsert with onConflict: "id" so re-running is safe.
+            Inserts: 2 profiles, 5 accounts, 11 stakeholders, 40 health_scores,
+            ~150 health_metrics, 5 contract_details, 14 activities,
+            20 retention_growth, 6 education_log, 3 escalations,
+            8 escalation_action_items, 5 opportunities, 5 notifications.
+
+add-kam-assignment.sql
+  Purpose:  Adds assigned_kam_id column to accounts, sets initial assignments,
+            adds RLS UPDATE policy so authenticated users can reassign.
+  Run:      Supabase SQL Editor. Run ONCE. Then re-run npm run seed.
+  Assignments: Julian (axiom, cloudpeak, northwind) / Maya (starlight, vertex)
+  RULE:     Head of KAM assigns to KAM-role users only. fetchKamUsers() enforces
+            this by querying profiles WHERE role = 'KAM'.
+
+setup-auth.sql
+  Purpose:  Link real Supabase Auth users to profile rows.
+  Run:      Supabase SQL Editor. Run AFTER creating auth users in dashboard.
+  What it does:
+    1. Installs a trigger on auth.users: auto-creates a profile row whenever
+       a new Supabase Auth user is created (useful for future sign-ups).
+    2. UPDATE statements to set correct name/initials/role for the 2 seeded
+       users (julian@aether.io → Julian Drake / Head of KAM,
+       maya@aether.io → Maya Lin / KAM).
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. DATA SERVICE LAYER (src/services/db.ts)
+────────────────────────────────────────────────────────────────────────────────
+All Supabase queries are centralised here. Components never call supabase directly.
+
+Exported functions:
+
+  fetchAccounts()
+    → Returns FlatAccount[] (all accounts, flat shape for list views)
+    → Used on: dashboard, accounts list, contracts, strategy, escalations pages
+
+  fetchAccount(id: string)
+    → Returns Account | null (full shape with all nested data)
+    → Uses Promise.all for 7 parallel queries (accounts, stakeholders,
+      health_scores+metrics, contract_details, activities, retention_growth,
+      education_log)
+    → Used on: accounts.$accountId.tsx (via TanStack Router loader)
+
+  fetchEscalations(accountId?: string)
+    → Returns Escalation[] (optionally filtered by account)
+    → Includes nested escalation_action_items via select('*, escalation_action_items(*)')
+    → Used on: escalations page + account detail escalation tab
+
+  fetchOpportunities(accountId?: string)
+    → Returns Opportunity[] (optionally filtered by account)
+    → Used on: account detail activity tab
+
+  fetchNotifications()
+    → Returns Notification[]
+    → Not yet wired to UI (sidebar still uses static mock data)
+
+Mapper pattern:
+  mapFlatAccount()  converts snake_case DB columns → camelCase TypeScript types
+  mapHealthBlock()  converts health_scores + health_metrics rows → HealthBlock shape
+  These mappers let the UI components remain unchanged (they expect camelCase types
+  defined in src/data/kam-data.ts).
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. AUTHENTICATION (src/context/AuthContext.tsx + src/services/auth.ts)
+────────────────────────────────────────────────────────────────────────────────
+Auth provider:  Supabase Auth (email + password)
+Auth method:    supabase.auth.signInWithPassword({ email, password })
+
+AuthContext provides:
+  session: Session | null    ← Supabase session object
+  profile: Profile | null    ← Row from profiles table
+  loading: boolean           ← true until first getSession() resolves
+
+Profile type:
+  { id: string, name: string, initials: string, role: Role, email: string | null }
+
+Profile loading logic (loadProfile function):
+  1. Try: SELECT * FROM profiles WHERE id = <auth user UUID>
+  2. If no row found, fallback: SELECT * FROM profiles WHERE email = <auth email>
+  Reason for fallback: seeded profiles have static hardcoded UUIDs that won't
+  match real Supabase Auth user UUIDs. Fallback ensures the app works without
+  needing to manually update profile UUIDs in the DB.
+
+Route protection (AppShell in __root.tsx):
+  - useEffect watches [loading, session, isAuthPage]
+  - Unauthenticated + not on /login → navigate to /login
+  - Authenticated + on /login → navigate to /
+  - While loading → full-screen spinner (prevents flash of wrong content)
+
+Sign out:
+  - AppSidebar has a LogOut icon button that calls signOut() from auth.ts
+  - signOut() calls supabase.auth.signOut()
+  - AuthContext's onAuthStateChange listener picks it up and clears session/profile
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. ROUTING (TanStack Router — file-based)
+────────────────────────────────────────────────────────────────────────────────
+Routes are defined by files in src/routes/.
+
+Route structure:
+  /           → src/routes/index.tsx          (Dashboard)
+  /login      → src/routes/login.tsx          (Login page, no sidebar)
+  /accounts   → src/routes/accounts.index.tsx (Accounts portfolio list)
+  /accounts/:accountId → src/routes/accounts.$accountId.tsx (Client 360 detail)
+  /contracts  → src/routes/contracts.tsx
+  /strategy   → src/routes/strategy.tsx
+  /escalations → src/routes/escalations.tsx
+  /educate    → src/routes/educate.tsx
+  __root.tsx  → Root layout (wraps everything)
+
+Account detail uses a TanStack Router loader for SSR-compatible data fetching:
+  loader: async ({ params }) => {
+    const account = await fetchAccount(params.accountId);
+    if (!account) throw notFound();
+    return { account };
+  }
+  Component reads it via: Route.useLoaderData() as { account: Account }
+
+All other pages use useQuery (TanStack Query) for client-side fetching.
+
+Layout:
+  Login page:  No sidebar. Full-screen form.
+  All other pages: Sidebar (AppSidebar) + main content area.
+  Mobile: Sidebar becomes a slide-over drawer triggered by hamburger button.
+
+
+────────────────────────────────────────────────────────────────────────────────
+10. NPM SCRIPTS
+────────────────────────────────────────────────────────────────────────────────
+npm run dev       → Start Vite dev server (http://localhost:5173 or similar)
+npm run build     → Production build
+npm run preview   → Preview production build locally
+npm run seed      → Run src/db/seed.ts via tsx (populate Supabase DB)
+npm run lint      → ESLint
+npm run format    → Prettier
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. HOW TO SET UP FROM SCRATCH
+────────────────────────────────────────────────────────────────────────────────
+Step 1: Install dependencies
+  npm install
+
+Step 2: Create .env file in project root
+  VITE_SUPABASE_URL=<your supabase project URL>
+  VITE_SUPABASE_ANON_KEY=<your anon/publishable key>
+  SUPABASE_SERVICE_ROLE_KEY=<your service role/secret key>
+
+Step 3: Set up Supabase database
+  - Go to Supabase Dashboard → SQL Editor
+  - Run src/db/reset.sql (clears existing tables if any)
+  - Run src/db/schema.sql (creates all tables + enums)
+  - Run src/db/enable-rls.sql (enables RLS + SELECT policies)
+  - Run src/db/grant-read.sql (grants read to anon + authenticated)
+
+Step 4: Seed the database
+  npm run seed
+
+Step 5: Create auth users
+  - Supabase Dashboard → Authentication → Users → Add user
+  - Create: julian@aether.io (set any password)
+  - Create: maya@aether.io (set any password)
+
+Step 6: Link auth users to profiles
+  - Run src/db/setup-auth.sql in Supabase SQL Editor
+
+Step 7: Run the app
+  npm run dev
+
+
+────────────────────────────────────────────────────────────────────────────────
+12. SEEDED DATA REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+5 accounts (text IDs, not UUIDs):
+  starlight  → Starlight Dynamics     (Enterprise, health 78, at-risk)
+  axiom      → Axiom Technologies     (Strategic, health 91, healthy)
+  vertex     → Vertex Manufacturing   (Growth, health 54, critical)
+  cloudpeak  → CloudPeak Solutions    (Growth, health 85, healthy)
+  northwind  → NorthWind Financial    (Enterprise, health 67, at-risk)
+
+2 profiles (static UUIDs):
+  00000000-0000-0000-0000-000000000001 → Julian Drake, Head of KAM, julian@aether.io
+  00000000-0000-0000-0000-000000000002 → Maya Lin, KAM, maya@aether.io
+
+3 escalations:
+  esc-001 → Starlight API downtime (P1, open)
+  esc-002 → Vertex delivery overrun (P2, in-progress)
+  esc-003 → Axiom compliance audit (P3, resolved)
+
+
+────────────────────────────────────────────────────────────────────────────────
+13. DESIGN TOKENS (Tailwind / CSS custom properties)
+────────────────────────────────────────────────────────────────────────────────
+Defined in src/styles.css as CSS variables.
+
+Colors (used throughout app):
+  --accent        → primary blue/teal accent color
+  --success       → green (healthy status, positive metrics)
+  --warn          → amber/yellow (medium risk, warnings)
+  --crit          → red (critical status, errors, P1 escalations)
+  --sidebar       → dark sidebar background
+  --card          → card background
+  --background    → page background (dark)
+  --foreground    → primary text
+  --muted-foreground → secondary text
+
+Fonts:
+  Inter          → UI text (loaded from Google Fonts)
+  JetBrains Mono → Monospace (used for codes, IDs, timestamps)
+
+
+================================================================================
+END OF PROJECT DOCUMENTATION
+================================================================================

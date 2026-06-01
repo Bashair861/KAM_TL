@@ -1,0 +1,306 @@
+================================================================================
+  AETHER KAM — PROJECT CONTEXT FILE
+  Purpose: Copy-paste this entire file into a new chat to give full context.
+  Keep this file updated after every major phase.
+  Last updated: Phase 2 — Auth Backend Complete
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT IS THIS PROJECT?
+────────────────────────────────────────────────────────────────────────────────
+Aether KAM is an internal Key Account Management (KAM) portal for an IT services
+company. It is used by the KAM team to manage enterprise client relationships,
+track account health, manage escalations, handle contracts, and grow accounts.
+
+The app is built as a learning/portfolio project. It started as a fully static
+mock-data prototype (all data was hardcoded in a TypeScript file). We are
+progressively wiring it to a real backend (Supabase) and making it production-
+ready.
+
+The project lives at: c:\Users\GNG\Desktop\Project\KAM_TL-main
+
+
+────────────────────────────────────────────────────────────────────────────────
+TECH STACK
+────────────────────────────────────────────────────────────────────────────────
+- React 19 + TypeScript 5.8
+- TanStack Router v1 (file-based routing) + TanStack Start
+- TanStack Query v5 (useQuery for data fetching)
+- Supabase (PostgreSQL database + Auth + Realtime)
+- Tailwind CSS v4
+- Vite 7 (build tool)
+- Lucide React (icons)
+- Radix UI (headless components)
+- Recharts (charts)
+- tsx + dotenv (for running seed scripts in Node.js)
+- Deployed target: Cloudflare Pages (via @cloudflare/vite-plugin)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FOLDER STRUCTURE (key files only)
+────────────────────────────────────────────────────────────────────────────────
+src/
+  routes/
+    __root.tsx              ← Root layout: AuthProvider + AppShell + redirect logic
+    index.tsx               ← Dashboard page
+    login.tsx               ← Login page
+    accounts.index.tsx      ← Accounts portfolio list
+    accounts.$accountId.tsx ← Account detail (Client 360) — largest file
+    contracts.tsx           ← Contracts page
+    strategy.tsx            ← Strategy builder page
+    escalations.tsx         ← Escalations list page
+    educate.tsx             ← Education page
+
+  components/
+    layout/
+      AppSidebar.tsx        ← Main navigation sidebar (uses useAuth for live user)
+
+  context/
+    AuthContext.tsx         ← React context: session, profile, loading state
+
+  services/
+    auth.ts                 ← signIn(), signOut() using Supabase Auth
+    db.ts                   ← All Supabase query functions (fetchAccounts, fetchAccount, etc.)
+
+  data/
+    kam-data.ts             ← All TypeScript types + ROLE_PERMISSIONS + static mock data
+                              (mock data is now used as fallback/reference only;
+                               app reads from Supabase DB)
+
+  lib/
+    supabase.ts             ← Supabase client (uses VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY)
+
+  db/
+    schema.sql              ← Full PostgreSQL schema (13 tables + enums + RLS)
+    reset.sql               ← Drops all tables/enums (run before re-running schema.sql)
+    enable-rls.sql          ← Enables RLS + adds public SELECT policies on all tables
+    grant-read.sql          ← Grants SELECT to anon + authenticated roles
+    seed.ts                 ← Idempotent seed script (npm run seed)
+    setup-auth.sql          ← Auth trigger + UPDATE queries to link real users to profiles
+
+  styles.css                ← Global Tailwind CSS styles + custom design tokens
+
+.env                        ← Environment variables (gitignored — never commit)
+
+
+────────────────────────────────────────────────────────────────────────────────
+USER ROLES & PERMISSIONS (ROLE_PERMISSIONS in kam-data.ts)
+────────────────────────────────────────────────────────────────────────────────
+Three roles exist:
+
+  CEO          → read: true,  write: false, scope: "all"
+  Head of KAM  → read: true,  write: true,  scope: "all"
+  KAM          → read: true,  write: true,  scope: "own"
+
+- "scope: all"  = can see/edit all accounts
+- "scope: own"  = can only edit accounts assigned to them
+- Write access controls whether Save/Edit/Add buttons are enabled in the UI.
+- Role is stored in the `profiles` table in Supabase.
+- Role is loaded into React via AuthContext → useAuth() → profile.role
+
+Seeded users:
+  julian@aether.io → Julian Drake, Head of KAM (full read/write all accounts)
+  maya@aether.io   → Maya Lin, KAM (read/write own accounts)
+
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT HAS BEEN DONE — PHASE HISTORY
+────────────────────────────────────────────────────────────────────────────────
+
+PHASE 0 — Static prototype
+  - App existed with all data hardcoded in src/data/kam-data.ts
+  - No database, no auth, no API calls
+  - All pages rendered mock data directly from TypeScript objects
+
+PHASE 1 — Supabase database setup + live data reads
+  Tasks completed:
+  ✓ Designed PostgreSQL schema (13 tables) in src/db/schema.sql
+  ✓ Created reset.sql (drop all tables/enums in correct dependency order)
+  ✓ Created enable-rls.sql (enables RLS + public SELECT policies)
+  ✓ Created grant-read.sql (grants SELECT to anon + authenticated roles)
+  ✓ Created seed.ts — idempotent script, inserts:
+      2 profiles, 5 accounts, 11 stakeholders, 40 health_scores,
+      ~150 health_metrics, 5 contract_details, 14 activities,
+      20 retention_growth, 6 education_log, 3 escalations,
+      8 escalation_action_items, 5 opportunities, 5 notifications
+  ✓ Created src/services/db.ts with all query functions
+  ✓ Wired all app pages to read live data from Supabase via useQuery
+  ✓ Mapper pattern: Supabase returns snake_case → mappers convert to camelCase
+    TypeScript types that UI already expects (zero component rewrites needed)
+  ✓ Error resolved: RLS was blocking reads → fixed by running enable-rls.sql
+  ✓ Error resolved: Secret API key in browser → fixed .env (anon key in
+    VITE_SUPABASE_ANON_KEY, service role key in SUPABASE_SERVICE_ROLE_KEY)
+
+PHASE 2 — Authentication (Supabase Auth)
+  Tasks completed:
+  ✓ Created src/services/auth.ts (signIn, signOut)
+  ✓ Created src/context/AuthContext.tsx (session, profile, loading state)
+      - loadProfile() first queries by auth user UUID
+      - Falls back to email lookup (handles seeded profiles with static UUIDs)
+  ✓ Updated src/routes/__root.tsx
+      - Wrapped app in AuthProvider
+      - AppShell component handles redirect logic:
+          unauthenticated → redirect to /login
+          authenticated on /login → redirect to /
+      - Full-screen spinner while session resolves
+  ✓ Created src/routes/login.tsx
+      - Dark background with dot-grid pattern
+      - Centered card: email + password (show/hide toggle)
+      - Calls signIn(), shows spinner + error states
+      - Redirect handled automatically by AppShell after auth state change
+  ✓ Updated AppSidebar.tsx — shows real user name/role from useAuth()
+      - Sign out button with LogOut icon
+  ✓ Updated accounts.$accountId.tsx — uses useAuth() for role-based edit permissions
+  ✓ Created src/db/setup-auth.sql
+      - Trigger: auto-creates profile on new Supabase Auth user creation
+      - UPDATE statements to link julian@aether.io + maya@aether.io to profiles
+  ✓ Fixed TypeScript errors: replaced all canEdit()/currentUser refs with useAuth()
+
+PHASE 2.5 — KAM Account Assignment
+  Tasks completed:
+  ✓ Added assigned_kam_id (uuid FK → profiles.id) to accounts table
+      - Migration SQL: src/db/add-kam-assignment.sql (run once in Supabase)
+      - RLS UPDATE policy added so authenticated users can reassign
+  ✓ Initial assignments seeded:
+      Julian Drake (Head of KAM): axiom, cloudpeak, northwind
+      Maya Lin (KAM):             starlight, vertex
+  ✓ fetchAccounts() filters by assigned_kam_id when role === "KAM"
+      Head of KAM and CEO see all accounts; KAM sees only their own
+  ✓ fetchKamUsers() returns only KAM-role profiles (Head of KAM excluded
+      from assignment dropdown — you can only assign to KAMs, not to yourself)
+  ✓ updateAccountKam(accountId, kamId) — first real write operation
+  ✓ Accounts list page — "Assigned KAM" column:
+      Head of KAM: live dropdown to reassign inline
+      KAM: read-only name display
+  ✓ Account detail Overview tab — "Assigned KAM" section above KYC grid:
+      Head of KAM: dropdown to reassign
+      KAM: read-only name display
+  ✓ All fetchAccounts() callers updated with user context:
+      queryKey: ["accounts", userId, role] — cache is user-specific
+      Pages: dashboard, accounts list, contracts, strategy
+
+  RULE: Head of KAM assigns accounts to KAMs only (not to themselves or CEO).
+        fetchKamUsers() enforces this by only fetching role = 'KAM'.
+
+
+────────────────────────────────────────────────────────────────────────────────
+IMPORTANT DECISIONS & PATTERNS
+────────────────────────────────────────────────────────────────────────────────
+
+1. DATA LAYER PATTERN (db.ts)
+   - All Supabase calls live in src/services/db.ts
+   - Mapper functions convert snake_case DB columns → camelCase TypeScript types
+   - fetchAccount() uses Promise.all for 7 parallel queries (performance)
+   - Components never import from @supabase/supabase-js directly
+
+2. AUTH PATTERN
+   - AuthContext is the single source of truth for auth state
+   - session = Supabase Session object (null if logged out)
+   - profile = row from profiles table (loaded by user UUID or email fallback)
+   - loading = true until first session check completes (prevents flash of wrong UI)
+   - Route protection is centralized in AppShell in __root.tsx, NOT in individual routes
+
+3. PERMISSION PATTERN
+   - Every component that needs edit-gating calls: const { profile } = useAuth()
+   - Then: const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write
+   - Buttons use disabled={!editable}
+   - The "KAM" fallback means unknown roles default to most restrictive write scope
+
+4. ENVIRONMENT VARIABLES
+   - VITE_SUPABASE_URL     → browser-safe, used by src/lib/supabase.ts
+   - VITE_SUPABASE_ANON_KEY → browser-safe publishable key (sb_publishable_...)
+   - SUPABASE_SERVICE_ROLE_KEY → server/seed only, bypasses RLS (sb_secret_...)
+     NEVER put the service role key in a VITE_ prefixed variable
+
+5. SEEDED PROFILES vs REAL AUTH USERS
+   - Profiles seeded with static UUIDs (00000000-...-0001, 00000000-...-0002)
+   - Real Supabase Auth users have random UUIDs
+   - loadProfile() handles this: tries UUID first, falls back to email lookup
+   - Long-term fix: run setup-auth.sql trigger + UPDATE queries after creating users
+
+6. DEBUG ERROR BANNER (dashboard)
+   - Dashboard (index.tsx) has a visible error banner showing raw DB errors
+   - This was intentionally kept (user request: "leave debug error as is for now")
+   - Will be cleaned up in a future phase
+
+7. RLS (Row Level Security)
+   - RLS is ENABLED on all 13 tables
+   - Public SELECT policies allow the anon key to read all data
+   - Seed script uses service role key to bypass RLS during insert/upsert
+   - Never disable RLS — Supabase shows critical security warnings
+
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT IS NEXT — UPCOMING PHASES
+────────────────────────────────────────────────────────────────────────────────
+
+PHASE 3 — Write operations (persist edits to Supabase)
+  NOTE: As more data (escalations, suggestions, opportunities, notifications)
+  gets wired, all of it must be filtered by the KAM's assigned accounts.
+  The pattern: any page that shows per-account data must check assigned_kam_id
+  and scope results to the logged-in KAM's accounts only.
+  Head of KAM and CEO always see everything unfiltered.
+
+PHASE 3 (original) — Write operations (persist edits to Supabase)
+  - Make Save/Edit buttons actually call UPDATE/INSERT on Supabase
+  - Pages affected: Account detail (KYC fields, activities, escalations),
+    Contracts page, Education log
+  - Need to add RLS write policies (currently only SELECT policies exist)
+  - Will require INSERT/UPDATE policies tied to authenticated users
+
+PHASE 4 — AI Assistant (Google Gemini)
+  - Wire src/services/ai.ts to Google Gemini API
+  - AI bot that can answer questions about an account based on its data
+  - Suggested entry points: account detail page, strategy builder
+
+PHASE 5 — Production hardening
+  - Remove debug error banner from dashboard
+  - Add proper loading skeletons (currently shows empty state while loading)
+  - Error boundaries per-page
+  - Deploy to Cloudflare Pages
+  - Set environment variables in Cloudflare dashboard
+
+PHASE 6 — Additional features (ideas, not committed)
+  - Notifications center (currently static mock data)
+  - Strategy builder (currently static)
+  - Real-time updates via Supabase Realtime subscriptions
+  - PDF export of account reports (pptxgenjs is already installed)
+  - User management UI for CEO/Head of KAM
+
+
+────────────────────────────────────────────────────────────────────────────────
+SUPABASE PROJECT INFO
+────────────────────────────────────────────────────────────────────────────────
+Project URL: https://ogkxkfhigejggnoobypk.supabase.co
+Anon key:    stored in .env as VITE_SUPABASE_ANON_KEY (sb_publishable_...)
+Service key: stored in .env as SUPABASE_SERVICE_ROLE_KEY (sb_secret_...)
+Region:      (Supabase free tier)
+
+To set up a fresh environment:
+  1. Run src/db/schema.sql in Supabase SQL Editor
+  2. Run src/db/enable-rls.sql in Supabase SQL Editor
+  3. Run src/db/grant-read.sql in Supabase SQL Editor
+  4. Copy .env with correct keys
+  5. Run: npm run seed
+  6. Create auth users in Supabase Dashboard → Authentication → Users
+     (julian@aether.io + maya@aether.io)
+  7. Run src/db/setup-auth.sql in Supabase SQL Editor
+  8. Run: npm run dev
+
+
+────────────────────────────────────────────────────────────────────────────────
+KNOWN ISSUES / NOTES FOR NEXT SESSION
+────────────────────────────────────────────────────────────────────────────────
+- Write operations (save/edit) are still frontend-only (Phase 3)
+- Notifications in sidebar are still static mock data from kam-data.ts
+- Strategy page is still fully static
+- Education page is fully static
+- The educate.tsx route file content is unknown — may need Supabase wiring
+- csat, resourceHealth, financialHealth, profitHealth sub-fields in Account
+  detail are assembled from health_scores + health_metrics tables
+- All buttons with disabled={!editable} are UI-only guards; no server-side
+  authorization enforced yet
+
+================================================================================
+END OF PROJECT CONTEXT FILE
+================================================================================
