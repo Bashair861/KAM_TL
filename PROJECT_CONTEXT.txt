@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 3 — Write Operations + Client History + Contracts Dynamic
+  Last updated: Phase 3 — New Account Creation + KPI Editor Polish
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -78,9 +78,11 @@ src/
     grant-read.sql          ← Grants SELECT to anon + authenticated roles
     seed.js                 ← Idempotent seed script (bun run seed)
     setup-auth.sql          ← Auth trigger + UPDATE statements for all 3 users
-    add-kam-assignment.sql  ← Migration: adds assigned_kam_id to accounts + RLS policy
-    add-kpi-data.sql        ← Migration: adds kpi_data (jsonb) to health_scores + policies
-    add-account-history.sql ← Migration: creates account_history audit log table
+    add-kam-assignment.sql         ← Migration: adds assigned_kam_id to accounts + RLS policy
+    add-kpi-data.sql               ← Migration: adds kpi_data (jsonb) to health_scores + policies
+    add-account-history.sql        ← Migration: creates account_history audit log table
+    add-account-insert-policy.sql  ← Migration: INSERT RLS policy on accounts table
+    add-health-scores-insert-policy.sql ← Migration: INSERT RLS policy on health_scores
 
   styles.css                ← Global Tailwind CSS styles + custom design tokens
 
@@ -178,6 +180,28 @@ PHASE 3 — Write Operations (partial — in progress)
       - Shows: Account, Type, Duration, Value, Renewal, Process Compliance
       - Role-based filtering (KAM sees only assigned accounts)
       - Account name links to detail page
+  ✓ New Account creation (Head of KAM only)
+      - "+ New Account" button visible only to Head of KAM role
+      - NewAccountModal: name, short code (auto-derived), industry, region, tier,
+        contract type, contract value, ARR, renewal days, primary contact, assign KAM
+      - Account ID auto-generated as slug from name (e.g. "Helios Robotics" → "helios-robotics")
+      - createAccount() inserts into accounts table with sensible defaults
+        (health: 50, status: healthy, trend: 0, retention_risk: Low)
+      - add-account-insert-policy.sql adds INSERT RLS policy on accounts
+      - On success: query cache invalidated, new account appears in list immediately
+      - Duplicate ID shows inline error from Supabase
+  ✓ KPI Editor — new account support + UX polish
+      - New accounts (no health_metrics rows) now get a default seeded section
+        so the modal is never empty
+      - "Add KPI section" button in modal footer — adds a new blank section
+      - Delete section button (Trash2) in every section header — removes section
+      - updateHealthBlock() now upserts: INSERTs health_scores row if none exists
+        (previously threw on new accounts), UPDATEs if row exists
+      - add-health-scores-insert-policy.sql adds INSERT RLS policy on health_scores
+      - fetchAccount() block() helper: when health_metrics is empty but kpi_data
+        exists, derives metric display bars from saved KPI sections so score
+        bars appear correctly for new accounts
+      - Save failure now shows an error banner in the modal footer (was silent)
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -231,8 +255,24 @@ IMPORTANT DECISIONS & PATTERNS
 
 8. KPI DATA STORAGE
    - health_scores.kpi_data (jsonb) stores the full KpiSection[] array
-   - On KpiEditorModal open: loads from block.kpiData if present, else seeds from metrics
-   - On save: writes score + metric values (by UUID) + full sections array to kpi_data
+   - On KpiEditorModal open: loads from block.kpiData if present, else seeds from metrics,
+     else seeds one default section (new accounts with no metrics)
+   - On save: upserts health_scores row (INSERT if new, UPDATE if exists) + full sections
+     array saved to kpi_data. Existing metric rows updated by UUID if present.
+
+9. NEW ACCOUNT DEFAULTS
+   - health: 50, trend: 0, status: 'healthy', retention_risk: 'Low'
+   - growth_upside: 0, white_space_count: 0, is_startup: false
+   - No health_scores, health_metrics, or contract_details rows created on insert
+   - KPI editor handles missing rows by inserting on first save
+   - Score bars derived from kpi_data jsonb when health_metrics rows are absent
+
+10. DERIVED METRIC BARS PATTERN
+    - fetchAccount block() helper checks: if health_metrics is empty AND kpi_data exists,
+      compute each section's score as (checked weight ÷ total weight) × 10
+      and use section name as label → passed to mapHealthBlock as derived metrics
+    - These show as progress bars in ScoreBlock without needing DB metric rows
+    - Derived metrics have id: "derived-N" (not real UUIDs) — do not use for updates
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -291,6 +331,8 @@ To set up a FRESH Supabase project from scratch:
   6. Run add-kam-assignment.sql in SQL Editor
   7. Run add-kpi-data.sql in SQL Editor
   8. Run add-account-history.sql in SQL Editor
+  9. Run add-account-insert-policy.sql in SQL Editor
+  10. Run add-health-scores-insert-policy.sql in SQL Editor
 
 
 ────────────────────────────────────────────────────────────────────────────────

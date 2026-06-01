@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT DOCUMENTATION
   Purpose: Technical reference for database, configs, setup, and architecture.
   Keep this file updated after every major phase.
-  Last updated: Phase 3 — Write Operations + Client History + Contracts Dynamic
+  Last updated: Phase 3 — New Account Creation + KPI Editor Polish
 ================================================================================
 
 
@@ -147,9 +147,11 @@ How to enable RLS + add read policies:
   Run src/db/enable-rls.sql in Supabase SQL Editor.
 
 Write policies are added by the migration scripts:
-  add-kam-assignment.sql  → UPDATE policy on accounts
-  add-kpi-data.sql        → UPDATE policies on health_scores + health_metrics
-  add-account-history.sql → SELECT + INSERT policies on account_history
+  add-kam-assignment.sql              → UPDATE policy on accounts
+  add-kpi-data.sql                    → UPDATE policies on health_scores + health_metrics
+  add-account-history.sql             → SELECT + INSERT policies on account_history
+  add-account-insert-policy.sql       → INSERT policy on accounts
+  add-health-scores-insert-policy.sql → INSERT policy on health_scores
 
 Without read policies: anon key returns 0 rows (blocked by RLS).
 Without RLS at all: Supabase shows critical security warning in dashboard.
@@ -213,6 +215,16 @@ add-account-history.sql
   Run:      Once. Enables Client History tab to show change log.
   NOTE:     account_id is TEXT (not uuid) to match accounts.id type.
 
+add-account-insert-policy.sql
+  Purpose:  Adds INSERT RLS policy on accounts table.
+  Run:      Once. Required for Head of KAM to create new accounts via UI.
+  Policy:   authenticated users can INSERT — UI enforces Head of KAM restriction.
+
+add-health-scores-insert-policy.sql
+  Purpose:  Adds INSERT RLS policy on health_scores table.
+  Run:      Once. Required for KPI Editor to save data on brand-new accounts
+            that have no existing health_scores rows.
+
 
 ────────────────────────────────────────────────────────────────────────────────
 7. DATA SERVICE LAYER (src/services/db.js)
@@ -270,9 +282,19 @@ WRITE functions:
               competitors (array), main_business_flow
 
   updateHealthBlock(accountId, area, score, metricUpdates, kpiData)
-    → Updates health_scores.score + kpi_data for the given area
-    → Updates each health_metrics row by UUID
+    → UPSERTS health_scores: INSERTs if no row exists, UPDATEs if one does
+    → Uses maybeSingle() — never throws on missing rows (handles new accounts)
+    → Updates each health_metrics row by UUID (skipped if metricUpdates is empty)
     → area values: 'relationship' | 'project' | 'white_space' | 'csat' | 'risk' | 'financial'
+
+  createAccount(data)
+    → INSERTs a new row into accounts table
+    → Required fields: id (slug), name, shortCode, industry, region, tier,
+      contractType, contractValue, arr, renewalDays
+    → Optional: primaryContactName, assignedKamId
+    → Auto-set defaults: health=50, trend=0, status='healthy', retention_risk='Low',
+      growth_upside=0, white_space_count=0, is_startup=false, last_touch='Just now'
+    → Requires INSERT RLS policy (add-account-insert-policy.sql)
 
   logAccountChanges(accountId, changes[], editedBy)
     → Inserts rows into account_history
@@ -283,6 +305,9 @@ WRITE functions:
 Mapper functions:
   mapFlatAccount()  — snake_case DB row → camelCase FlatAccount object
   mapHealthBlock()  — health_scores + health_metrics rows → HealthBlock shape
+  block() helper in fetchAccount — when health_metrics is empty but kpi_data exists,
+    derives metric bars from KPI sections (score = checked weight ÷ total × 10).
+    Derived metrics have id "derived-N" — display only, not updatable by UUID.
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -328,8 +353,12 @@ Tab 2: Score Marking Matrices
     csat, risk, resource, financial)
   - Each expandable via KPI Editor Modal
   - KPI Editor: weighted checkbox scoring (checked weights ÷ total × 5)
-  - Save & Close calls updateHealthBlock() + logAccountChanges()
+  - New accounts get one default section seeded so modal is never blank
+  - "Add KPI section" button in footer — adds a new blank section
+  - Delete section button (Trash2) in each section header — removes that section
+  - Save & Close calls updateHealthBlock() (upserts) + logAccountChanges()
   - Cancel closes without saving
+  - Save errors shown inline in modal footer (previously silent)
 
 Tab 3: Activity to Increase Score
   - Opportunities list (from DB via useQuery)
@@ -444,6 +473,8 @@ For FRESH Supabase setup (first time only):
   6. SQL Editor: add-kam-assignment.sql
   7. SQL Editor: add-kpi-data.sql
   8. SQL Editor: add-account-history.sql
+  9. SQL Editor: add-account-insert-policy.sql
+  10. SQL Editor: add-health-scores-insert-policy.sql
 
 
 ────────────────────────────────────────────────────────────────────────────────
