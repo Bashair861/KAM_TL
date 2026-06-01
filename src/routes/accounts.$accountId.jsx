@@ -931,24 +931,34 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
   // Load from persisted kpiData if available, otherwise seed from metrics.
+  const defaultFields = (prefix) => [
+    { id: `${prefix}-a`, label: "Monthly meeting held on schedule", weight: 50, checked: true },
+    { id: `${prefix}-b`, label: "Director-level participation", weight: 25, checked: false },
+    { id: `${prefix}-c`, label: "Action items closed before next cycle", weight: 25, checked: false },
+  ];
+
   const [sections, setSections] = useState(() => {
     if (block.kpiData) return block.kpiData;
-    return block.metrics.map((m, i) => ({
-      id: `kpi-${i}`,
-      metricId: m.id,
-      name: m.label,
-      fields: [
-        { id: `${i}-a`, label: "Monthly meeting held on schedule", weight: 50, checked: true },
-        { id: `${i}-b`, label: "Director-level participation", weight: 25, checked: false },
-        {
-          id: `${i}-c`,
-          label: "Action items closed before next cycle",
-          weight: 25,
-          checked: false,
-        },
-      ],
-    }));
+    if (block.metrics.length > 0) {
+      return block.metrics.map((m, i) => ({
+        id: `kpi-${i}`,
+        metricId: m.id,
+        name: m.label,
+        fields: defaultFields(i),
+      }));
+    }
+    // New account with no metrics — seed one blank section
+    return [{ id: "kpi-0", name: "KPI Section 1", fields: defaultFields(0) }];
   });
+
+  function addSection() {
+    if (!editable) return;
+    const idx = Date.now();
+    setSections((prev) => [
+      ...prev,
+      { id: `kpi-${idx}`, name: `KPI Section ${prev.length + 1}`, fields: defaultFields(idx) },
+    ]);
+  }
   function updateSection(id, fn) {
     setSections((prev) => prev.map((s) => (s.id === id ? fn(s) : s)));
   }
@@ -992,6 +1002,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
     sectionScores.length > 0
       ? sectionScores.reduce((acc, s) => acc + s.scoreOutOfFive, 0) / sectionScores.length
       : 0;
+  const [saveError, setSaveError] = useState("");
   const { mutate: saveKpi, isPending: savingKpi } = useMutation({
     mutationFn: async () => {
       const newScore = overallOutOfFive * 2;
@@ -1005,13 +1016,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       await updateHealthBlock(accountId, area, newScore, metricUpdates, sections);
       await logAccountChanges(
         accountId,
-        [
-          {
-            field: `Score: ${title}`,
-            oldValue: block.score.toFixed(1),
-            newValue: newScore.toFixed(1),
-          },
-        ],
+        [{ field: `Score: ${title}`, oldValue: block.score.toFixed(1), newValue: newScore.toFixed(1) }],
         editorUser,
       );
     },
@@ -1019,6 +1024,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       router.invalidate();
       onClose();
     },
+    onError: (err) => setSaveError(err.message ?? "Save failed. Please try again."),
   });
   return (
     <div
@@ -1095,6 +1101,15 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                       {ss.scoreOutOfFive.toFixed(2)}
                       <span className="text-[10px] text-muted-foreground">/5</span>
                     </span>
+                    <button
+                      onClick={() => editable && setSections((prev) => prev.filter((s) => s.id !== section.id))}
+                      disabled={!editable}
+                      className="size-7 rounded hover:bg-crit/10 hover:text-crit flex items-center justify-center text-muted-foreground transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                      aria-label="Delete section"
+                      title="Delete this KPI section"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
                   </div>
                 </div>
 
@@ -1161,10 +1176,23 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         </div>
 
         {/* footer */}
-        <div className="px-4 md:px-6 py-3 border-t flex items-center justify-between gap-3 bg-muted/20 sticky bottom-0">
-          <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-            Scoring is dynamic · checked weights ÷ total weight × 5
-          </p>
+        <div className="px-4 md:px-6 py-3 border-t flex flex-col gap-2 bg-muted/20 sticky bottom-0">
+          {saveError && (
+            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded px-3 py-1.5">{saveError}</p>
+          )}
+          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-4">
+            <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+              Scoring is dynamic · checked weights ÷ total weight × 5
+            </p>
+            <button
+              onClick={addSection}
+              disabled={!editable}
+              className="text-[11px] font-bold uppercase tracking-wider text-accent flex items-center gap-1 hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Plus className="size-3" /> Add KPI section
+            </button>
+          </div>
           <div className="flex gap-2">
             <button
               onClick={onClose}
@@ -1187,6 +1215,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                 </>
               )}
             </button>
+          </div>
           </div>
         </div>
       </div>

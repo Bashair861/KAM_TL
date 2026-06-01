@@ -83,24 +83,66 @@ export async function updateAccountKam(accountId, kamId) {
 }
 // ─── update health block (score + metrics + kpi checkbox state) ──────────────
 export async function updateHealthBlock(accountId, area, score, metricUpdates, kpiData) {
-  const { data: hs, error: hsErr } = await supabase
+  // Use maybeSingle so missing rows don't throw
+  const { data: hs } = await supabase
     .from("health_scores")
     .select("id")
     .eq("account_id", accountId)
     .eq("area", area)
-    .single();
-  if (hsErr || !hs) throw hsErr ?? new Error(`No health score found for area: ${area}`);
-  const { error: scoreErr } = await supabase
-    .from("health_scores")
-    .update({ score, kpi_data: kpiData })
-    .eq("id", hs.id);
-  if (scoreErr) throw scoreErr;
-  await Promise.all(
-    metricUpdates.map((mu) =>
-      supabase.from("health_metrics").update({ label: mu.label, value: mu.value }).eq("id", mu.id),
-    ),
-  );
+    .maybeSingle();
+
+  if (hs) {
+    // Row exists — update score + kpi_data
+    const { error } = await supabase
+      .from("health_scores")
+      .update({ score, kpi_data: kpiData })
+      .eq("id", hs.id);
+    if (error) throw error;
+  } else {
+    // No row yet (new account) — insert one
+    const { error } = await supabase
+      .from("health_scores")
+      .insert({ account_id: accountId, area, score, kpi_data: kpiData });
+    if (error) throw error;
+  }
+
+  // Update existing metric rows (only present for accounts seeded with metrics)
+  if (metricUpdates.length > 0) {
+    await Promise.all(
+      metricUpdates.map((mu) =>
+        supabase.from("health_metrics").update({ label: mu.label, value: mu.value }).eq("id", mu.id),
+      ),
+    );
+  }
 }
+// ─── create new account ───────────────────────────────────────────────────────
+
+export async function createAccount(data) {
+  const { error } = await supabase.from("accounts").insert([{
+    id: data.id,
+    name: data.name,
+    short_code: data.shortCode,
+    industry: data.industry,
+    tier: data.tier,
+    health: 50,
+    trend: 0,
+    contract_value: data.contractValue,
+    arr: data.arr,
+    renewal_days: data.renewalDays,
+    contract_type: data.contractType,
+    last_touch: "Just now",
+    status: "healthy",
+    retention_risk: "Low",
+    growth_upside: 0,
+    white_space_count: 0,
+    is_startup: false,
+    region: data.region || null,
+    primary_contact_name: data.primaryContactName || null,
+    assigned_kam_id: data.assignedKamId || null,
+  }]);
+  if (error) throw error;
+}
+
 // ─── update account KYC fields ───────────────────────────────────────────────
 export async function updateAccountKyc(accountId, updates) {
   const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
@@ -129,9 +171,20 @@ export async function fetchAccount(id) {
   const scoreMap = new Map((scores ?? []).map((s) => [s.area, s]));
   const block = (area) => {
     const s = scoreMap.get(area);
-    return s
-      ? mapHealthBlock(s.score, s.health_metrics ?? [], s.kpi_data)
-      : { score: 0, metrics: [], kpiData: null };
+    if (!s) return { score: 0, metrics: [], kpiData: null };
+    const dbMetrics = s.health_metrics ?? [];
+    // For new accounts with no health_metrics rows, derive display bars from kpi_data sections
+    if (dbMetrics.length === 0 && Array.isArray(s.kpi_data) && s.kpi_data.length > 0) {
+      const derived = s.kpi_data.map((sec, i) => {
+        const fields = sec.fields ?? [];
+        const totalWeight = fields.reduce((a, f) => a + (Number(f.weight) || 0), 0);
+        const earned = fields.reduce((a, f) => a + (f.checked ? Number(f.weight) || 0 : 0), 0);
+        const pct = totalWeight > 0 ? (earned / totalWeight) * 100 : 0;
+        return { id: `derived-${i}`, label: sec.name, value: parseFloat(((pct / 100) * 10).toFixed(1)) };
+      });
+      return mapHealthBlock(s.score, derived, s.kpi_data);
+    }
+    return mapHealthBlock(s.score, dbMetrics, s.kpi_data);
   };
   const flat = mapFlatAccount(acc);
   return {
