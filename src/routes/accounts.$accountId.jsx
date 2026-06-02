@@ -2567,6 +2567,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const [evidenceTarget, setEvidenceTarget] = useState(null);
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [scheduleTarget, setScheduleTarget] = useState(null);
+  const [scheduleForm, setScheduleForm] = useState(
+    createInitialMeetingForm(account, null, profile),
+  );
 
   useEffect(() => {
     setResolvedItems({});
@@ -2576,7 +2580,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     setEvidenceTarget(null);
     setRejectTarget(null);
     setRejectReason("");
-  }, [account.id, profile?.name]);
+    setScheduleTarget(null);
+    setScheduleForm(createInitialMeetingForm(account, null, profile));
+  }, [account.id, profile?.email, profile?.name]);
 
   const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
   const activeRagRecommendations = model.ragRecommendations.filter(
@@ -2613,6 +2619,30 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       },
     }));
     closeReview();
+  }
+
+  function openSchedule(kind, item) {
+    setScheduleTarget({ kind, item });
+    setScheduleForm(createInitialMeetingForm(account, item, profile));
+  }
+
+  function closeSchedule() {
+    setScheduleTarget(null);
+    setScheduleForm(createInitialMeetingForm(account, null, profile));
+  }
+
+  function confirmSchedule() {
+    if (!scheduleTarget) return;
+    const draftRow = buildMeetingDraftRow(scheduleTarget, scheduleForm, account, profile);
+    setDraftRows((current) => [draftRow, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [scheduleTarget.item.id]: {
+        status: "meeting-drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closeSchedule();
   }
 
   function confirmReject() {
@@ -2705,7 +2735,19 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       }
                     />
                   </div>
-                  <div className="flex items-start lg:items-center shrink-0">
+                  <div className="flex flex-wrap items-start lg:items-center gap-2 shrink-0">
+                    {canScheduleMeeting(opportunity) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canAct}
+                        onClick={() => openSchedule("opportunity", opportunity)}
+                        className="gap-1.5"
+                      >
+                        <Calendar className="size-3.5" />
+                        Schedule meeting
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       disabled={!canAct}
@@ -2789,6 +2831,18 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                           >
                             Add
                           </Button>
+                          {canScheduleMeeting(item) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={!canAct}
+                              onClick={() => openSchedule("rag", item)}
+                              className="gap-1.5"
+                            >
+                              <Calendar className="size-3.5" />
+                              Schedule
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"
@@ -2871,6 +2925,16 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       onClick={() => openReview("meeting", item)}
                     >
                       Add
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => openSchedule("meeting", item)}
+                      className="gap-1.5"
+                    >
+                      <Calendar className="size-3.5" />
+                      Schedule
                     </Button>
                     <Button
                       variant="outline"
@@ -2972,6 +3036,16 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         >
                           Add
                         </Button>
+                        {canScheduleMeeting(row) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!canAct}
+                            onClick={() => openSchedule(row.sourceKind, row)}
+                          >
+                            Schedule
+                          </Button>
+                        )}
                         <Button
                           variant="outline"
                           size="sm"
@@ -3006,6 +3080,16 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         onChange={setReviewForm}
         onClose={closeReview}
         onConfirm={confirmReview}
+      />
+
+      <MeetingScheduleDialog
+        account={account}
+        profile={profile}
+        target={scheduleTarget}
+        form={scheduleForm}
+        onChange={setScheduleForm}
+        onClose={closeSchedule}
+        onConfirm={confirmSchedule}
       />
 
       <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
@@ -3163,6 +3247,199 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
         )}
       </SheetContent>
     </Sheet>
+  );
+}
+
+function MeetingScheduleDialog({ account, profile, target, form, onChange, onClose, onConfirm }) {
+  const item = target?.item ?? null;
+  const contactOptions = getMeetingContactOptions(account);
+  const selectedContactIndex = Math.max(
+    0,
+    contactOptions.findIndex(
+      (contact) =>
+        contact.name === form.attendeeName &&
+        (contact.email ?? "") === (form.attendeeEmail ?? ""),
+    ),
+  );
+  const needsExecutiveApproval = /ceo|executive/i.test(form.meetingType);
+
+  function handleContactChange(event) {
+    const contact = contactOptions[Number(event.target.value)] ?? contactOptions[0];
+    onChange((current) => ({
+      ...current,
+      attendeeName: contact.name,
+      attendeeEmail: contact.email ?? "",
+      attendeeRole: contact.role ?? "",
+    }));
+  }
+
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Schedule meeting draft</DialogTitle>
+          <DialogDescription>
+            Create an internal meeting draft for this account. Calendar sync can be connected later.
+          </DialogDescription>
+        </DialogHeader>
+
+        {item && (
+          <div className="space-y-5">
+            <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <AreaBadge area={item.healthArea ?? item.area} />
+                <ParameterBadge parameter={item.parameter ?? "Meeting Scheduling"} />
+                {needsExecutiveApproval && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                    Needs executive approval
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-semibold">{item.title}</p>
+              <p className="text-xs text-muted-foreground">{item.nextStep ?? item.reason}</p>
+              <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                <MiniStat label="Organizer" value={profile?.name ?? "Logged-in KAM"} />
+                <MiniStat
+                  label="Calendar status"
+                  value="Internal draft now; Google/Microsoft sync later"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-type">Meeting type</Label>
+                <select
+                  id="meeting-type"
+                  value={form.meetingType}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, meetingType: event.target.value }))
+                  }
+                  className="h-10 rounded-md border bg-card px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                >
+                  {MEETING_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-subject">Subject</Label>
+                <Input
+                  id="meeting-subject"
+                  value={form.subject}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, subject: event.target.value }))
+                  }
+                />
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-2">
+                  <Label htmlFor="meeting-contact">Client contact</Label>
+                  <select
+                    id="meeting-contact"
+                    value={selectedContactIndex}
+                    onChange={handleContactChange}
+                    className="h-10 rounded-md border bg-card px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    {contactOptions.map((contact, index) => (
+                      <option key={`${contact.name}-${contact.email ?? index}`} value={index}>
+                        {contact.name} {contact.role ? `- ${contact.role}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="meeting-contact-email">Contact email</Label>
+                  <Input
+                    id="meeting-contact-email"
+                    type="email"
+                    value={form.attendeeEmail}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, attendeeEmail: event.target.value }))
+                    }
+                    placeholder="client@example.com"
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="meeting-date">Date</Label>
+                  <Input
+                    id="meeting-date"
+                    type="date"
+                    value={form.date}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, date: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="meeting-time">Time</Label>
+                  <Input
+                    id="meeting-time"
+                    type="time"
+                    value={form.time}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, time: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="meeting-duration">Duration</Label>
+                  <select
+                    id="meeting-duration"
+                    value={form.duration}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, duration: event.target.value }))
+                    }
+                    className="h-10 rounded-md border bg-card px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="30">30 minutes</option>
+                    <option value="45">45 minutes</option>
+                    <option value="60">60 minutes</option>
+                    <option value="90">90 minutes</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-agenda">Agenda</Label>
+                <Textarea
+                  id="meeting-agenda"
+                  rows={5}
+                  value={form.agenda}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, agenda: event.target.value }))
+                  }
+                />
+              </div>
+
+              <div className="rounded-lg border border-accent/20 bg-accent/5 p-3 text-xs text-muted-foreground">
+                This MVP creates a draft activity inside KAM. In the next phase, this same form can
+                read free/busy slots from the logged-in person calendar and create the real invite.
+              </div>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            onClick={onConfirm}
+            disabled={!form.subject.trim() || !form.attendeeName.trim() || !form.date || !form.time}
+          >
+            Create meeting draft
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -3401,6 +3678,16 @@ function ActivityStatusBadge({ row }) {
   );
 }
 
+const MEETING_TYPES = [
+  "Score improvement review",
+  "Discovery call",
+  "QBR / Business review",
+  "Architecture review",
+  "Sponsor touchpoint",
+  "CEO-to-CEO meetup request",
+  "Renewal recovery review",
+];
+
 function createInitialReviewForm(item, ownerName) {
   if (!item) {
     return {
@@ -3416,6 +3703,28 @@ function createInitialReviewForm(item, ownerName) {
     owner: ownerName ?? "KAM Person",
     dueDate: getFutureDateInput(getSuggestedReviewDays(item)),
     nextStep: item.nextStep ?? item.title ?? "",
+  };
+}
+
+function createInitialMeetingForm(account, item, profile) {
+  const contact = getSuggestedMeetingContact(account, item);
+  const meetingType = getSuggestedMeetingType(item);
+  const suggestedDays = item ? getSuggestedReviewDays(item) : 7;
+
+  return {
+    meetingType,
+    subject: item
+      ? `${meetingType}: ${account.name}`
+      : `Score improvement review: ${account.name}`,
+    attendeeName: contact.name,
+    attendeeEmail: contact.email ?? "",
+    attendeeRole: contact.role ?? "",
+    organizerName: profile?.name ?? "Logged-in KAM",
+    organizerEmail: profile?.email ?? "",
+    date: getFutureDateInput(suggestedDays),
+    time: "10:00",
+    duration: meetingType.includes("CEO") ? "30" : "45",
+    agenda: getSuggestedMeetingAgenda(item, account),
   };
 }
 
@@ -3438,8 +3747,135 @@ function formatDraftDate(dateValue) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function formatMeetingTime(timeValue) {
+  if (!timeValue) return "";
+  const [hoursText, minutesText = "00"] = timeValue.split(":");
+  const hours = Number(hoursText);
+  if (Number.isNaN(hours)) return timeValue;
+  const suffix = hours >= 12 ? "PM" : "AM";
+  const normalizedHours = hours % 12 || 12;
+  return `${normalizedHours}:${minutesText} ${suffix}`;
+}
+
 function mapPriorityToRag(priority) {
   return priority === "High" ? "R" : priority === "Low" ? "G" : "A";
+}
+
+function getMeetingContactOptions(account) {
+  const contacts = [
+    ...(account.stakeholders ?? []).map((stakeholder) => ({
+      name: stakeholder.name,
+      role: stakeholder.role,
+      email: stakeholder.email ?? "",
+      influence: stakeholder.influence ?? "",
+    })),
+  ];
+
+  if (
+    account.primaryContact?.name &&
+    !contacts.some((contact) => contact.name === account.primaryContact.name)
+  ) {
+    contacts.unshift({
+      name: account.primaryContact.name,
+      role: account.primaryContact.role,
+      email: "",
+      influence: "Primary contact",
+    });
+  }
+
+  if (!contacts.length) {
+    contacts.push({
+      name: account.primaryContact?.name ?? "Client contact",
+      role: account.primaryContact?.role ?? "Primary contact",
+      email: "",
+      influence: "Primary contact",
+    });
+  }
+
+  return contacts;
+}
+
+function getSuggestedMeetingContact(account, item) {
+  const contacts = getMeetingContactOptions(account);
+  const text = getMeetingSignalText(item);
+
+  if (/ceo/i.test(text)) {
+    return (
+      contacts.find((contact) => /ceo|chief executive/i.test(contact.role ?? "")) ?? contacts[0]
+    );
+  }
+
+  if (/sponsor|executive|decision/i.test(text)) {
+    return (
+      contacts.find((contact) =>
+        /champion|decision maker|sponsor|executive/i.test(
+          `${contact.influence ?? ""} ${contact.role ?? ""}`,
+        ),
+      ) ?? contacts[0]
+    );
+  }
+
+  if (/architecture|technical|cto|project|delivery/i.test(text)) {
+    return (
+      contacts.find((contact) => /cto|engineering|technical|platform|product/i.test(contact.role)) ??
+      contacts[0]
+    );
+  }
+
+  return contacts[0];
+}
+
+function getMeetingSignalText(item) {
+  return [
+    item?.title,
+    item?.nextStep,
+    item?.reason,
+    item?.healthArea,
+    item?.parameter,
+    ...(item?.actionItems ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function getSuggestedMeetingType(item) {
+  const text = getMeetingSignalText(item);
+  if (/ceo/i.test(text)) return "CEO-to-CEO meetup request";
+  if (/discovery/i.test(text)) return "Discovery call";
+  if (/qbr|business review/i.test(text)) return "QBR / Business review";
+  if (/architecture|technical|cto|delivery/i.test(text)) return "Architecture review";
+  if (/renewal|retention|recovery/i.test(text)) return "Renewal recovery review";
+  if (/sponsor|executive|relationship/i.test(text)) return "Sponsor touchpoint";
+  return "Score improvement review";
+}
+
+function getSuggestedMeetingAgenda(item, account) {
+  const actionItems = item?.actionItems?.length
+    ? item.actionItems
+    : [item?.nextStep ?? "Review account score improvement plan"];
+
+  return [
+    `Account: ${account.name}`,
+    item?.parameter ? `Recommendation rule: ${item.parameter}` : null,
+    item?.expectedLift ? `Expected lift: ${item.expectedLift}` : null,
+    "",
+    "Discussion goals:",
+    ...actionItems.map((actionItem) => `- ${actionItem}`),
+    "",
+    "Outcome needed:",
+    "- Confirm owner, next step, and follow-up date",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+}
+
+function canScheduleMeeting(item) {
+  if (!item) return false;
+  if (item.healthArea === "KYC" || item.area === "KYC") return false;
+
+  return /meeting|call|review|touchpoint|sponsor|ceo|qbr|architecture|discovery|sync|renewal|client|buyer|decision maker/i.test(
+    getMeetingSignalText(item),
+  );
 }
 
 function buildDraftRow(target, form) {
@@ -3465,6 +3901,51 @@ function buildDraftRow(target, form) {
     reviewState: item.approvalRequired
       ? `Pending ${item.approverRole ?? "Head of KAM"} approval`
       : "Needs Review",
+  };
+}
+
+function buildMeetingDraftRow(target, form, account, profile) {
+  const { kind, item } = target;
+  const meetingTime = `${formatDraftDate(form.date)}${form.time ? ` at ${formatMeetingTime(form.time)}` : ""}`;
+  const needsApproval = /ceo|executive/i.test(form.meetingType) || item.approvalRequired;
+
+  return {
+    id: `meeting-draft-${item.id}-${Date.now()}`,
+    rowType: "draft",
+    sourceId: item.id,
+    sourceKind: `${kind}-meeting`,
+    area: item.healthArea ?? item.area ?? "Relationship",
+    title: `${form.meetingType}: ${form.subject}`,
+    owner: profile?.name ?? form.organizerName ?? "KAM Person",
+    dueDate: meetingTime,
+    status: "Draft",
+    rag: item.urgency ?? item.rag ?? mapPriorityToRag(item.priority),
+    parameter: "Meeting Scheduling",
+    expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
+    confidence: item.confidence ?? "Medium",
+    reason: `Draft ${form.duration}-minute meeting with ${form.attendeeName}${form.attendeeRole ? ` (${form.attendeeRole})` : ""}.`,
+    evidence: [
+      {
+        source: "Meeting scheduler",
+        sourceType: "Internal meeting draft",
+        date: meetingTime,
+        excerpt: form.agenda,
+        reason:
+          "Meeting draft was created from an Activity to Increase Score recommendation.",
+      },
+      ...(item.evidence ?? []),
+    ],
+    nextStep: `Confirm availability and send invite to ${form.attendeeName}`,
+    actionItems: [
+      `Confirm ${meetingTime} availability with ${form.attendeeName}`,
+      form.attendeeEmail
+        ? `Send invite to ${form.attendeeEmail}`
+        : "Add client email before sending invite",
+      needsApproval ? "Get approval before sending executive invite" : "Send agenda before meeting",
+    ],
+    reviewState: needsApproval
+      ? "Meeting draft needs approval before invite is sent"
+      : "Meeting draft needs calendar sync",
   };
 }
 
