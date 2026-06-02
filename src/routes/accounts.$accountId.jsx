@@ -1,6 +1,7 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { ROLE_PERMISSIONS, formatCurrency } from "@/data/kam-data";
 import {
   fetchAccount,
@@ -14,6 +15,7 @@ import {
   logAccountChanges,
 } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
+import { askAccountAi } from "@/services/ai";
 import {
   ArrowLeft,
   Building2,
@@ -76,6 +78,7 @@ function AccountDetailPage() {
   const { account } = Route.useLoaderData();
   const { profile } = useAuth();
   const [tab, setTab] = useState("Overview");
+  const [askAiOpen, setAskAiOpen] = useState(false);
   const { data: accountEscalations = [] } = useQuery({
     queryKey: ["escalations", account.id],
     queryFn: () => fetchEscalations(account.id),
@@ -118,6 +121,13 @@ function AccountDetailPage() {
               <Lock className="size-3" /> Read-only ({role})
             </span>
           )}
+          <button
+            onClick={() => setAskAiOpen(true)}
+            className="px-3 py-2 bg-accent text-white text-xs font-bold rounded-md hover:opacity-90 transition-opacity flex items-center gap-2"
+          >
+            <Sparkles className="size-3.5" />
+            Ask AI
+          </button>
           <div className="flex flex-col items-end gap-1">
             <button
               disabled={!editable}
@@ -246,6 +256,292 @@ function AccountDetailPage() {
           {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
         </div>
       </div>
+      <AskAiDrawer
+        account={account}
+        open={askAiOpen}
+        onClose={() => setAskAiOpen(false)}
+        profile={profile}
+      />
+    </div>
+  );
+}
+function AskAiDrawer({ account, open, onClose, profile }) {
+  const askAi = useServerFn(askAccountAi);
+  const [question, setQuestion] = useState("Draft a 30-day roadmap for this account.");
+  const [focus, setFocus] = useState("roadmap");
+  const [timeframe, setTimeframe] = useState("30_days");
+  const [result, setResult] = useState(null);
+  const prompts = [
+    "What is the biggest retention risk for this client?",
+    "Draft a 30-day roadmap for this account.",
+    "What should I do before renewal?",
+    "Which growth opportunities should I prioritize?",
+    "Summarize this account for leadership.",
+  ];
+  const {
+    mutate: runAi,
+    isPending,
+    error,
+  } = useMutation({
+    mutationFn: async () =>
+      askAi({
+        data: {
+          scope: "account",
+          accountId: account.id,
+          question,
+          focus,
+          timeframe,
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
+        },
+      }),
+    onSuccess: setResult,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    setResult(null);
+  }, [open, account.id]);
+
+  if (!open) return null;
+
+  return (
+    <>
+      <button
+        aria-label="Close Ask AI"
+        className="fixed inset-0 z-40 bg-black/45"
+        onClick={onClose}
+      />
+      <aside className="fixed right-0 top-0 z-50 h-screen w-full max-w-xl bg-card border-l shadow-2xl flex flex-col">
+        <div className="px-5 py-4 border-b flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="size-8 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <Sparkles className="size-4" />
+              </span>
+              <div>
+                <h2 className="text-sm font-bold">Ask AI</h2>
+                <p className="text-[11px] text-muted-foreground">{account.name}</p>
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="size-8 rounded-md border flex items-center justify-center hover:bg-muted transition-colors"
+            aria-label="Close"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Focus
+              </span>
+              <select
+                value={focus}
+                onChange={(e) => setFocus(e.target.value)}
+                className="w-full h-9 rounded-md border bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="roadmap">Roadmap</option>
+                <option value="retention">Retention</option>
+                <option value="growth">Growth</option>
+                <option value="leadership_summary">Leadership summary</option>
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Timeframe
+              </span>
+              <select
+                value={timeframe}
+                onChange={(e) => setTimeframe(e.target.value)}
+                className="w-full h-9 rounded-md border bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <option value="7_days">7 days</option>
+                <option value="30_days">30 days</option>
+                <option value="90_days">90 days</option>
+                <option value="renewal_cycle">Renewal cycle</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Suggested prompts
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {prompts.map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => setQuestion(prompt)}
+                  className="px-2.5 py-1.5 text-[11px] border rounded-md hover:bg-muted transition-colors text-left"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="space-y-2 block">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Question
+            </span>
+            <textarea
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              rows={4}
+              className="w-full rounded-lg border bg-background p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder="Ask about risk, renewal, growth, stakeholders, or next actions..."
+            />
+          </label>
+
+          <button
+            onClick={() => runAi()}
+            disabled={isPending || !question.trim()}
+            className="w-full h-10 rounded-md bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Sparkles className="size-4" />
+            )}
+            {isPending ? "Analyzing account" : "Generate recommendations"}
+          </button>
+
+          {error && (
+            <div className="border border-crit/30 bg-crit/10 text-crit rounded-lg p-3 text-xs">
+              {error.message}
+            </div>
+          )}
+
+          {result && <AiAnswer result={result} />}
+        </div>
+      </aside>
+    </>
+  );
+}
+function AiAnswer({ result }) {
+  const riskColor =
+    result.riskLevel === "critical"
+      ? "text-crit bg-crit/10 border-crit/20"
+      : result.riskLevel === "high"
+        ? "text-crit bg-crit/10 border-crit/20"
+        : result.riskLevel === "medium"
+          ? "text-warn bg-warn/10 border-warn/20"
+          : "text-success bg-success/10 border-success/20";
+
+  return (
+    <div className="space-y-4">
+      <div className="border rounded-xl p-4 bg-background">
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              AI summary
+            </p>
+            <p className="text-sm mt-1 leading-relaxed">{result.summary}</p>
+          </div>
+          <span
+            className={`px-2 py-1 rounded border text-[10px] uppercase font-bold shrink-0 ${riskColor}`}
+          >
+            {result.riskLevel}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+          <span className="font-mono uppercase">Source: {result.source}</span>
+          <span className="font-mono uppercase">Model: {result.model}</span>
+          <span className="font-mono uppercase">
+            Confidence: {Math.round((result.confidence ?? 0) * 100)}%
+          </span>
+        </div>
+      </div>
+
+      <AiList title="Risks" items={result.risks} empty="No major risks returned." />
+      <AiList
+        title="Opportunities"
+        items={result.opportunities}
+        empty="No opportunities returned."
+      />
+      <AiList
+        title="Recommendations"
+        items={result.recommendations}
+        empty="No recommendations returned."
+      />
+
+      <div className="border rounded-xl p-4 bg-background">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">
+          Roadmap
+        </h3>
+        <div className="space-y-3">
+          {result.roadmap?.map((phase) => (
+            <div key={phase.phase} className="border rounded-lg p-3">
+              <p className="text-sm font-bold">{phase.phase}</p>
+              <ul className="mt-2 space-y-1.5">
+                {(phase.actions ?? []).map((action) => (
+                  <li key={action} className="text-xs flex gap-2">
+                    <CheckCircle2 className="size-3.5 text-success shrink-0 mt-0.5" />
+                    <span>{action}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {result.followUpQuestions?.length > 0 && (
+        <div className="border rounded-xl p-4 bg-background">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">
+            Follow-up questions
+          </h3>
+          <ul className="space-y-1.5">
+            {result.followUpQuestions.map((q) => (
+              <li key={q} className="text-xs flex gap-2">
+                <Lightbulb className="size-3.5 text-accent shrink-0 mt-0.5" />
+                <span>{q}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+function AiList({ title, items, empty }) {
+  return (
+    <div className="border rounded-xl p-4 bg-background">
+      <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">
+        {title}
+      </h3>
+      {items?.length ? (
+        <div className="space-y-3">
+          {items.map((item) => (
+            <div
+              key={`${item.title}-${item.evidence}`}
+              className="border-l-2 border-accent/40 pl-3"
+            >
+              <p className="text-sm font-semibold">{item.title}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {item.evidence ?? item.potential ?? item.timeframe ?? ""}
+              </p>
+              {(item.owner || item.timeframe || item.severity || item.potential) && (
+                <p className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mt-1">
+                  {[item.severity, item.potential, item.owner, item.timeframe]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{empty}</p>
+      )}
     </div>
   );
 }
