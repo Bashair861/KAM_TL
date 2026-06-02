@@ -13,6 +13,15 @@ export const ACTIVITY_TAB_AREAS = [
 
 const AREA_ORDER = new Map(ACTIVITY_TAB_AREAS.map((area, index) => [area, index]));
 const HIGH_VALUE_THRESHOLD = 100_000;
+const ACTIVITY_RECOMMENDATION_PARAMETERS = {
+  scoreGap: "Score Gap / Weakest KPI",
+  stakeholderCoverage: "Stakeholder Coverage",
+  deliveryRisk: "Delivery / Escalation Risk",
+  valueGrowth: "Value / Growth Support",
+  retentionRisk: "Retention Risk",
+  accountIntelligence: "Account Intelligence",
+  meetingSignal: "Meeting Signal",
+};
 
 function toId(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -20,6 +29,10 @@ function toId(value) {
 
 function buildEvidence({ source, sourceType, date, excerpt, reason }) {
   return { source, sourceType, date, excerpt, reason };
+}
+
+function buildActionItems(items) {
+  return (items ?? []).filter(Boolean);
 }
 
 function getScoreSignals(account) {
@@ -113,6 +126,54 @@ function summarizeMetrics(block) {
   return `${lowest.label} is at ${lowest.value}/10${lowest.hint ? ` (${lowest.hint})` : ""}.`;
 }
 
+function getScore(account, key, fallback = 10) {
+  return account?.[key]?.score ?? fallback;
+}
+
+function formatScore(score) {
+  return Number.isFinite(score) ? score.toFixed(1).replace(/\.0$/, "") : "n/a";
+}
+
+function formatGrowthUpside(account, divisor = 4) {
+  return `$${Math.round(getPotentialSlice(account, divisor) / 1000)}k`;
+}
+
+function isStaleStakeholderContact(lastContact = "") {
+  const value = lastContact.toLowerCase();
+  if (/month|quarter|q[1-4]|last/i.test(lastContact)) return true;
+
+  const weeks = value.match(/(\d+)\s*w/);
+  if (weeks && Number(weeks[1]) >= 2) return true;
+
+  const days = value.match(/(\d+)\s*d/);
+  return Boolean(days && Number(days[1]) >= 21);
+}
+
+function getStakeholderSignal(account) {
+  const stakeholders = account.stakeholders ?? [];
+  const staleStakeholders = stakeholders.filter((stakeholder) =>
+    isStaleStakeholderContact(stakeholder.lastContact),
+  );
+  const blockers = stakeholders.filter((stakeholder) =>
+    /blocker|risk|detractor/i.test(stakeholder.influence ?? ""),
+  );
+  const champions = stakeholders.filter((stakeholder) =>
+    /champion|sponsor|executive/i.test(stakeholder.influence ?? ""),
+  );
+
+  return {
+    stakeholders,
+    staleStakeholders,
+    blockers,
+    champions,
+    hasCoverageGap: !champions.length || Boolean(blockers.length) || Boolean(staleStakeholders.length),
+  };
+}
+
+function getOpenEscalation(escalations) {
+  return (escalations ?? [])[0] ?? null;
+}
+
 function buildOpportunityEvidence(opportunity, account) {
   const evidence = [
     buildEvidence({
@@ -162,6 +223,7 @@ function buildOpportunityEvidence(opportunity, account) {
 function buildBackendOpportunities(account, opportunities) {
   return (opportunities ?? []).map((opportunity) => {
     const healthArea = isEscalationSource(opportunity.source) ? "Retention" : "Growth";
+    const nextStep = opportunity.nextStep ?? "Validate fit with sponsor";
     const item = {
       id: `opp-${opportunity.id}`,
       title: opportunity.title,
@@ -169,7 +231,13 @@ function buildBackendOpportunities(account, opportunities) {
       priority: "Medium",
       potentialValue: opportunity.potential ?? 0,
       confidence: opportunity.confidence ?? "Medium",
-      nextStep: opportunity.nextStep ?? "Validate fit with sponsor",
+      parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.valueGrowth,
+      nextStep,
+      actionItems: buildActionItems([
+        nextStep,
+        "Identify buyer, sponsor, and approval path",
+        "Create follow-up date and internal owner",
+      ]),
       healthArea,
       approvalRequired: (opportunity.potential ?? 0) >= HIGH_VALUE_THRESHOLD,
       approverRole: (opportunity.potential ?? 0) >= HIGH_VALUE_THRESHOLD ? "Head of KAM" : null,
@@ -195,7 +263,13 @@ function buildWhitespaceOpportunity(account) {
     priority: account.whiteSpaceCount >= 3 ? "High" : "Medium",
     potentialValue: getPotentialSlice(account, Math.max(account.whiteSpaceCount || 1, 2)),
     confidence: account.whiteSpaceCount >= 3 ? "High" : "Medium",
+    parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.valueGrowth,
     nextStep: `Validate ${whiteSpace.service} fit in the next client review`,
+    actionItems: buildActionItems([
+      `Confirm business need for ${whiteSpace.service}`,
+      "Identify buyer, sponsor, and expected value",
+      "Create a scoped proposal or discovery follow-up",
+    ]),
     healthArea: "Growth",
     approvalRequired: false,
     approverRole: null,
@@ -234,7 +308,13 @@ function buildRetentionOpportunity(account, escalations) {
     priority: account.retentionRisk === "High" || account.renewalDays <= 90 ? "High" : "Medium",
     potentialValue: Math.max(Math.round(account.arr * 0.08), 50_000),
     confidence: hasEscalation ? "High" : "Medium",
+    parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.retentionRisk,
     nextStep: "Prepare sponsor recovery plan and renewal talking points",
+    actionItems: buildActionItems([
+      "List renewal blockers and risk owners",
+      "Prepare sponsor recovery plan and renewal talking points",
+      "Set recovery milestones before the renewal window tightens",
+    ]),
     healthArea: "Retention",
     approvalRequired: true,
     approverRole: "Head of KAM",
@@ -281,10 +361,16 @@ function buildMissingKycSuggestion(account) {
     title: "Complete missing account intelligence fields",
     urgency: "A",
     healthArea: "KYC",
+    parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.accountIntelligence,
     reason: `${missing.length} KYC fields are incomplete, which weakens scoring context and action planning.`,
     expectedLift: "+KYC health",
     confidence: "High",
     nextStep: "Fill the missing account fields in Overview",
+    actionItems: buildActionItems([
+      "Complete missing KYC/account fields",
+      "Validate decision makers, competitors, and business flow",
+      "Refresh score recommendations after account context is updated",
+    ]),
     evidence: [
       buildEvidence({
         source: "Overview",
@@ -317,10 +403,14 @@ function buildScoreRecommendation(account, escalations, config) {
     title: config.title(account),
     urgency,
     healthArea: config.area,
+    parameter: config.parameter ?? ACTIVITY_RECOMMENDATION_PARAMETERS.scoreGap,
     reason: config.reason(account, lowestMetric),
     expectedLift: config.expectedLift(account),
     confidence: hasEscalation && config.area === "Retention" ? "High" : config.confidence(score),
     nextStep: config.nextStep(account),
+    actionItems: buildActionItems(
+      config.actionItems?.(account, lowestMetric) ?? [config.nextStep(account)],
+    ),
     evidence: [
       buildEvidence({
         source: config.metricPrefix,
@@ -344,6 +434,175 @@ function buildScoreRecommendation(account, escalations, config) {
   };
 }
 
+function buildStakeholderCoverageRecommendation(account) {
+  const relationshipScore = getScore(account, "relationshipHealth");
+  const stakeholderSignal = getStakeholderSignal(account);
+  if (relationshipScore >= 8.7 && !stakeholderSignal.hasCoverageGap) return null;
+
+  const staleNames = stakeholderSignal.staleStakeholders
+    .slice(0, 2)
+    .map((stakeholder) => stakeholder.name)
+    .join(", ");
+  const blockerNames = stakeholderSignal.blockers
+    .slice(0, 2)
+    .map((stakeholder) => stakeholder.name)
+    .join(", ");
+  const relationshipMetric = getLowestMetric(account.relationshipHealth);
+
+  return {
+    id: `rag-stakeholder-coverage-${account.id}`,
+    title: `Refresh stakeholder map and sponsor coverage for ${account.name}`,
+    urgency: relationshipScore <= 7 || stakeholderSignal.blockers.length ? "R" : "A",
+    healthArea: "Relationship",
+    parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.stakeholderCoverage,
+    reason:
+      `Relationship score is ${formatScore(relationshipScore)}/10` +
+      `${relationshipMetric ? ` and ${relationshipMetric.label.toLowerCase()} is the weakest relationship metric` : ""}.` +
+      `${blockerNames ? ` Blocker coverage exists around ${blockerNames}.` : ""}` +
+      `${staleNames ? ` Recent contact is stale for ${staleNames}.` : ""}`,
+    expectedLift: "+1.0 Relationship",
+    confidence: relationshipScore <= 7 || stakeholderSignal.blockers.length ? "High" : "Medium",
+    nextStep: "Confirm champion, blocker, decision maker, and next sponsor touchpoint",
+    actionItems: buildActionItems([
+      "Update the stakeholder map with champion, blocker, buyer, and decision maker",
+      "Schedule the next sponsor touchpoint",
+      blockerNames ? `Create blocker-handling plan for ${blockerNames}` : null,
+      staleNames ? `Refresh contact with ${staleNames}` : null,
+    ]),
+    evidence: [
+      buildEvidence({
+        source: "Score Marking Matrics",
+        sourceType: "Score Marking Matrics",
+        date: "Current score snapshot",
+        excerpt: `Relationship score is ${formatScore(relationshipScore)}/10. ${summarizeMetrics(account.relationshipHealth)}`,
+        reason: "Relationship score gaps should be backed by named stakeholder actions.",
+      }),
+      buildEvidence({
+        source: "Overview",
+        sourceType: "Stakeholder map",
+        date: "Current account state",
+        excerpt: `${stakeholderSignal.stakeholders.length} stakeholders tracked; ${stakeholderSignal.champions.length} champion signals; ${stakeholderSignal.blockers.length} blocker signals.`,
+        reason: "Coverage quality determines whether score-improvement actions reach the right sponsor.",
+      }),
+    ],
+  };
+}
+
+function buildDeliveryRiskRecommendation(account, escalations) {
+  const openEscalation = getOpenEscalation(escalations);
+  const projectScore = getScore(account, "projectHealth");
+  const riskScore = getScore(account, "riskScoring");
+  const csatScore = getScore(account, "csat");
+  const shouldRecommend =
+    Boolean(openEscalation) || projectScore < 8 || riskScore < 7.8 || csatScore < 8.3;
+
+  if (!shouldRecommend) return null;
+
+  const urgency = openEscalation || riskScore <= 6.8 || csatScore <= 7.5 ? "R" : "A";
+  const weakestProjectMetric = getLowestMetric(account.projectHealth);
+  const area = openEscalation ? "Escalation" : riskScore < projectScore ? "Risk" : "Project";
+
+  return {
+    id: `rag-delivery-risk-${account.id}`,
+    title: openEscalation
+      ? "Convert open escalation into a score recovery plan"
+      : "Run a delivery-risk review before score drops further",
+    urgency,
+    healthArea: area,
+    parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.deliveryRisk,
+    reason:
+      `Project ${formatScore(projectScore)}/10, risk ${formatScore(riskScore)}/10, and CSAT ${formatScore(csatScore)}/10 create a delivery-risk signal.` +
+      `${weakestProjectMetric ? ` Weakest delivery metric: ${weakestProjectMetric.label}.` : ""}`,
+    expectedLift: openEscalation ? "+1.0 CSAT" : "+1.2 Project",
+    confidence: urgency === "R" ? "High" : "Medium",
+    nextStep: openEscalation
+      ? "Assign recovery owners, due dates, and client-facing status message"
+      : "Review blockers, quality issues, and delivery dependencies with client leads",
+    actionItems: buildActionItems([
+      openEscalation
+        ? "Confirm escalation recovery owner and client-facing update"
+        : "Review delivery blockers with internal and client leads",
+      "Document due dates for each risk item",
+      "Send summary with commitments and next checkpoint",
+    ]),
+    evidence: [
+      buildEvidence({
+        source: "Score Marking Matrics",
+        sourceType: "Score Marking Matrics",
+        date: "Current score snapshot",
+        excerpt: `Project ${formatScore(projectScore)}/10, risk ${formatScore(riskScore)}/10, CSAT ${formatScore(csatScore)}/10.`,
+        reason: "Delivery, risk, and satisfaction scores should be evaluated together.",
+      }),
+      ...(openEscalation
+        ? [
+            buildEvidence({
+              source: "Escalation",
+              sourceType: "Escalation",
+              date: "Open",
+              excerpt: `${openEscalation.title} is active with priority ${openEscalation.priority}.`,
+              reason: "Open escalations should become explicit recovery activities.",
+            }),
+          ]
+        : []),
+    ],
+  };
+}
+
+function buildValueGrowthRecommendation(account) {
+  const financialScore = getScore(account, "financialHealth");
+  const growthUpside = account.growthUpside ?? 0;
+  const whiteSpaceCount = account.whiteSpaceCount ?? 0;
+  const whiteSpace = (account.retentionGrowth ?? []).find(
+    (service) => !service.offered && service.applicable,
+  );
+  const shouldRecommend = financialScore < 8.8 || whiteSpaceCount > 0 || growthUpside > 0;
+
+  if (!shouldRecommend) return null;
+
+  return {
+    id: `rag-value-growth-${account.id}`,
+    title: whiteSpace
+      ? `Turn ${whiteSpace.service} whitespace into a value-backed next step`
+      : "Refresh value realization narrative for score improvement",
+    urgency: financialScore <= 7 || whiteSpaceCount >= 3 ? "A" : "G",
+    healthArea: whiteSpace ? "Growth" : "Financial",
+    parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.valueGrowth,
+    reason:
+      `Financial score is ${formatScore(financialScore)}/10 with ${whiteSpaceCount} whitespace signals` +
+      `${growthUpside > 0 ? ` and about $${Math.round(growthUpside / 1000)}k growth upside` : ""}.`,
+    expectedLift: whiteSpace ? `+${formatGrowthUpside(account)} Growth` : "+0.8 Financial",
+    confidence: whiteSpaceCount >= 3 || financialScore <= 7.5 ? "High" : "Medium",
+    nextStep: whiteSpace
+      ? `Validate ${whiteSpace.service} need, value case, and buyer in the next client review`
+      : "Package outcomes, ROI signals, and renewal value into one client-ready note",
+    actionItems: buildActionItems([
+      whiteSpace
+        ? `Validate ${whiteSpace.service} need and buyer`
+        : "Summarize measurable value delivered so far",
+      "Confirm growth or renewal value story with sponsor",
+      "Add next commercial step with owner and date",
+    ]),
+    evidence: [
+      buildEvidence({
+        source: "Score Marking Matrics",
+        sourceType: "Score Marking Matrics",
+        date: "Current score snapshot",
+        excerpt: `Financial score is ${formatScore(financialScore)}/10. ${summarizeMetrics(account.financialHealth)}`,
+        reason: "Financial health should be improved through a clear value narrative.",
+      }),
+      buildEvidence({
+        source: "Retention VS Growth",
+        sourceType: "Retention VS Growth",
+        date: "Current account state",
+        excerpt: whiteSpace
+          ? `${whiteSpace.service} is applicable but not yet offered. ${whiteSpace.trackingNote ?? ""}`.trim()
+          : `${whiteSpaceCount} whitespace signals and $${Math.round(growthUpside / 1000)}k estimated growth upside are tracked.`,
+        reason: "Growth signals give the KAM a practical path to improve account value.",
+      }),
+    ],
+  };
+}
+
 function buildRagRecommendations(account, escalations) {
   const configs = [
     {
@@ -359,6 +618,11 @@ function buildRagRecommendations(account, escalations) {
         `Relationship score is ${currentAccount.relationshipHealth.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} is the weakest live signal` : ""}.`,
       expectedLift: () => "+1.2 Relationship",
       nextStep: () => "Lock a sponsor touchpoint before the next business review",
+      actionItems: (currentAccount, lowestMetric) => [
+        "Confirm executive sponsor and decision-maker access",
+        "Schedule sponsor touchpoint before the next business review",
+        lowestMetric ? `Improve weak signal: ${lowestMetric.label}` : "Refresh relationship notes",
+      ],
       confidence: (score) => (score <= 7.4 ? "High" : "Medium"),
       evidenceReason:
         "Low relationship signals should be converted into deliberate sponsor coverage.",
@@ -376,6 +640,11 @@ function buildRagRecommendations(account, escalations) {
         `Project score is ${currentAccount.projectHealth.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} needs attention` : ""}.`,
       expectedLift: () => "+1.5 Project",
       nextStep: () => "Book a working session with delivery and client technical leads",
+      actionItems: (currentAccount, lowestMetric) => [
+        "Book delivery review with client technical lead",
+        "Identify blockers, defects, and scope-change risks",
+        lowestMetric ? `Create action owner for ${lowestMetric.label}` : "Confirm next delivery milestone",
+      ],
       confidence: (score) => (score <= 7.5 ? "High" : "Medium"),
       evidenceReason:
         "Delivery health gaps should be addressed before they become client-visible risk.",
@@ -393,6 +662,11 @@ function buildRagRecommendations(account, escalations) {
         `Resource score is ${currentAccount.resourceHealth.score}/10 with ${currentAccount.resourceHealth.criticalResources} critical roles and ${currentAccount.resourceHealth.leavesThisMonth} leave events this month.`,
       expectedLift: () => "+1.3 Resource",
       nextStep: () => "Confirm backup owners and knowledge-transfer plan this week",
+      actionItems: (currentAccount) => [
+        "Confirm backup owner for every critical role",
+        "Create knowledge-transfer plan for leave coverage",
+        `Review ${currentAccount.resourceHealth.criticalResources} critical roles this week`,
+      ],
       confidence: (score) => (score <= 7.5 ? "High" : "Medium"),
       evidenceReason: "Resource resilience directly impacts delivery continuity and confidence.",
     },
@@ -409,6 +683,11 @@ function buildRagRecommendations(account, escalations) {
         `Financial score is ${currentAccount.financialHealth.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} is lagging the rest of the account` : ""}.`,
       expectedLift: () => "+0.8 Financial",
       nextStep: () => "Package measurable value outcomes for the next client review",
+      actionItems: (currentAccount, lowestMetric) => [
+        "Prepare measurable value outcomes for client review",
+        "Check margin, billing, and discount leakage",
+        lowestMetric ? `Address financial weak signal: ${lowestMetric.label}` : "Confirm renewal value story",
+      ],
       confidence: (score) => (score <= 7.5 ? "High" : "Medium"),
       evidenceReason: "A stronger value story supports both retention and expansion.",
     },
@@ -425,6 +704,11 @@ function buildRagRecommendations(account, escalations) {
         `Risk score is ${currentAccount.riskScoring.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} is the biggest warning signal` : ""}.`,
       expectedLift: () => "+1.0 Risk",
       nextStep: () => "Review blockers and assign owners before the next status update",
+      actionItems: (currentAccount, lowestMetric) => [
+        "List top account risks and assign owners",
+        "Confirm competitor, renewal, and delivery risk status",
+        lowestMetric ? `Create mitigation for ${lowestMetric.label}` : "Set next risk review date",
+      ],
       confidence: (score) => (score <= 7.0 ? "High" : "Medium"),
       evidenceReason: "Risk signals should be addressed while they are still manageable.",
     },
@@ -441,6 +725,11 @@ function buildRagRecommendations(account, escalations) {
         `CSAT score is ${currentAccount.csat.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} needs a follow-up response` : ""}.`,
       expectedLift: () => "+1.1 CSAT",
       nextStep: () => "Share an improvement update and confirm sentiment in the next touchpoint",
+      actionItems: (currentAccount, lowestMetric) => [
+        "Close feedback loop with sponsor or main contact",
+        "Share improvement update and owner list",
+        lowestMetric ? `Follow up on CSAT weak signal: ${lowestMetric.label}` : "Confirm latest client sentiment",
+      ],
       confidence: (score) => (score <= 7.8 ? "High" : "Medium"),
       evidenceReason: "Customer feedback should be turned into clear follow-up commitments.",
     },
@@ -449,6 +738,14 @@ function buildRagRecommendations(account, escalations) {
   const recommendations = configs
     .map((config) => buildScoreRecommendation(account, escalations, config))
     .filter(Boolean);
+
+  [
+    buildStakeholderCoverageRecommendation(account),
+    buildDeliveryRiskRecommendation(account, escalations),
+    buildValueGrowthRecommendation(account),
+  ]
+    .filter(Boolean)
+    .forEach((recommendation) => recommendations.push(recommendation));
 
   if (
     account.retentionRisk !== "Low" ||
@@ -460,10 +757,16 @@ function buildRagRecommendations(account, escalations) {
       title: "Create a renewal and recovery action plan",
       urgency: account.retentionRisk === "High" || account.renewalDays <= 90 ? "R" : "A",
       healthArea: "Retention",
+      parameter: ACTIVITY_RECOMMENDATION_PARAMETERS.retentionRisk,
       reason: `Retention risk is ${account.retentionRisk} with renewal in ${account.renewalDays} days.`,
       expectedLift: "+Retention confidence",
       confidence: (escalations ?? []).length ? "High" : "Medium",
       nextStep: "Align recovery milestones, sponsor messaging, and renewal blockers",
+      actionItems: buildActionItems([
+        "Confirm renewal owner, sponsor, and approval path",
+        "List renewal blockers and required recovery milestones",
+        "Send sponsor-facing recovery or value plan",
+      ]),
       evidence: [
         buildEvidence({
           source: "Overview",
@@ -498,7 +801,7 @@ function buildRagRecommendations(account, escalations) {
       if (leftOrder !== rightOrder) return leftOrder - rightOrder;
       return (AREA_ORDER.get(left.healthArea) ?? 99) - (AREA_ORDER.get(right.healthArea) ?? 99);
     })
-    .slice(0, 6);
+    .slice(0, 8);
 }
 
 function buildMeetingAction(account, record, index, fallbacks) {
@@ -510,9 +813,17 @@ function buildMeetingAction(account, record, index, fallbacks) {
     meetingDate: record.date,
     sourceExcerpt: record.outcome || record.approach || "Meeting note available for follow-up.",
     healthArea: template.healthArea,
+    parameter: template.parameter ?? ACTIVITY_RECOMMENDATION_PARAMETERS.meetingSignal,
     expectedLift: template.expectedLift,
     confidence: template.confidence,
     nextStep: template.nextStep,
+    actionItems: buildActionItems(
+      template.actionItems ?? [
+        template.nextStep,
+        "Assign owner and due date",
+        "Send client-facing follow-up summary",
+      ],
+    ),
     evidence: [
       buildEvidence({
         source: `Fireflies ${record.topic}`,
@@ -686,11 +997,13 @@ function mapExistingActivityRow(account, activity) {
     dueDate: activity.due || "Not set",
     status: activity.status,
     rag: activity.rag,
+    parameter: "Existing Activity",
     expectedLift: activity.expectedLift || "—",
     confidence: "Confirmed",
     reason: `Active ${area.toLowerCase()} plan already in progress for this account.`,
     evidence: buildExistingEvidence(account, activity, area),
     nextStep: activity.title,
+    actionItems: buildActionItems([activity.title]),
   };
 }
 
@@ -706,11 +1019,13 @@ function mapSuggestionToActivityRow(suggestion, sourceKind) {
     dueDate: suggestion.urgency === "R" ? "In 3d" : suggestion.urgency === "A" ? "In 7d" : "In 14d",
     status: "Suggested",
     rag: suggestion.urgency ?? "A",
+    parameter: suggestion.parameter ?? "Recommendation",
     expectedLift: suggestion.expectedLift,
     confidence: suggestion.confidence,
     reason: suggestion.reason ?? suggestion.nextStep,
     evidence: suggestion.evidence,
     nextStep: suggestion.nextStep,
+    actionItems: buildActionItems(suggestion.actionItems ?? [suggestion.nextStep]),
   };
 }
 

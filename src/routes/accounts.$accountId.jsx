@@ -525,6 +525,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
                         value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
                       />
                     </div>
+                    <ActionItemsList items={opportunity.actionItems} />
                     <EvidencePreview
                       evidence={opportunity.evidence}
                       onView={() =>
@@ -542,7 +543,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
                       disabled={!canAct}
                       onClick={() => openPlanReview("opportunity", opportunity)}
                     >
-                      {opportunity.actionLabel ?? "Pursue"}
+                      {opportunity.actionLabel ?? "Review plan"}
                     </Button>
                   </div>
                 </div>
@@ -974,7 +975,7 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
   const item = target?.item ?? null;
   const actionLabel =
     target?.kind === "opportunity"
-      ? (item?.actionLabel ?? "Pursue")
+      ? (item?.actionLabel ?? "Review plan")
       : target?.kind === "growth"
         ? "Plan Pitch"
         : "Review";
@@ -2368,7 +2369,7 @@ function ActivityTab({ account, opportunities, escalations }) {
                     disabled={!editable}
                     className="text-[10px] font-bold uppercase tracking-wider text-accent disabled:opacity-40 whitespace-nowrap"
                   >
-                    Pursue →
+                    Review plan →
                   </button>
                 </div>
               </li>
@@ -2669,9 +2670,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       <PriorityBadge priority={opportunity.priority} />
                       <ConfidenceBadge confidence={opportunity.confidence} />
                       <AreaBadge area={opportunity.healthArea} />
+                      <ParameterBadge parameter={opportunity.parameter} />
                       {opportunity.approvalRequired && (
                         <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
-                          Approval required
+                          Needs approval
                         </span>
                       )}
                     </div>
@@ -2684,6 +2686,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         value={`+${formatCurrency(opportunity.potentialValue)}`}
                       />
                       <MiniStat label="Next step" value={opportunity.nextStep} />
+                      <div className="sm:col-span-3">
+                        <ActionItemsList items={opportunity.actionItems} />
+                      </div>
                       <MiniStat
                         label="Priority"
                         value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
@@ -2706,7 +2711,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       disabled={!canAct}
                       onClick={() => openReview("opportunity", opportunity)}
                     >
-                      Pursue
+                      Review plan
                     </Button>
                   </div>
                 </div>
@@ -2758,12 +2763,14 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                           <p className="text-sm font-semibold leading-snug">{item.title}</p>
                           <AreaBadge area={item.healthArea} />
                           <ConfidenceBadge confidence={item.confidence} />
+                          <ParameterBadge parameter={item.parameter} />
                         </div>
                         <p className="text-xs text-muted-foreground">{item.reason}</p>
                         <div className="grid gap-2 sm:grid-cols-2 text-xs">
                           <MiniStat label="Expected lift" value={item.expectedLift} />
                           <MiniStat label="Next step" value={item.nextStep} />
                         </div>
+                        <ActionItemsList items={item.actionItems} />
                         <EvidencePreview
                           evidence={item.evidence}
                           onView={() =>
@@ -2835,6 +2842,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       <p className="text-sm font-semibold leading-snug">{item.title}</p>
                       <AreaBadge area={item.healthArea} />
                       <ConfidenceBadge confidence={item.confidence} />
+                      <ParameterBadge parameter={item.parameter} />
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                       {item.meetingTitle} · {item.meetingDate}
@@ -2844,6 +2852,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       <MiniStat label="Expected lift" value={item.expectedLift} />
                       <MiniStat label="Next step" value={item.nextStep} />
                     </div>
+                    <ActionItemsList items={item.actionItems} />
                     <EvidencePreview
                       evidence={item.evidence}
                       onView={() =>
@@ -2918,8 +2927,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                   </td>
                   <td className="px-6 py-4 text-xs min-w-[280px]">
                     <div className="space-y-1">
+                      <ParameterBadge parameter={row.parameter} />
                       <p className="font-semibold text-foreground">{row.title}</p>
                       <p className="text-muted-foreground leading-relaxed">{row.reason}</p>
+                      <ActionItemsList items={row.actionItems} compact />
                       {row.rowType === "draft" && (
                         <p className="text-[11px] text-accent font-medium">{row.reviewState}</p>
                       )}
@@ -3036,9 +3047,10 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
                   <AreaBadge area={item.healthArea ?? item.area} />
                   {item.priority ? <PriorityBadge priority={item.priority} /> : null}
                   {item.confidence ? <ConfidenceBadge confidence={item.confidence} /> : null}
+                  <ParameterBadge parameter={item.parameter} />
                   {item.approvalRequired && (
                     <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
-                      {item.approverRole ?? "Head of KAM"} approval required
+                      Needs {item.approverRole ?? "Head of KAM"} approval
                     </span>
                   )}
                 </div>
@@ -3057,6 +3069,7 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
                   />
                   <MiniStat label="Next step" value={item.nextStep} />
                 </div>
+                <ActionItemsList items={item.actionItems} />
               </div>
 
               <div className="grid gap-4">
@@ -3259,6 +3272,27 @@ function EvidencePreview({ evidence, onView, compact = false }) {
   );
 }
 
+function ActionItemsList({ items, compact = false }) {
+  const visibleItems = (items ?? []).filter(Boolean);
+  if (!visibleItems.length) return null;
+
+  return (
+    <div className={`rounded-lg border bg-muted/20 ${compact ? "p-2" : "p-3"}`}>
+      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
+        Action items
+      </p>
+      <ul className={compact ? "space-y-1" : "space-y-1.5"}>
+        {visibleItems.slice(0, compact ? 2 : 4).map((actionItem, index) => (
+          <li key={`${actionItem}-${index}`} className="flex items-start gap-2 text-xs">
+            <CheckCircle2 className="size-3.5 text-success mt-0.5 shrink-0" />
+            <span className="leading-relaxed text-foreground">{actionItem}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function MiniStat({ label, value }) {
   return (
     <div className="rounded-lg border bg-muted/20 p-3">
@@ -3281,7 +3315,7 @@ function PriorityBadge({ priority }) {
     <span
       className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[priority] ?? "bg-muted text-muted-foreground"}`}
     >
-      {priority}
+      Priority: {priority}
     </span>
   );
 }
@@ -3297,7 +3331,7 @@ function ConfidenceBadge({ confidence }) {
     <span
       className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[confidence] ?? "bg-muted text-muted-foreground"}`}
     >
-      {confidence}
+      Confidence: {confidence}
     </span>
   );
 }
@@ -3305,7 +3339,17 @@ function ConfidenceBadge({ confidence }) {
 function AreaBadge({ area }) {
   return (
     <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1 whitespace-nowrap">
-      {area}
+      Area: {area}
+    </span>
+  );
+}
+
+function ParameterBadge({ parameter }) {
+  if (!parameter) return null;
+
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1 whitespace-nowrap">
+      Rule: {parameter}
     </span>
   );
 }
@@ -3411,11 +3455,13 @@ function buildDraftRow(target, form) {
     dueDate: formatDraftDate(form.dueDate),
     status: "Draft",
     rag: item.urgency ?? item.rag ?? mapPriorityToRag(item.priority),
+    parameter: item.parameter ?? "Manual Review",
     expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
     confidence: item.confidence ?? "Medium",
     reason: item.reason ?? item.sourceExcerpt ?? form.nextStep.trim(),
     evidence: item.evidence ?? [],
     nextStep: form.nextStep.trim(),
+    actionItems: item.actionItems ?? [form.nextStep.trim()],
     reviewState: item.approvalRequired
       ? `Pending ${item.approverRole ?? "Head of KAM"} approval`
       : "Needs Review",
