@@ -26,8 +26,8 @@ BEGIN
     coalesce(substring(_name from '(?i) ([a-z])'), '')
   );
 
-  INSERT INTO public.profiles (id, name, initials, role, email)
-  VALUES (new.id, _name, _initials, 'KAM', new.email)
+  INSERT INTO public.profiles (id, name, initials, role, email, is_active)
+  VALUES (new.id, _name, _initials, 'KAM', new.email, true)
   ON CONFLICT (id) DO NOTHING;
 
   RETURN new;
@@ -75,4 +75,4 @@ WHERE  email    = 'bashair@aether.io';
 -- ============================================================
 -- Step 3 (optional): Verify the profiles were updated
 -- ============================================================
-SELECT id, name, initials, role, email FROM public.profiles;
+SELECT id, name, initials, role, email, is_active FROM public.profiles;

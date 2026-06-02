@@ -22,6 +22,7 @@ async function seedProfiles() {
       initials: "JD",
       role: "Head of KAM",
       email: "julian@aether.io",
+      is_active: true,
     },
     {
       id: "00000000-0000-0000-0000-000000000002",
@@ -29,6 +30,7 @@ async function seedProfiles() {
       initials: "ML",
       role: "KAM",
       email: "maya@aether.io",
+      is_active: true,
     },
     {
       id: "00000000-0000-0000-0000-000000000003",
@@ -36,6 +38,7 @@ async function seedProfiles() {
       initials: "BA",
       role: "KAM",
       email: "bashair@aether.io",
+      is_active: true,
     },
   ]);
 }

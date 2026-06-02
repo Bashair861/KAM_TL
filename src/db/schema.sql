@@ -27,6 +27,7 @@ create table if not exists profiles (
   initials   text not null,
   role       user_role not null default 'KAM',
   email      text,
+  is_active  boolean not null default true,
   created_at timestamptz default now()
 );
 

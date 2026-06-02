@@ -9,7 +9,9 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as UsersRouteImport } from './routes/users'
 import { Route as StrategyRouteImport } from './routes/strategy'
+import { Route as SetPasswordRouteImport } from './routes/set-password'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as EscalationsRouteImport } from './routes/escalations'
 import { Route as EducateRouteImport } from './routes/educate'
@@ -18,9 +20,19 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountsIndexRouteImport } from './routes/accounts.index'
 import { Route as AccountsAccountIdRouteImport } from './routes/accounts.$accountId'
 
+const UsersRoute = UsersRouteImport.update({
+  id: '/users',
+  path: '/users',
+  getParentRoute: () => rootRouteImport,
+})
 const StrategyRoute = StrategyRouteImport.update({
   id: '/strategy',
   path: '/strategy',
+  getParentRoute: () => rootRouteImport,
+})
+const SetPasswordRoute = SetPasswordRouteImport.update({
+  id: '/set-password',
+  path: '/set-password',
   getParentRoute: () => rootRouteImport,
 })
 const LoginRoute = LoginRouteImport.update({
@@ -65,7 +77,9 @@ const rootRouteChildren = {
   EducateRoute: EducateRoute,
   EscalationsRoute: EscalationsRoute,
   LoginRoute: LoginRoute,
+  SetPasswordRoute: SetPasswordRoute,
   StrategyRoute: StrategyRoute,
+  UsersRoute: UsersRoute,
   AccountsAccountIdRoute: AccountsAccountIdRoute,
   AccountsIndexRoute: AccountsIndexRoute,
 }

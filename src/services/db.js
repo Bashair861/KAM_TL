@@ -1,4 +1,6 @@
 import { supabase } from "@/lib/supabase";
+import { normalizeRole } from "@/data/kam-data";
+import { createManagedAuthUser } from "@/services/user-admin";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -65,13 +67,135 @@ export async function fetchAccounts(opts) {
   if (error) throw error;
   return (data ?? []).map(mapFlatAccount);
 }
+
+function isMissingColumnError(error, column) {
+  if (!error) return false;
+  const message = error.message?.toLowerCase() ?? "";
+  return (
+    error.code === "42703" || error.code === "PGRST204" || message.includes(column.toLowerCase())
+  );
+}
+
 export async function fetchKamUsers() {
+  const withStatus = await supabase
+    .from("profiles")
+    .select("id, name, initials, role, is_active")
+    .eq("role", "KAM");
+
+  if (!withStatus.error) {
+    return (withStatus.data ?? [])
+      .filter((user) => user.is_active !== false)
+      .map((user) => ({ ...user, role: normalizeRole(user.role) }));
+  }
+
+  if (!isMissingColumnError(withStatus.error, "is_active")) throw withStatus.error;
+
   const { data, error } = await supabase
     .from("profiles")
     .select("id, name, initials, role")
     .eq("role", "KAM");
   if (error) throw error;
-  return data ?? [];
+  return (data ?? []).map((user) => ({ ...user, role: normalizeRole(user.role) }));
+}
+
+function mapManagedUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    initials: user.initials,
+    role: normalizeRole(user.role),
+    email: user.email ?? "",
+    isActive: user.is_active ?? true,
+    createdAt: user.created_at ?? null,
+  };
+}
+
+export async function fetchUsers() {
+  const withStatus = await supabase
+    .from("profiles")
+    .select("id, name, initials, role, email, is_active, created_at")
+    .order("created_at", { ascending: false });
+
+  if (!withStatus.error) return (withStatus.data ?? []).map(mapManagedUser);
+  if (!isMissingColumnError(withStatus.error, "is_active")) throw withStatus.error;
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, name, initials, role, email, created_at")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(mapManagedUser);
+}
+
+function isLegacyRoleEnumError(error) {
+  const message = error?.message?.toLowerCase() ?? "";
+  return message.includes("invalid input value for enum") && message.includes("user_role");
+}
+
+function isMissingRpcError(error) {
+  const message = error?.message?.toLowerCase() ?? "";
+  return error?.code === "PGRST202" || message.includes("function") || message.includes("rpc");
+}
+
+function roleForLegacyEnum(role) {
+  return normalizeRole(role);
+}
+
+export async function createUserProfile(user) {
+  const normalizedRole = normalizeRole(user.role);
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before creating users.");
+
+  const authUser = await createManagedAuthUser({
+    data: {
+      name: user.name,
+      email: user.email,
+      role: normalizedRole,
+      accessToken: session.access_token,
+      redirectTo:
+        typeof window !== "undefined" ? `${window.location.origin}/set-password` : undefined,
+    },
+  });
+  return {
+    ...mapManagedUser(authUser.profile),
+    inviteSent: authUser.inviteSent,
+  };
+}
+
+export async function updateUserRole(userId, role) {
+  const normalizedRole = normalizeRole(role);
+  const rpc = await supabase.rpc("update_managed_profile_role", {
+    profile_id: userId,
+    profile_role: normalizedRole,
+  });
+  if (!rpc.error) return;
+  if (!isMissingRpcError(rpc.error)) throw rpc.error;
+
+  const { error } = await supabase.from("profiles").update({ role: normalizedRole }).eq("id", userId);
+  if (!error) return;
+  if (isLegacyRoleEnumError(error)) {
+    const legacy = await supabase
+      .from("profiles")
+      .update({ role: roleForLegacyEnum(normalizedRole) })
+      .eq("id", userId);
+    if (legacy.error) throw legacy.error;
+    return;
+  }
+  throw error;
+}
+
+export async function updateUserStatus(userId, isActive) {
+  const rpc = await supabase.rpc("update_managed_profile_status", {
+    profile_id: userId,
+    profile_is_active: isActive,
+  });
+  if (!rpc.error) return;
+  if (!isMissingRpcError(rpc.error)) throw rpc.error;
+
+  const { error } = await supabase.from("profiles").update({ is_active: isActive }).eq("id", userId);
+  if (error) throw error;
 }
 // ─── update account KAM assignment ───────────────────────────────────────────
 export async function updateAccountKam(accountId, kamId) {
@@ -289,6 +413,12 @@ export async function fetchOpportunities(accountId) {
     nextStep: o.next_step ?? "",
   }));
 }
+
+function firstRelatedRow(value) {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
 export async function fetchContracts(opts) {
   let q = supabase
     .from("accounts")
@@ -299,12 +429,12 @@ export async function fetchContracts(opts) {
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map((row) => {
-    const cd = row.contract_details?.[0];
+    const cd = firstRelatedRow(row.contract_details);
     return {
       ...mapFlatAccount(row),
       duration: cd?.duration ?? "—",
-      autoRenew: cd?.auto_renew ?? false,
-      nonTerminator: cd?.non_terminator ?? false,
+      autoRenew: Boolean(cd?.auto_renew),
+      nonTerminator: Boolean(cd?.non_terminator),
       priceHike: cd?.price_hike ?? "—",
     };
   });

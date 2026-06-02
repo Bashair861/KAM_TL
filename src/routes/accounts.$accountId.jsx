@@ -1,7 +1,7 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ROLE_PERMISSIONS, formatCurrency } from "@/data/kam-data";
+import { formatCurrency, getRolePermissions } from "@/data/kam-data";
 import {
   fetchAccount,
   fetchEscalations,
@@ -85,7 +85,7 @@ function AccountDetailPage() {
     queryFn: () => fetchOpportunities(account.id),
   });
   const role = profile?.role ?? "KAM";
-  const perms = ROLE_PERMISSIONS[role];
+  const perms = getRolePermissions(role);
   const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
   return (
     <div className="flex flex-col">
@@ -254,7 +254,7 @@ function OverviewTab({ account }) {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const isHead = role === "Head of KAM" || role === "CEO";
-  const editable = ROLE_PERMISSIONS[role].write;
+  const editable = getRolePermissions(role).write;
   const queryClient = useQueryClient();
   const { data: kamUsers = [] } = useQuery({
     queryKey: ["kamUsers"],
@@ -927,7 +927,7 @@ function ScoreBlock({ title, hint, block, onExpand }) {
 }
 function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const { profile } = useAuth();
-  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
+  const editable = getRolePermissions(profile?.role).write;
   const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
   // Load from persisted kpiData if available, otherwise seed from metrics.
@@ -1330,7 +1330,7 @@ function ResourceHealthBlock({ account }) {
 /* ============================== TAB 3: Activity to Increase Score ============================== */
 function ActivityTab({ account, opportunities }) {
   const { profile } = useAuth();
-  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
+  const editable = getRolePermissions(profile?.role).write;
   const ragColor = { R: "bg-crit", A: "bg-warn", G: "bg-success" };
   const areas = ["Profit", "Project", "Resource", "Financial", "Relationship"];
   const accountOpportunities = opportunities;
@@ -1572,7 +1572,7 @@ function ActivityTab({ account, opportunities }) {
 /* ============================== TAB 4: Retention VS Growth ============================== */
 function RetentionGrowthTab({ account }) {
   const { profile } = useAuth();
-  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
+  const editable = getRolePermissions(profile?.role).write;
   const delivered = account.retentionGrowth.filter((s) => s.delivered);
   const offeredNotDelivered = account.retentionGrowth.filter((s) => s.offered && !s.delivered);
   const whiteSpace = account.retentionGrowth.filter((s) => !s.offered && s.applicable);
@@ -1691,7 +1691,7 @@ function RetentionGrowthTab({ account }) {
 /* ============================== TAB 5: Educate client ============================== */
 function EducateTab({ account }) {
   const { profile } = useAuth();
-  const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
+  const editable = getRolePermissions(profile?.role).write;
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <div className="lg:col-span-2 space-y-6">

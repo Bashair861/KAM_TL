@@ -1397,6 +1397,14 @@ export const ROLE_PERMISSIONS = {
   "Head of KAM": { read: true, write: true, scope: "all" },
   KAM: { read: true, write: true, scope: "assigned" },
 };
+export function normalizeRole(role) {
+  if (role === "C Level") return "CEO";
+  if (role === "CEO" || role === "Head of KAM" || role === "KAM") return role;
+  return "KAM";
+}
+export function getRolePermissions(role) {
+  return ROLE_PERMISSIONS[normalizeRole(role)];
+}
 // Current logged-in user (mock — replace when auth is wired)
 export const currentUser = {
   name: "Julian Drake",

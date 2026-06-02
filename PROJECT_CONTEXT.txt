@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 3 — New Account Creation + KPI Editor Polish
+  Last updated: Phase 4 - User Management + Auth Invites + Contracts Stabilization
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -16,7 +16,8 @@ The app is built as a learning/portfolio project. It started fully static
 (all data hardcoded in a JS file). It is now progressively wired to a real
 Supabase backend with full read AND write operations.
 
-The project lives at: c:\Users\GNG\Desktop\Project\KAM_TL-main
+The active working copy is currently at:
+  C:\Users\majid.zia\Documents\GitHub\KAM_TL
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -90,6 +91,13 @@ src/
 
 
 ────────────────────────────────────────────────────────────────────────────────
+Recent JS additions:
+  src/routes/users.jsx              <- Head of KAM user management page
+  src/routes/set-password.jsx       <- Invite/password setup page
+  src/services/user-admin.js        <- Server-only Supabase Auth invite function
+  src/db/add-user-management.sql    <- profiles.is_active + user management RPCs/RLS
+  src/db/rename-ceo-role.sql        <- keeps user_role enum value as CEO
+
 USER ROLES & PERMISSIONS (ROLE_PERMISSIONS in kam-data.js)
 ────────────────────────────────────────────────────────────────────────────────
 Three roles exist:
@@ -205,6 +213,56 @@ PHASE 3 — Write Operations (partial — in progress)
 
 
 ────────────────────────────────────────────────────────────────────────────────
+PHASE 4 - User Management + Auth Invites + Contracts Stabilization
+  - Re-applied the JS/JSX version of the user-management work after the project
+    was converted from TypeScript to JavaScript.
+  - Added a Users section in AppSidebar, visible to Head of KAM only.
+  - Added /users route:
+      src/routes/users.jsx
+      Head of KAM can view all users, create users, change roles, and
+      activate/deactivate users.
+  - Added profiles.is_active support:
+      AuthContext signs inactive users out.
+      fetchKamUsers() excludes inactive KAMs from assignment dropdowns.
+  - Added user-management service functions in src/services/db.js:
+      fetchUsers()
+      createUserProfile()
+      updateUserRole()
+      updateUserStatus()
+  - Added server-only Supabase Auth admin invite flow:
+      src/services/user-admin.js
+      createManagedAuthUser() uses createServerFn() so the service role key
+      stays server-side.
+      Head of KAM creates a user, Supabase sends an invite email, the user
+      clicks the email link, lands on /set-password, creates a password, then
+      signs in normally.
+  - Added /set-password route:
+      src/routes/set-password.jsx
+      Calls supabase.auth.updateUser({ password }) for invite/recovery sessions.
+  - Added/updated SQL:
+      src/db/add-user-management.sql
+        Adds is_active, Head of KAM permission RPC, profile role/status RPCs,
+        and RLS policies for profile insert/update.
+      src/db/rename-ceo-role.sql
+        Keeps the enum role name as CEO and migrates C Level back to CEO.
+  - Role naming was changed back to CEO:
+      ROLE_PERMISSIONS now uses CEO, Head of KAM, KAM.
+      normalizeRole() maps legacy C Level rows to CEO to avoid crashes.
+  - Contract duration mapping fixed:
+      fetchContracts() handles Supabase contract_details as either an array
+      or a single object, then maps duration to the Contracts page.
+  - Contracts page crash fixed:
+      Missing/null values such as contract_compliance now render as "-" instead
+      of calling toFixed() on null and triggering "This page didn't load".
+      Contracts route also shows an inline query error message instead of
+      sending the whole app to the root error boundary.
+  - Verification performed after this phase:
+      npm.cmd run build passed.
+      Targeted ESLint checks on touched JS/JSX files passed with the repo's
+      Prettier CRLF rule disabled.
+      /users, /set-password, and /contracts returned HTTP 200 locally.
+
+
 IMPORTANT DECISIONS & PATTERNS
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -232,8 +290,9 @@ IMPORTANT DECISIONS & PATTERNS
 4. ENVIRONMENT VARIABLES
    - VITE_SUPABASE_URL      → browser-safe, used by src/lib/supabase.js
    - VITE_SUPABASE_ANON_KEY → browser-safe anon/publishable key
-   - SUPABASE_SERVICE_ROLE_KEY → seed script only, bypasses RLS
-     NEVER put the service role key in a VITE_ variable
+   - SUPABASE_SERVICE_ROLE_KEY -> server/Node only, bypasses RLS
+     Used by seed.js and src/services/user-admin.js to create Supabase Auth
+     invite users. NEVER put the service role key in a VITE_ variable.
    - File must be named .env.local (Vite convention — .env alone does not work)
 
 5. KYC FIELD INITIALIZATION RULE
@@ -288,23 +347,22 @@ PHASE 3 (remaining) — Write operations still to do
 NOTE: As more data gets wired, all of it must be filtered by the KAM's assigned
 accounts. Head of KAM and CEO always see everything unfiltered.
 
-PHASE 4 — AI Assistant (Google Gemini)
+PHASE 5 - AI Assistant (Google Gemini)
   - Wire src/services/ai.js to Google Gemini API
   - AI bot that answers questions about an account based on its data
   - Suggested entry: account detail page
 
-PHASE 5 — Production hardening
+PHASE 6 - Production hardening
   - Remove debug error banner from dashboard
   - Add proper loading skeletons
   - Error boundaries per-page
   - Deploy to Cloudflare Pages
   - Set environment variables in Cloudflare dashboard
 
-PHASE 6 — Additional features (ideas, not committed)
+PHASE 7 - Additional features (ideas, not committed)
   - Notifications center (currently static mock data in sidebar)
   - Real-time updates via Supabase Realtime
   - PDF export of account reports (pptxgenjs already installed)
-  - User management UI for CEO/Head of KAM
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -318,8 +376,10 @@ Service key: stored in .env.local as SUPABASE_SERVICE_ROLE_KEY
 To set up on a new machine:
   1. Clone repo + git checkout Bashair
   2. bun install
-  3. Create .env.local with VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+  3. Create .env.local with VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY,
+     and server-only SUPABASE_SERVICE_ROLE_KEY
   4. bun run dev
+  5. In Supabase Auth URL Configuration, add /set-password redirect URLs
   (DB is already set up on Supabase — shared across all machines)
 
 To set up a FRESH Supabase project from scratch:
@@ -333,6 +393,8 @@ To set up a FRESH Supabase project from scratch:
   8. Run add-account-history.sql in SQL Editor
   9. Run add-account-insert-policy.sql in SQL Editor
   10. Run add-health-scores-insert-policy.sql in SQL Editor
+  11. Run rename-ceo-role.sql in SQL Editor
+  12. Run add-user-management.sql in SQL Editor
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -341,7 +403,9 @@ KNOWN ISSUES / NOTES FOR NEXT SESSION
 - Activities, Escalations, Education Log tabs are still read-only (no write ops)
 - Notifications in sidebar are still static mock data from kam-data.js
 - Strategy page is still fully static
-- No server-side authorization yet — UI guards only (disabled buttons)
+- User management has server-side authorization via current_user_is_head_of_kam()
+  and a TanStack Start server function. Most other write areas still rely on UI
+  guards plus table-level RLS policies.
 - Debug error banner on dashboard (index.jsx) — kept intentionally for now
 
 ================================================================================
