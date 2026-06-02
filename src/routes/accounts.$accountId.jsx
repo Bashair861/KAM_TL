@@ -2,6 +2,8 @@ import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-rout
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ROLE_PERMISSIONS, formatCurrency } from "@/data/kam-data";
+import { buildActivityTabModel, ACTIVITY_TAB_AREAS } from "@/services/activity-tab";
+import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import {
   fetchAccount,
   fetchEscalations,
@@ -14,6 +16,26 @@ import {
   logAccountChanges,
 } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Textarea } from "@/components/ui/textarea";
 import {
   ArrowLeft,
   Building2,
@@ -238,15 +260,993 @@ function AccountDetailPage() {
           {tab === "Overview" && <OverviewTab account={account} />}
           {tab === "Score Marking Matrics" && <ScoreMatricsTab account={account} />}
           {tab === "Activity to Increase Score" && (
-            <ActivityTab account={account} opportunities={accountOpportunities} />
+            <ActivityTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
           )}
-          {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} />}
+          {tab === "Retention VS Growth" && (
+            <RetentionGrowthTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
+          )}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
           {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
         </div>
       </div>
     </div>
+  );
+}
+function RetentionGrowthTabPlanner({ account, opportunities, escalations, profile }) {
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const canApproveCommercial = role === "Head of KAM";
+  const isViewOnly = role === "CEO" || (role === "KAM" && !isAssignedKam);
+  const model = useMemo(
+    () => buildRetentionGrowthTabModel({ account, opportunities, escalations }),
+    [account, escalations, opportunities],
+  );
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [draftPlans, setDraftPlans] = useState([]);
+  const [draftOffers, setDraftOffers] = useState([]);
+  const [planTarget, setPlanTarget] = useState(null);
+  const [planForm, setPlanForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [offerTarget, setOfferTarget] = useState(null);
+  const [offerForm, setOfferForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [evidenceTarget, setEvidenceTarget] = useState(null);
+
+  useEffect(() => {
+    setResolvedItems({});
+    setDraftPlans([]);
+    setDraftOffers([]);
+    setPlanTarget(null);
+    setPlanForm(createInitialReviewForm(null, profile?.name));
+    setOfferTarget(null);
+    setOfferForm(createInitialReviewForm(null, profile?.name));
+    setEvidenceTarget(null);
+  }, [account.id, profile?.name]);
+
+  const activeApplicableGrowth = model.applicableGrowth.filter((item) => !resolvedItems[item.id]);
+  const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
+  const activeOffers = model.recommendedOffers.filter((item) => !resolvedItems[item.id]);
+  const draftQueue = useMemo(
+    () => sortRetentionDrafts([...draftPlans, ...draftOffers]),
+    [draftOffers, draftPlans],
+  );
+
+  function openPlanReview(kind, item) {
+    setPlanTarget({ kind, item });
+    setPlanForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closePlanReview() {
+    setPlanTarget(null);
+    setPlanForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmPlanReview() {
+    if (!planTarget) return;
+    const draft = buildRetentionPlanDraft(planTarget, planForm, canApproveCommercial);
+    setDraftPlans((current) => [draft, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [planTarget.item.id]: {
+        status: "drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closePlanReview();
+  }
+
+  function openOfferReview(item) {
+    setOfferTarget(item);
+    setOfferForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closeOfferReview() {
+    setOfferTarget(null);
+    setOfferForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmOfferReview() {
+    if (!offerTarget) return;
+    const draft = buildRetentionOfferDraft(offerTarget, offerForm, canApproveCommercial);
+    setDraftOffers((current) => [draft, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [offerTarget.id]: {
+        status: "drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closeOfferReview();
+  }
+
+  return (
+    <div className="space-y-6">
+      {isViewOnly && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only planning surface</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            {role === "CEO"
+              ? "CEO can inspect services, opportunities, signals, and evidence here but cannot plan or draft offers."
+              : "Only the assigned KAM can plan pitches or create draft offers for this account."}
+          </p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <MiniStat label="Current services" value={`${model.currentServices.length} tracked`} />
+        <MiniStat label="Whitespace" value={`${activeApplicableGrowth.length} services ready`} />
+        <MiniStat label="Recommended offers" value={`${activeOffers.length} active`} />
+        <MiniStat
+          label="Top retention signal"
+          value={model.retentionSignals[0]?.title ?? "No immediate retention alarm"}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">What we are offering & giving</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Services already live, in flight, offered, or actively delivered for {account.name}.
+            </p>
+          </div>
+          {model.currentServices.length ? (
+            <div className="divide-y">
+              {model.currentServices.map((service) => (
+                <div key={service.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{service.service}</p>
+                    <ServiceStatusBadge status={service.status} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{service.description}</p>
+                  <MiniStat label="Tracking note" value={service.trackingNote} />
+                  <EvidencePreview
+                    evidence={service.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: service.service,
+                        subtitle: `${service.status} service context`,
+                        evidence: service.evidence,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No current services are mapped for this account.
+            </p>
+          )}
+        </div>
+
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold">Growth - applicable but not offered</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Relevant services and whitespace opportunities that fit this client now.
+              </p>
+            </div>
+            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              {activeApplicableGrowth.length} open
+            </span>
+          </div>
+          {activeApplicableGrowth.length ? (
+            <div className="divide-y">
+              {activeApplicableGrowth.map((item) => (
+                <div key={item.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                    <div className="space-y-2 min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{item.service}</p>
+                        <OfferTypeBadge type={item.offerType} />
+                        <ConfidenceBadge confidence={item.confidence} />
+                      </div>
+                      <p className="text-xs text-muted-foreground">{item.reason}</p>
+                      <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                        <MiniStat label="Potential value" value={getPotentialValueLabel(item)} />
+                        <MiniStat label="Next step" value={item.nextStep} />
+                      </div>
+                      <EvidencePreview
+                        evidence={item.evidence}
+                        onView={() =>
+                          setEvidenceTarget({
+                            title: item.service,
+                            subtitle: "Applicable but not offered",
+                            evidence: item.evidence,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="shrink-0">
+                      <Button
+                        size="sm"
+                        disabled={!canAct}
+                        onClick={() => openPlanReview("growth", item)}
+                      >
+                        Plan Pitch
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No applicable whitespace services are active for this account right now.
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold">Opportunities related to the client</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Client-specific opportunities surfaced from current services, Fireflies notes,
+              whitespace, renewal context, and escalations.
+            </p>
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            {activeOpportunities.length} active
+          </span>
+        </div>
+        {activeOpportunities.length ? (
+          <div className="divide-y">
+            {activeOpportunities.map((opportunity) => (
+              <div key={opportunity.id} className="px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold">{opportunity.title}</p>
+                      <PriorityBadge priority={opportunity.priority} />
+                      <ConfidenceBadge confidence={opportunity.confidence} />
+                      {opportunity.category ? <AreaBadge area={opportunity.category} /> : null}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">{opportunity.source}</p>
+                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                      <MiniStat
+                        label="Potential value"
+                        value={getPotentialValueLabel(opportunity)}
+                      />
+                      <MiniStat label="Next step" value={opportunity.nextStep} />
+                      <MiniStat
+                        label="Priority"
+                        value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
+                      />
+                    </div>
+                    <EvidencePreview
+                      evidence={opportunity.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: opportunity.title,
+                          subtitle: `${opportunity.source} · ${opportunity.category}`,
+                          evidence: opportunity.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="shrink-0">
+                    <Button
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => openPlanReview("opportunity", opportunity)}
+                    >
+                      {opportunity.actionLabel ?? "Pursue"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No client-specific opportunities are active in this planning cycle.
+          </p>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Retention signals</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Signals that can affect renewal confidence, recovery planning, or client risk.
+            </p>
+          </div>
+          {model.retentionSignals.length ? (
+            <div className="divide-y">
+              {model.retentionSignals.map((signal) => (
+                <div key={signal.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{signal.title}</p>
+                    <SignalLevelBadge level={signal.level} tone="risk" />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{signal.reason}</p>
+                  <MiniStat label="Recommended action" value={signal.recommendedAction} />
+                  <EvidencePreview
+                    evidence={signal.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: signal.title,
+                        subtitle: "Retention signal",
+                        evidence: signal.evidence,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No material retention signals are active right now.
+            </p>
+          )}
+        </div>
+
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Growth signals</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Signals that point to expansion, whitespace, budget, or stakeholder interest.
+            </p>
+          </div>
+          {model.growthSignals.length ? (
+            <div className="divide-y">
+              {model.growthSignals.map((signal) => (
+                <div key={signal.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{signal.title}</p>
+                    <SignalLevelBadge level={signal.level} tone="growth" />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{signal.reason}</p>
+                  <MiniStat label="Recommended action" value={signal.recommendedAction} />
+                  <EvidencePreview
+                    evidence={signal.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: signal.title,
+                        subtitle: "Growth signal",
+                        evidence: signal.evidence,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No material growth signals are active right now.
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-6">
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold">Recommended Offers</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                AI-assisted offers built from whitespace, client interest, retention signals, and
+                current service context.
+              </p>
+            </div>
+            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              {activeOffers.length} active
+            </span>
+          </div>
+          {activeOffers.length ? (
+            <div className="divide-y">
+              {activeOffers.map((offer) => (
+                <div key={offer.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                    <div className="space-y-2 min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{offer.title}</p>
+                        <OfferTypeBadge type={offer.offerType} />
+                        <ConfidenceBadge confidence={offer.confidence} />
+                        <ApprovalPill
+                          required={offer.approvalRequired}
+                          approverRole={offer.approverRole}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">{offer.reason}</p>
+                      <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                        <MiniStat label="Potential value" value={getPotentialValueLabel(offer)} />
+                        <MiniStat label="Allowed offer" value={offer.allowedValue} />
+                        <MiniStat label="Next step" value={offer.nextStep} />
+                      </div>
+                      <EvidencePreview
+                        evidence={offer.evidence}
+                        onView={() =>
+                          setEvidenceTarget({
+                            title: offer.title,
+                            subtitle: `${offer.offerType} offer`,
+                            evidence: offer.evidence,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="shrink-0">
+                      <Button size="sm" disabled={!canAct} onClick={() => openOfferReview(offer)}>
+                        Create Draft Offer
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No recommended offers are active for this account right now.
+            </p>
+          )}
+        </div>
+
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Commercial Guardrails</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              What can be offered, how much is allowed, and when Head of KAM approval is needed.
+            </p>
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <MiniStat label="POC limit" value={model.guardrails.summary.pocLimit} />
+              <MiniStat label="Discount limit" value={model.guardrails.summary.discountLimit} />
+              <MiniStat
+                label="Service credit"
+                value={model.guardrails.summary.serviceCreditLimit}
+              />
+              <MiniStat label="KAM proposal limit" value={model.guardrails.summary.proposalLimit} />
+            </div>
+            <p className="text-xs text-muted-foreground">{model.guardrails.narrative}</p>
+            <div className="space-y-3">
+              {model.guardrails.rules.map((rule) => (
+                <div key={rule.id} className="rounded-xl border p-4 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <OfferTypeBadge type={rule.offer} />
+                    <ApprovalPill
+                      required={rule.approvalRequired !== "No"}
+                      approverRole={rule.approverRole}
+                    />
+                  </div>
+                  <p className="text-sm font-semibold">{rule.allowedOffer}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <MiniStat label="Allowed value" value={rule.allowedValue} />
+                    <MiniStat label="Discount limit" value={rule.discountLimit} />
+                    <MiniStat label="Service credit" value={rule.serviceCreditLimit} />
+                    <MiniStat label="POC limit" value={rule.pocLimit} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{rule.reason}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b">
+          <h3 className="text-sm font-bold">Not applicable to this client</h3>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Services in this list are filtered out from growth opportunities, offers, and pitch
+            suggestions.
+          </p>
+        </div>
+        {model.notApplicable.length ? (
+          <div className="divide-y">
+            {model.notApplicable.map((item) => (
+              <div key={item.id} className="px-6 py-4 space-y-3">
+                <p className="text-sm font-semibold">{item.service}</p>
+                <p className="text-xs text-muted-foreground">{item.reason}</p>
+                <EvidencePreview
+                  evidence={item.evidence}
+                  onView={() =>
+                    setEvidenceTarget({
+                      title: item.service,
+                      subtitle: "Not applicable service",
+                      evidence: item.evidence,
+                    })
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No services are currently blocked from pitching for this account.
+          </p>
+        )}
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b">
+          <h3 className="text-sm font-bold">Draft Plans & Offers</h3>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Review-ready local drafts created from whitespace, opportunities, and recommended
+            offers.
+          </p>
+        </div>
+        {draftQueue.length ? (
+          <div className="divide-y">
+            {draftQueue.map((draft) => (
+              <div key={draft.id} className="px-6 py-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-semibold">{draft.title}</p>
+                  <DraftKindBadge kind={draft.kind} />
+                  {draft.offerType ? <OfferTypeBadge type={draft.offerType} /> : null}
+                </div>
+                <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                  <MiniStat label="Owner" value={draft.owner} />
+                  <MiniStat label="Due date" value={draft.dueDate} />
+                  <MiniStat label="Potential value" value={draft.potentialValueLabel} />
+                </div>
+                <MiniStat label="Next step" value={draft.nextStep} />
+                <p className="text-xs text-muted-foreground">{draft.reason}</p>
+                <p className="text-[11px] font-medium text-accent">{draft.approvalState}</p>
+                <EvidencePreview
+                  evidence={draft.evidence}
+                  onView={() =>
+                    setEvidenceTarget({
+                      title: draft.title,
+                      subtitle: draft.kind === "offer" ? "Draft offer" : "Draft plan",
+                      evidence: draft.evidence,
+                    })
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No draft pitches or offers have been created in this session yet.
+          </p>
+        )}
+      </div>
+
+      <RetentionPlanReviewSheet
+        target={planTarget}
+        form={planForm}
+        onChange={setPlanForm}
+        onClose={closePlanReview}
+        onConfirm={confirmPlanReview}
+      />
+
+      <RetentionOfferReviewSheet
+        target={offerTarget}
+        form={offerForm}
+        onChange={setOfferForm}
+        onClose={closeOfferReview}
+        onConfirm={confirmOfferReview}
+      />
+
+      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+    </div>
+  );
+}
+
+function ServiceStatusBadge({ status }) {
+  const styles = {
+    Live: "bg-success/10 text-success",
+    Delivered: "bg-accent/10 text-accent",
+    "In Flight": "bg-warn/10 text-warn",
+    Offered: "bg-muted text-muted-foreground",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[status] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {status}
+    </span>
+  );
+}
+
+function OfferTypeBadge({ type }) {
+  const styles = {
+    POC: "bg-accent/10 text-accent",
+    Upsell: "bg-success/10 text-success",
+    "Cross-sell": "bg-success/10 text-success",
+    Renewal: "bg-warn/10 text-warn",
+    "Service Credit": "bg-warn/10 text-warn",
+    Discount: "bg-warn/10 text-warn",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${styles[type] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {type}
+    </span>
+  );
+}
+
+function ApprovalPill({ required, approverRole }) {
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${
+        required ? "bg-warn/10 text-warn" : "bg-success/10 text-success"
+      }`}
+    >
+      {required ? `Approval · ${approverRole ?? "Required"}` : "No approval"}
+    </span>
+  );
+}
+
+function SignalLevelBadge({ level, tone }) {
+  const styles =
+    tone === "risk"
+      ? {
+          High: "bg-crit/10 text-crit",
+          Medium: "bg-warn/10 text-warn",
+          Low: "bg-success/10 text-success",
+        }
+      : {
+          High: "bg-success/10 text-success",
+          Medium: "bg-accent/10 text-accent",
+          Low: "bg-muted text-muted-foreground",
+        };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${styles[level] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {level}
+    </span>
+  );
+}
+
+function DraftKindBadge({ kind }) {
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+      {kind === "offer" ? "Draft Offer" : "Draft Plan"}
+    </span>
+  );
+}
+
+function getPotentialValueLabel(item) {
+  return item.potentialValueLabel ?? `+${formatCurrency(item.potentialValue ?? 0)}`;
+}
+
+function getDraftApprovalState(item, canApproveCommercial) {
+  if (!item.approvalRequired) return "Within KAM authority";
+  if (canApproveCommercial) return "Within Head of KAM authority";
+  return `Pending ${item.approverRole ?? "Head of KAM"} approval`;
+}
+
+function buildRetentionPlanDraft(target, form, canApproveCommercial) {
+  const item = target.item;
+
+  return {
+    id: `draft-plan-${item.id}`,
+    kind: "plan",
+    title: form.title.trim(),
+    owner: form.owner.trim(),
+    dueDate: formatDraftDate(form.dueDate),
+    nextStep: form.nextStep.trim(),
+    potentialValueLabel: getPotentialValueLabel(item),
+    reason: item.reason ?? item.title,
+    evidence: item.evidence ?? [],
+    approvalState: getDraftApprovalState(item, canApproveCommercial),
+    offerType: item.offerType ?? null,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildRetentionOfferDraft(item, form, canApproveCommercial) {
+  return {
+    id: `draft-offer-${item.id}`,
+    kind: "offer",
+    title: form.title.trim(),
+    owner: form.owner.trim(),
+    dueDate: formatDraftDate(form.dueDate),
+    nextStep: form.nextStep.trim(),
+    potentialValueLabel: getPotentialValueLabel(item),
+    reason: item.reason ?? item.title,
+    evidence: item.evidence ?? [],
+    offerType: item.offerType,
+    approvalState: getDraftApprovalState(item, canApproveCommercial),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function sortRetentionDrafts(drafts) {
+  return [...drafts].sort((left, right) => {
+    const leftDate = new Date(left.createdAt || 0).getTime();
+    const rightDate = new Date(right.createdAt || 0).getTime();
+    return rightDate - leftDate;
+  });
+}
+
+function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+  const item = target?.item ?? null;
+  const actionLabel =
+    target?.kind === "opportunity"
+      ? (item?.actionLabel ?? "Pursue")
+      : target?.kind === "growth"
+        ? "Plan Pitch"
+        : "Review";
+
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        {item && (
+          <>
+            <SheetHeader>
+              <SheetTitle>{actionLabel} draft plan</SheetTitle>
+              <SheetDescription>
+                AI suggests the next growth or retention move here. Review the draft before it
+                becomes an internal plan item.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-5 py-5">
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  {item.category ? <AreaBadge area={item.category} /> : null}
+                  {item.priority ? <PriorityBadge priority={item.priority} /> : null}
+                  {item.offerType ? <OfferTypeBadge type={item.offerType} /> : null}
+                  {item.confidence ? <ConfidenceBadge confidence={item.confidence} /> : null}
+                  <ApprovalPill
+                    required={Boolean(item.approvalRequired)}
+                    approverRole={item.approverRole}
+                  />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">{item.title ?? item.service}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {item.reason ?? item.nextStep}
+                  </p>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                  <MiniStat label="Potential value" value={getPotentialValueLabel(item)} />
+                  <MiniStat label="Next step" value={item.nextStep} />
+                </div>
+              </div>
+
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-plan-title">Title</Label>
+                  <Input
+                    id="retention-plan-title"
+                    value={form.title}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, title: event.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-plan-owner">Owner</Label>
+                    <Input
+                      id="retention-plan-owner"
+                      value={form.owner}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, owner: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-plan-due-date">Due date</Label>
+                    <Input
+                      id="retention-plan-due-date"
+                      type="date"
+                      value={form.dueDate}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, dueDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-plan-next-step">Next step</Label>
+                  <Textarea
+                    id="retention-plan-next-step"
+                    rows={4}
+                    value={form.nextStep}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, nextStep: event.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Evidence
+                </p>
+                <div className="space-y-3">
+                  {(item.evidence ?? []).map((entry, index) => (
+                    <div
+                      key={`${entry.source}-${index}`}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          {entry.sourceType}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                      </div>
+                      <p className="text-sm font-medium">{entry.source}</p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {entry.excerpt}
+                      </p>
+                      <p className="text-[11px] text-foreground">{entry.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <SheetFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={onConfirm}
+                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+              >
+                Save draft plan
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function RetentionOfferReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        {target && (
+          <>
+            <SheetHeader>
+              <SheetTitle>Create draft offer</SheetTitle>
+              <SheetDescription>
+                Review the recommended offer, adjust the internal draft, and mark any approval
+                dependency before it moves forward.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-5 py-5">
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <OfferTypeBadge type={target.offerType} />
+                  <ConfidenceBadge confidence={target.confidence} />
+                  <ApprovalPill
+                    required={Boolean(target.approvalRequired)}
+                    approverRole={target.approverRole}
+                  />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">{target.title}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{target.reason}</p>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                  <MiniStat label="Potential value" value={getPotentialValueLabel(target)} />
+                  <MiniStat label="Allowed offer" value={target.allowedValue} />
+                </div>
+              </div>
+
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-offer-title">Offer title</Label>
+                  <Input
+                    id="retention-offer-title"
+                    value={form.title}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, title: event.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-offer-owner">Owner</Label>
+                    <Input
+                      id="retention-offer-owner"
+                      value={form.owner}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, owner: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-offer-due-date">Due date</Label>
+                    <Input
+                      id="retention-offer-due-date"
+                      type="date"
+                      value={form.dueDate}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, dueDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-offer-next-step">Next step</Label>
+                  <Textarea
+                    id="retention-offer-next-step"
+                    rows={4}
+                    value={form.nextStep}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, nextStep: event.target.value }))
+                    }
+                  />
+                </div>
+
+                {target.approvalRequired && (
+                  <div className="rounded-xl border border-warn/30 bg-warn/5 p-4">
+                    <p className="text-sm font-semibold text-warn">
+                      Pending {target.approverRole ?? "Head of KAM"} approval
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      This draft can be created by the KAM, but it should not become a final
+                      client-facing offer until the required approver reviews it.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Evidence
+                </p>
+                <div className="space-y-3">
+                  {(target.evidence ?? []).map((entry, index) => (
+                    <div
+                      key={`${entry.source}-${index}`}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          {entry.sourceType}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                      </div>
+                      <p className="text-sm font-medium">{entry.source}</p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {entry.excerpt}
+                      </p>
+                      <p className="text-[11px] text-foreground">{entry.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <SheetFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={onConfirm}
+                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+              >
+                Create draft offer
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
   );
 }
 /* ============================== TAB 1: Overview (KYC) ============================== */
@@ -1299,8 +2299,18 @@ function ResourceHealthBlock({ account }) {
   );
 }
 /* ============================== TAB 3: Activity to Increase Score ============================== */
-function ActivityTab({ account, opportunities }) {
+function ActivityTab({ account, opportunities, escalations }) {
   const { profile } = useAuth();
+  if (account) {
+    return (
+      <ActivityTabPlanner
+        account={account}
+        opportunities={opportunities}
+        escalations={escalations}
+        profile={profile}
+      />
+    );
+  }
   const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
   const ragColor = { R: "bg-crit", A: "bg-warn", G: "bg-success" };
   const areas = ["Profit", "Project", "Resource", "Financial", "Relationship"];
@@ -1540,9 +2550,911 @@ function ActivityTab({ account, opportunities }) {
     </div>
   );
 }
+function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const model = useMemo(
+    () => buildActivityTabModel({ account, opportunities, escalations }),
+    [account, escalations, opportunities],
+  );
+
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [draftRows, setDraftRows] = useState([]);
+  const [reviewTarget, setReviewTarget] = useState(null);
+  const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [rejectTarget, setRejectTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState("");
+
+  useEffect(() => {
+    setResolvedItems({});
+    setDraftRows([]);
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+    setEvidenceTarget(null);
+    setRejectTarget(null);
+    setRejectReason("");
+  }, [account.id, profile?.name]);
+
+  const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
+  const activeRagRecommendations = model.ragRecommendations.filter(
+    (item) => !resolvedItems[item.id],
+  );
+  const activeMeetingActions = model.meetingActions.filter((item) => !resolvedItems[item.id]);
+
+  const activityRows = useMemo(() => {
+    const visibleRows = model.activityRows.filter(
+      (row) => row.rowType === "existing" || !resolvedItems[row.id],
+    );
+    return sortActivityRows([...visibleRows, ...draftRows]);
+  }, [draftRows, model.activityRows, resolvedItems]);
+
+  function openReview(kind, item) {
+    setReviewTarget({ kind, item });
+    setReviewForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closeReview() {
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmReview() {
+    if (!reviewTarget) return;
+    const draftRow = buildDraftRow(reviewTarget, reviewForm);
+    setDraftRows((current) => [draftRow, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [reviewTarget.item.id]: {
+        status: "drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closeReview();
+  }
+
+  function confirmReject() {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    setResolvedItems((current) => ({
+      ...current,
+      [rejectTarget.id]: {
+        status: "rejected",
+        reason: rejectReason.trim(),
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    setRejectTarget(null);
+    setRejectReason("");
+  }
+
+  return (
+    <div className="space-y-6">
+      {role === "KAM" && !isAssignedKam && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only planning surface for this account</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            Only the assigned KAM can add, reject, or pursue score-improvement suggestions here.
+          </p>
+        </div>
+      )}
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <div className="flex items-start gap-3">
+            <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+              <Lightbulb className="size-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
+              <p className="text-[11px] text-muted-foreground">
+                Client-specific opportunities sourced from account context, score gaps, escalation
+                signals, and Fireflies-derived meeting notes.
+              </p>
+            </div>
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground self-start md:self-auto">
+            {activeOpportunities.length} open
+          </span>
+        </div>
+
+        {activeOpportunities.length ? (
+          <ul className="divide-y">
+            {activeOpportunities.map((opportunity) => (
+              <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
+                      <PriorityBadge priority={opportunity.priority} />
+                      <ConfidenceBadge confidence={opportunity.confidence} />
+                      <AreaBadge area={opportunity.healthArea} />
+                      {opportunity.approvalRequired && (
+                        <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                          Approval required
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {opportunity.source} · {opportunity.signalDate}
+                    </p>
+                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                      <MiniStat
+                        label="Potential value"
+                        value={`+${formatCurrency(opportunity.potentialValue)}`}
+                      />
+                      <MiniStat label="Next step" value={opportunity.nextStep} />
+                      <MiniStat
+                        label="Priority"
+                        value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
+                      />
+                    </div>
+                    <EvidencePreview
+                      evidence={opportunity.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: opportunity.title,
+                          subtitle: `${opportunity.source} · ${opportunity.healthArea}`,
+                          evidence: opportunity.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="flex items-start lg:items-center shrink-0">
+                    <Button
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => openReview("opportunity", opportunity)}
+                    >
+                      Pursue
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No open opportunities are active in this planning cycle.
+          </p>
+        )}
+      </div>
+
+      <div className="bg-card border rounded-xl p-6">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
+          <div>
+            <h3 className="text-sm font-bold">RAG Analysis</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Recommended score-improvement activities grouped by urgency.
+            </p>
+          </div>
+          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            {activeRagRecommendations.length} active recommendations
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          {["R", "A", "G"].map((urgency) => {
+            const items = activeRagRecommendations.filter((item) => item.urgency === urgency);
+            return (
+              <div key={urgency} className="border rounded-lg overflow-hidden">
+                <div
+                  className={`px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white ${
+                    urgency === "R" ? "bg-crit" : urgency === "A" ? "bg-warn" : "bg-success"
+                  }`}
+                >
+                  {urgency === "R"
+                    ? "RED — Act Now"
+                    : urgency === "A"
+                      ? "AMBER — Plan"
+                      : "GREEN — Monitor"}
+                  <span className="ml-2 opacity-80">({items.length})</span>
+                </div>
+                <div className="p-3 space-y-3">
+                  {items.length ? (
+                    items.map((item) => (
+                      <div key={item.id} className="rounded-lg border p-3 space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold leading-snug">{item.title}</p>
+                          <AreaBadge area={item.healthArea} />
+                          <ConfidenceBadge confidence={item.confidence} />
+                        </div>
+                        <p className="text-xs text-muted-foreground">{item.reason}</p>
+                        <div className="grid gap-2 sm:grid-cols-2 text-xs">
+                          <MiniStat label="Expected lift" value={item.expectedLift} />
+                          <MiniStat label="Next step" value={item.nextStep} />
+                        </div>
+                        <EvidencePreview
+                          evidence={item.evidence}
+                          onView={() =>
+                            setEvidenceTarget({
+                              title: item.title,
+                              subtitle: `RAG analysis · ${item.healthArea}`,
+                              evidence: item.evidence,
+                            })
+                          }
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            disabled={!canAct}
+                            onClick={() => openReview("rag", item)}
+                          >
+                            Add
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!canAct}
+                            onClick={() => setRejectTarget(item)}
+                          >
+                            Reject
+                          </Button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      No items in this urgency band.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold">
+              Extract Action Items from Meeting Notes to Increase Score
+            </h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Fireflies-derived meeting actions are shown here as reviewable suggestions only.
+            </p>
+          </div>
+          <div className="flex flex-col items-start md:items-end gap-1">
+            <Button size="sm" variant="outline" disabled>
+              Re-run extraction
+            </Button>
+            <p className="text-[10px] text-muted-foreground">
+              Connect a backend extraction hook to enable reruns.
+            </p>
+          </div>
+        </div>
+
+        {activeMeetingActions.length ? (
+          <ul className="divide-y">
+            {activeMeetingActions.map((item) => (
+              <li key={item.id} className="px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold leading-snug">{item.title}</p>
+                      <AreaBadge area={item.healthArea} />
+                      <ConfidenceBadge confidence={item.confidence} />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {item.meetingTitle} · {item.meetingDate}
+                    </p>
+                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                      <MiniStat label="Source excerpt" value={item.sourceExcerpt} />
+                      <MiniStat label="Expected lift" value={item.expectedLift} />
+                      <MiniStat label="Next step" value={item.nextStep} />
+                    </div>
+                    <EvidencePreview
+                      evidence={item.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: item.title,
+                          subtitle: `${item.meetingTitle} · ${item.meetingDate}`,
+                          evidence: item.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => openReview("meeting", item)}
+                    >
+                      Add
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => setRejectTarget(item)}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No meeting-note actions are active right now.
+          </p>
+        )}
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold">Activities Across All Health Areas</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Existing work, active AI suggestions, and accepted drafts live in one review queue.
+            </p>
+          </div>
+          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            {ACTIVITY_TAB_AREAS.length} health areas tracked
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1120px] text-sm">
+            <thead>
+              <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
+                <th className="px-6 py-3">Area</th>
+                <th className="px-6 py-3">Activity</th>
+                <th className="px-6 py-3">Owner</th>
+                <th className="px-6 py-3">Due</th>
+                <th className="px-6 py-3">Status</th>
+                <th className="px-6 py-3">RAG</th>
+                <th className="px-6 py-3">Expected Lift</th>
+                <th className="px-6 py-3">Evidence</th>
+                <th className="px-6 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {activityRows.map((row) => (
+                <tr key={row.id} className="align-top hover:bg-muted/20">
+                  <td className="px-6 py-4 text-xs font-semibold whitespace-nowrap">
+                    <AreaBadge area={row.area} />
+                  </td>
+                  <td className="px-6 py-4 text-xs min-w-[280px]">
+                    <div className="space-y-1">
+                      <p className="font-semibold text-foreground">{row.title}</p>
+                      <p className="text-muted-foreground leading-relaxed">{row.reason}</p>
+                      {row.rowType === "draft" && (
+                        <p className="text-[11px] text-accent font-medium">{row.reviewState}</p>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 text-xs text-muted-foreground whitespace-nowrap">
+                    {row.owner}
+                  </td>
+                  <td className="px-6 py-4 text-xs whitespace-nowrap">{row.dueDate}</td>
+                  <td className="px-6 py-4 text-xs">
+                    <ActivityStatusBadge row={row} />
+                  </td>
+                  <td className="px-6 py-4">
+                    <RagBadge code={row.rag} />
+                  </td>
+                  <td className="px-6 py-4 text-xs font-semibold text-success whitespace-nowrap">
+                    {row.expectedLift}
+                  </td>
+                  <td className="px-6 py-4 text-xs min-w-[220px]">
+                    <EvidencePreview
+                      evidence={row.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: row.title,
+                          subtitle: `${row.area} · ${row.rowType}`,
+                          evidence: row.evidence,
+                        })
+                      }
+                      compact
+                    />
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    {row.rowType === "suggested" ? (
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() => openReview(row.sourceKind, row)}
+                        >
+                          Add
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() =>
+                            setRejectTarget({
+                              id: row.sourceId,
+                              title: row.title,
+                              sourceKind: row.sourceKind,
+                            })
+                          }
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    ) : row.rowType === "draft" ? (
+                      <span className="text-[11px] text-muted-foreground">Draft only</span>
+                    ) : (
+                      <span className="text-[11px] text-muted-foreground">View only</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <ActivityReviewSheet
+        target={reviewTarget}
+        form={reviewForm}
+        onChange={setReviewForm}
+        onClose={closeReview}
+        onConfirm={confirmReview}
+      />
+
+      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+
+      <RejectRecommendationDialog
+        target={rejectTarget}
+        value={rejectReason}
+        onChange={setRejectReason}
+        onClose={() => {
+          setRejectTarget(null);
+          setRejectReason("");
+        }}
+        onConfirm={confirmReject}
+      />
+    </div>
+  );
+}
+
+function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+  const item = target?.item ?? null;
+  const title = target?.kind === "opportunity" ? "Review pursuit draft" : "Review activity draft";
+
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        {item && (
+          <>
+            <SheetHeader>
+              <SheetTitle>{title}</SheetTitle>
+              <SheetDescription>
+                Review the suggestion, adjust the draft details, and save it as an internal draft
+                activity.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-5 py-5">
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <AreaBadge area={item.healthArea ?? item.area} />
+                  {item.priority ? <PriorityBadge priority={item.priority} /> : null}
+                  {item.confidence ? <ConfidenceBadge confidence={item.confidence} /> : null}
+                  {item.approvalRequired && (
+                    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                      {item.approverRole ?? "Head of KAM"} approval required
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">{item.title}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {item.reason ?? item.sourceExcerpt ?? item.nextStep}
+                  </p>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                  <MiniStat
+                    label="Expected outcome"
+                    value={
+                      item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`
+                    }
+                  />
+                  <MiniStat label="Next step" value={item.nextStep} />
+                </div>
+              </div>
+
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="activity-review-title">Title</Label>
+                  <Input
+                    id="activity-review-title"
+                    value={form.title}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, title: event.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="activity-review-owner">Owner</Label>
+                    <Input
+                      id="activity-review-owner"
+                      value={form.owner}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, owner: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="activity-review-due-date">Due date</Label>
+                    <Input
+                      id="activity-review-due-date"
+                      type="date"
+                      value={form.dueDate}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, dueDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="activity-review-next-step">Next step</Label>
+                  <Textarea
+                    id="activity-review-next-step"
+                    rows={4}
+                    value={form.nextStep}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, nextStep: event.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Evidence
+                </p>
+                <div className="space-y-3">
+                  {(item.evidence ?? []).map((entry, index) => (
+                    <div
+                      key={`${entry.source}-${index}`}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          {entry.sourceType}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                      </div>
+                      <p className="text-sm font-medium">{entry.source}</p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {entry.excerpt}
+                      </p>
+                      <p className="text-[11px] text-foreground">{entry.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <SheetFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={onConfirm}
+                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+              >
+                Create draft activity
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function EvidenceDetailSheet({ target, onClose }) {
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-lg overflow-y-auto">
+        {target && (
+          <>
+            <SheetHeader>
+              <SheetTitle>{target.title}</SheetTitle>
+              <SheetDescription>{target.subtitle}</SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-4 py-5">
+              {(target.evidence ?? []).map((entry, index) => (
+                <div key={`${entry.source}-${index}`} className="rounded-xl border p-4 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      {entry.sourceType}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                  </div>
+                  <p className="text-sm font-semibold">{entry.source}</p>
+                  <p className="text-sm text-muted-foreground leading-relaxed">{entry.excerpt}</p>
+                  <p className="text-xs text-foreground">{entry.reason}</p>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function RejectRecommendationDialog({ target, value, onChange, onClose, onConfirm }) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Reject recommendation</DialogTitle>
+          <DialogDescription>
+            Rejected recommendations are removed from active suggestions in this tab.
+          </DialogDescription>
+        </DialogHeader>
+
+        {target && (
+          <div className="space-y-4">
+            <div className="rounded-lg border p-3 bg-muted/20">
+              <p className="text-sm font-semibold">{target.title}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Capture why this suggestion should not stay active.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="reject-reason">Rejection reason</Label>
+              <Textarea
+                id="reject-reason"
+                rows={4}
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+                placeholder="Example: already covered by an open action plan, not relevant for this client, or timing is wrong."
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="destructive" disabled={!value.trim()} onClick={onConfirm}>
+            Reject recommendation
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EvidencePreview({ evidence, onView, compact = false }) {
+  const primary = evidence?.[0];
+  if (!primary) {
+    return <p className="text-[11px] text-muted-foreground">Evidence unavailable.</p>;
+  }
+
+  return (
+    <div
+      className={`rounded-lg border bg-muted/20 ${compact ? "p-2.5" : "p-3"} flex items-start justify-between gap-3`}
+    >
+      <div className="min-w-0">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+          {primary.sourceType} · {primary.date}
+        </p>
+        <p
+          className={`${compact ? "text-[11px]" : "text-xs"} text-foreground leading-relaxed mt-1 line-clamp-2`}
+        >
+          {primary.excerpt}
+        </p>
+      </div>
+      <Button variant="ghost" size="sm" className="shrink-0" onClick={onView}>
+        View evidence
+      </Button>
+    </div>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">
+        {label}
+      </p>
+      <p className="text-sm font-medium leading-snug">{value}</p>
+    </div>
+  );
+}
+
+function PriorityBadge({ priority }) {
+  const styles = {
+    High: "bg-crit/10 text-crit",
+    Medium: "bg-warn/10 text-warn",
+    Low: "bg-success/10 text-success",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[priority] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {priority}
+    </span>
+  );
+}
+
+function ConfidenceBadge({ confidence }) {
+  const styles = {
+    High: "bg-success/10 text-success",
+    Medium: "bg-warn/10 text-warn",
+    Low: "bg-muted text-muted-foreground",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[confidence] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {confidence}
+    </span>
+  );
+}
+
+function AreaBadge({ area }) {
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1 whitespace-nowrap">
+      {area}
+    </span>
+  );
+}
+
+function RagBadge({ code }) {
+  const styles = {
+    R: "bg-crit",
+    A: "bg-warn",
+    G: "bg-success",
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center justify-center size-6 rounded-full text-[10px] font-bold text-white ${styles[code] ?? "bg-muted-foreground"}`}
+      title={code === "R" ? "Red" : code === "A" ? "Amber" : "Green"}
+    >
+      {code}
+    </span>
+  );
+}
+
+function ActivityStatusBadge({ row }) {
+  if (row.rowType === "draft") {
+    return (
+      <span className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-accent/10 text-accent">
+        Draft
+      </span>
+    );
+  }
+  if (row.rowType === "suggested") {
+    return (
+      <span className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-warn/10 text-warn">
+        Suggested
+      </span>
+    );
+  }
+
+  const styles =
+    row.status === "Done"
+      ? "bg-success/10 text-success"
+      : row.status === "In Progress"
+        ? "bg-accent/10 text-accent"
+        : "bg-muted text-muted-foreground";
+
+  return (
+    <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles}`}>
+      {row.status}
+    </span>
+  );
+}
+
+function createInitialReviewForm(item, ownerName) {
+  if (!item) {
+    return {
+      title: "",
+      owner: ownerName ?? "KAM Person",
+      dueDate: getFutureDateInput(7),
+      nextStep: "",
+    };
+  }
+
+  return {
+    title: item.title ?? "",
+    owner: ownerName ?? "KAM Person",
+    dueDate: getFutureDateInput(getSuggestedReviewDays(item)),
+    nextStep: item.nextStep ?? item.title ?? "",
+  };
+}
+
+function getSuggestedReviewDays(item) {
+  if (item.urgency === "R" || item.priority === "High") return 3;
+  if (item.urgency === "G" || item.priority === "Low") return 14;
+  return 7;
+}
+
+function getFutureDateInput(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDraftDate(dateValue) {
+  if (!dateValue) return "Needs scheduling";
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return dateValue;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function mapPriorityToRag(priority) {
+  return priority === "High" ? "R" : priority === "Low" ? "G" : "A";
+}
+
+function buildDraftRow(target, form) {
+  const { kind, item } = target;
+  return {
+    id: `draft-${item.id}`,
+    rowType: "draft",
+    sourceId: item.id,
+    sourceKind: kind,
+    area: item.healthArea ?? item.area ?? "Relationship",
+    title: form.title.trim(),
+    owner: form.owner.trim(),
+    dueDate: formatDraftDate(form.dueDate),
+    status: "Draft",
+    rag: item.urgency ?? item.rag ?? mapPriorityToRag(item.priority),
+    expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
+    confidence: item.confidence ?? "Medium",
+    reason: item.reason ?? item.sourceExcerpt ?? form.nextStep.trim(),
+    evidence: item.evidence ?? [],
+    nextStep: form.nextStep.trim(),
+    reviewState: item.approvalRequired
+      ? `Pending ${item.approverRole ?? "Head of KAM"} approval`
+      : "Needs Review",
+  };
+}
+
+function sortActivityRows(rows) {
+  const rowTypeOrder = {
+    draft: 0,
+    suggested: 1,
+    existing: 2,
+  };
+  const ragOrder = { R: 0, A: 1, G: 2 };
+
+  return [...rows].sort((left, right) => {
+    const leftArea = ACTIVITY_TAB_AREAS.indexOf(left.area);
+    const rightArea = ACTIVITY_TAB_AREAS.indexOf(right.area);
+    if (leftArea !== rightArea) return leftArea - rightArea;
+
+    const leftType = rowTypeOrder[left.rowType] ?? 99;
+    const rightType = rowTypeOrder[right.rowType] ?? 99;
+    if (leftType !== rightType) return leftType - rightType;
+
+    return (ragOrder[left.rag] ?? 99) - (ragOrder[right.rag] ?? 99);
+  });
+}
 /* ============================== TAB 4: Retention VS Growth ============================== */
-function RetentionGrowthTab({ account }) {
+function RetentionGrowthTab({ account, opportunities, escalations }) {
   const { profile } = useAuth();
+  if (account) {
+    return (
+      <RetentionGrowthTabPlanner
+        account={account}
+        opportunities={opportunities}
+        escalations={escalations}
+        profile={profile}
+      />
+    );
+  }
   const editable = ROLE_PERMISSIONS[profile?.role ?? "KAM"].write;
   const delivered = account.retentionGrowth.filter((s) => s.delivered);
   const offeredNotDelivered = account.retentionGrowth.filter((s) => s.offered && !s.delivered);
