@@ -3273,10 +3273,20 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
     }));
   }
 
+  function handleMeetingTypeChange(event) {
+    const meetingType = event.target.value;
+    onChange((current) => ({
+      ...current,
+      meetingType,
+      subject: `${meetingType}: ${account.name}`,
+      duration: meetingType.includes("CEO") ? "30" : current.duration,
+    }));
+  }
+
   return (
     <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
+      <DialogContent className="flex h-[calc(100vh-2rem)] max-h-[820px] flex-col overflow-hidden p-0 gap-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 px-6 pb-4 pt-6 border-b">
           <DialogTitle>Schedule meeting draft</DialogTitle>
           <DialogDescription>
             Create an internal meeting draft for this account. Calendar sync can be connected later.
@@ -3284,7 +3294,7 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
         </DialogHeader>
 
         {item && (
-          <div className="space-y-5">
+          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-4">
             <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 <AreaBadge area={item.healthArea ?? item.area} />
@@ -3312,9 +3322,7 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                 <select
                   id="meeting-type"
                   value={form.meetingType}
-                  onChange={(event) =>
-                    onChange((current) => ({ ...current, meetingType: event.target.value }))
-                  }
+                  onChange={handleMeetingTypeChange}
                   className="h-10 rounded-md border bg-card px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 >
                   {MEETING_TYPES.map((type) => (
@@ -3362,7 +3370,11 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                       onChange((current) => ({ ...current, attendeeEmail: event.target.value }))
                     }
                     placeholder="client@example.com"
+                    required
                   />
+                  {!form.attendeeEmail.trim() && (
+                    <p className="text-[11px] text-crit">Contact email is required.</p>
+                  )}
                 </div>
               </div>
 
@@ -3380,14 +3392,23 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="meeting-time">Time</Label>
-                  <Input
+                  <select
                     id="meeting-time"
-                    type="time"
                     value={form.time}
                     onChange={(event) =>
                       onChange((current) => ({ ...current, time: event.target.value }))
                     }
-                  />
+                    className="h-10 rounded-md border bg-card px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    {MEETING_TIME_SLOTS.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-muted-foreground">
+                    Calendar availability will be checked after Google/Microsoft sync is connected.
+                  </p>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="meeting-duration">Duration</Label>
@@ -3427,13 +3448,19 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
           </div>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0 border-t bg-background px-6 py-4">
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
           <Button
             onClick={onConfirm}
-            disabled={!form.subject.trim() || !form.attendeeName.trim() || !form.date || !form.time}
+            disabled={
+              !form.subject.trim() ||
+              !form.attendeeName.trim() ||
+              !form.attendeeEmail.trim() ||
+              !form.date ||
+              !form.time
+            }
           >
             Create meeting draft
           </Button>
@@ -3688,6 +3715,29 @@ const MEETING_TYPES = [
   "Renewal recovery review",
 ];
 
+const MEETING_TIME_SLOTS = [
+  ["08:00", "8:00 AM"],
+  ["08:30", "8:30 AM"],
+  ["09:00", "9:00 AM"],
+  ["09:30", "9:30 AM"],
+  ["10:00", "10:00 AM"],
+  ["10:30", "10:30 AM"],
+  ["11:00", "11:00 AM"],
+  ["11:30", "11:30 AM"],
+  ["12:00", "12:00 PM"],
+  ["12:30", "12:30 PM"],
+  ["13:00", "1:00 PM"],
+  ["13:30", "1:30 PM"],
+  ["14:00", "2:00 PM"],
+  ["14:30", "2:30 PM"],
+  ["15:00", "3:00 PM"],
+  ["15:30", "3:30 PM"],
+  ["16:00", "4:00 PM"],
+  ["16:30", "4:30 PM"],
+  ["17:00", "5:00 PM"],
+  ["17:30", "5:30 PM"],
+];
+
 function createInitialReviewForm(item, ownerName) {
   if (!item) {
     return {
@@ -3915,7 +3965,7 @@ function buildMeetingDraftRow(target, form, account, profile) {
     sourceId: item.id,
     sourceKind: `${kind}-meeting`,
     area: item.healthArea ?? item.area ?? "Relationship",
-    title: `${form.meetingType}: ${form.subject}`,
+    title: form.subject,
     owner: profile?.name ?? form.organizerName ?? "KAM Person",
     dueDate: meetingTime,
     status: "Draft",
@@ -3958,13 +4008,13 @@ function sortActivityRows(rows) {
   const ragOrder = { R: 0, A: 1, G: 2 };
 
   return [...rows].sort((left, right) => {
-    const leftArea = ACTIVITY_TAB_AREAS.indexOf(left.area);
-    const rightArea = ACTIVITY_TAB_AREAS.indexOf(right.area);
-    if (leftArea !== rightArea) return leftArea - rightArea;
-
     const leftType = rowTypeOrder[left.rowType] ?? 99;
     const rightType = rowTypeOrder[right.rowType] ?? 99;
     if (leftType !== rightType) return leftType - rightType;
+
+    const leftArea = ACTIVITY_TAB_AREAS.indexOf(left.area);
+    const rightArea = ACTIVITY_TAB_AREAS.indexOf(right.area);
+    if (leftArea !== rightArea) return leftArea - rightArea;
 
     return (ragOrder[left.rag] ?? 99) - (ragOrder[right.rag] ?? 99);
   });
