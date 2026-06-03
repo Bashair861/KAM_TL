@@ -9,10 +9,12 @@ import {
   fetchKamUsers,
   updateAccountKam,
   updateAccountKyc,
+  applySowFields,
   updateHealthBlock,
   fetchAccountHistory,
   logAccountChanges,
 } from "@/services/db";
+import { extractSowFields } from "@/services/sow-upload";
 import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft,
@@ -72,10 +74,86 @@ const TABS = [
   "Escalation",
   "Client History",
 ];
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      resolve(result.includes(",") ? result.split(",").pop() : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read SOW file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function moneyLabel(value) {
+  return Number.isFinite(value) ? formatCurrency(value) : "";
+}
+
+function buildSowChanges(account, fields) {
+  const changes = [];
+  if (fields.accountName && fields.accountName !== account.name) {
+    changes.push({ field: "SOW Account Name", oldValue: account.name, newValue: fields.accountName });
+  }
+  if (Number.isFinite(fields.arr) && fields.arr !== account.arr) {
+    changes.push({
+      field: "SOW ARR",
+      oldValue: moneyLabel(account.arr),
+      newValue: moneyLabel(fields.arr),
+    });
+  }
+  if (Number.isFinite(fields.contractValue) && fields.contractValue !== account.contractValue) {
+    changes.push({
+      field: "SOW Contract Value",
+      oldValue: moneyLabel(account.contractValue),
+      newValue: moneyLabel(fields.contractValue),
+    });
+  }
+  if (Number.isFinite(fields.renewalDays) && fields.renewalDays !== account.renewalDays) {
+    changes.push({
+      field: "SOW Renewal Days",
+      oldValue: String(account.renewalDays),
+      newValue: String(fields.renewalDays),
+    });
+  }
+  if (fields.contractType && fields.contractType !== account.contractType) {
+    changes.push({
+      field: "SOW Contract Type",
+      oldValue: account.contractType,
+      newValue: fields.contractType,
+    });
+  }
+  if (fields.contractDuration && fields.contractDuration !== account.contractScoring?.duration) {
+    changes.push({
+      field: "SOW Contract Duration",
+      oldValue: account.contractScoring?.duration ?? "",
+      newValue: fields.contractDuration,
+    });
+  }
+  return changes;
+}
+
+function sowSummary(fields) {
+  const labels = [];
+  if (fields.accountName) labels.push("Account name");
+  if (Number.isFinite(fields.arr)) labels.push("ARR");
+  if (Number.isFinite(fields.contractValue)) labels.push("Contract value");
+  if (Number.isFinite(fields.renewalDays)) labels.push("Renewal");
+  if (fields.contractType) labels.push("Contract type");
+  if (fields.contractDuration) labels.push("Duration");
+  return labels.length ? labels.join(", ") : "No supported fields";
+}
+
 function AccountDetailPage() {
   const { account } = Route.useLoaderData();
   const { profile } = useAuth();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const sowInputRef = useRef(null);
   const [tab, setTab] = useState("Overview");
+  const [sowMessage, setSowMessage] = useState("");
+  const [sowError, setSowError] = useState("");
   const { data: accountEscalations = [] } = useQuery({
     queryKey: ["escalations", account.id],
     queryFn: () => fetchEscalations(account.id),
@@ -87,6 +165,48 @@ function AccountDetailPage() {
   const role = profile?.role ?? "KAM";
   const perms = getRolePermissions(role);
   const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
+  const { mutate: uploadSow, isPending: uploadingSow } = useMutation({
+    mutationFn: async (file) => {
+      const contentBase64 = await fileToBase64(file);
+      const extracted = await extractSowFields({
+        data: {
+          fileName: file.name,
+          mimeType: file.type,
+          contentBase64,
+        },
+      });
+      await applySowFields(account.id, extracted);
+      const changes = buildSowChanges(account, extracted);
+      if (changes.length > 0) {
+        await logAccountChanges(account.id, changes, profile?.name ?? "Unknown");
+      }
+      return extracted;
+    },
+    onMutate: () => {
+      setSowMessage("");
+      setSowError("");
+    },
+    onSuccess: async (fields) => {
+      setSowMessage(`SOW uploaded. Updated: ${sowSummary(fields)}.`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["contracts"] }),
+      ]);
+      await router.invalidate();
+    },
+    onError: (error) => {
+      setSowError(error?.message ?? "Could not upload SOW.");
+    },
+  });
+  function handleSowFile(file) {
+    if (!file) return;
+    if (file.size > 12 * 1024 * 1024) {
+      setSowMessage("");
+      setSowError("SOW file must be 12 MB or smaller.");
+      return;
+    }
+    uploadSow(file);
+  }
   return (
     <div className="flex flex-col">
       <header className="bg-card border-b flex flex-col md:flex-row md:items-center md:justify-between px-4 md:px-8 py-3 gap-3 sticky top-14 md:top-0 z-10">
@@ -119,15 +239,49 @@ function AccountDetailPage() {
             </span>
           )}
           <div className="flex flex-col items-end gap-1">
-            <button
-              disabled={!editable}
-              className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              Log Activity
-            </button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <input
+                ref={sowInputRef}
+                type="file"
+                className="hidden"
+                accept=".pdf,.docx,.txt,.md,.rtf"
+                onChange={(event) => {
+                  handleSowFile(event.target.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => sowInputRef.current?.click()}
+                disabled={!editable || uploadingSow}
+                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {uploadingSow ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Upload className="size-3" />
+                )}
+                {uploadingSow ? "Uploading SOW" : "Upload SOW"}
+              </button>
+              <button
+                disabled={!editable}
+                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Log Activity
+              </button>
+            </div>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
               Last sync with Jira · 4m ago
             </p>
+            {(sowMessage || sowError) && (
+              <p
+                className={`text-[11px] max-w-[28rem] text-right ${
+                  sowError ? "text-crit" : "text-success"
+                }`}
+              >
+                {sowError || sowMessage}
+              </p>
+            )}
           </div>
         </div>
       </header>
