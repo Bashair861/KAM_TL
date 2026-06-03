@@ -41,6 +41,11 @@ import {
   Sparkles,
   Lightbulb,
   Loader2,
+  History,
+  ListChecks,
+  BookOpen,
+  Target,
+  Filter,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -191,6 +196,7 @@ function AccountDetailPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["accounts"] }),
         queryClient.invalidateQueries({ queryKey: ["contracts"] }),
+        queryClient.invalidateQueries({ queryKey: ["account-history", account.id] }),
       ]);
       await router.invalidate();
     },
@@ -397,7 +403,13 @@ function AccountDetailPage() {
           {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} />}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
-          {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
+          {tab === "Client History" && (
+            <ClientHistoryTab
+              account={account}
+              escalations={accountEscalations}
+              opportunities={accountOpportunities}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -430,6 +442,7 @@ function OverviewTab({ account }) {
     onSuccess: (_, kamId) => {
       setAssignedKamId(kamId);
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
   const initialFields = useMemo(
@@ -504,6 +517,7 @@ function OverviewTab({ account }) {
     onSuccess: () => {
       setSavedSnapshot({ ...fields });
       setShowSaved(true);
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
   // OCR file state
@@ -1084,6 +1098,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const editable = getRolePermissions(profile?.role).write;
   const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
+  const queryClient = useQueryClient();
   // Load from persisted kpiData if available, otherwise seed from metrics.
   const defaultFields = (prefix) => [
     { id: `${prefix}-a`, label: "Monthly meeting held on schedule", weight: 50, checked: true },
@@ -1175,6 +1190,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       );
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["account-history", accountId] });
       router.invalidate();
       onClose();
     },
@@ -2054,91 +2070,457 @@ function EscalationsTab({ list }) {
   );
 }
 /* ============================== TAB 7: Client History ============================== */
-function ClientHistoryTab({ accountId }) {
-  const { data: history = [], isLoading } = useQuery({
-    queryKey: ["account-history", accountId],
-    queryFn: () => fetchAccountHistory(accountId),
+const HISTORY_TYPES = ["change", "activity", "escalation", "education", "opportunity", "growth"];
+const HISTORY_META = {
+  change: {
+    label: "Changes",
+    icon: History,
+    badge: "bg-accent/10 text-accent border-accent/20",
+    iconBox: "bg-accent/10 text-accent",
+  },
+  activity: {
+    label: "Activities",
+    icon: ListChecks,
+    badge: "bg-success/10 text-success border-success/20",
+    iconBox: "bg-success/10 text-success",
+  },
+  escalation: {
+    label: "Escalations",
+    icon: AlertTriangle,
+    badge: "bg-crit/10 text-crit border-crit/20",
+    iconBox: "bg-crit/10 text-crit",
+  },
+  education: {
+    label: "Education",
+    icon: BookOpen,
+    badge: "bg-warn/10 text-warn border-warn/20",
+    iconBox: "bg-warn/10 text-warn",
+  },
+  opportunity: {
+    label: "Opportunities",
+    icon: Target,
+    badge: "bg-primary/10 text-primary border-primary/20",
+    iconBox: "bg-primary/10 text-primary",
+  },
+  growth: {
+    label: "Growth",
+    icon: Workflow,
+    badge: "bg-muted text-muted-foreground border-border",
+    iconBox: "bg-muted text-muted-foreground",
+  },
+};
+
+function ClientHistoryTab({ account, escalations, opportunities }) {
+  const [activeType, setActiveType] = useState("all");
+  const { data: auditHistory = [], isLoading } = useQuery({
+    queryKey: ["account-history", account.id],
+    queryFn: () => fetchAccountHistory(account.id),
   });
+  const events = useMemo(
+    () =>
+      buildAccountHistoryEvents({
+        changes: auditHistory,
+        account,
+        escalations,
+        opportunities,
+      }),
+    [account, auditHistory, escalations, opportunities],
+  );
+  const counts = useMemo(
+    () =>
+      events.reduce(
+        (acc, event) => {
+          acc[event.type] = (acc[event.type] ?? 0) + 1;
+          return acc;
+        },
+        { all: events.length },
+      ),
+    [events],
+  );
+  const filteredEvents =
+    activeType === "all" ? events : events.filter((event) => event.type === activeType);
+  const openActivities = (account.activities ?? []).filter((a) => a.status !== "Done").length;
+  const accountEventCount =
+    (counts.activity ?? 0) +
+    (counts.escalation ?? 0) +
+    (counts.education ?? 0) +
+    (counts.opportunity ?? 0) +
+    (counts.growth ?? 0);
+  const latestEvent = events.find((event) => event.occurredAt);
+
   if (isLoading) {
-    return <div className="py-16 text-center text-xs text-muted-foreground">Loading history…</div>;
-  }
-  if (history.length === 0) {
     return (
-      <div className="bg-card border rounded-xl p-12 text-center">
+      <div className="py-16 text-center text-xs text-muted-foreground">Loading history...</div>
+    );
+  }
+  if (events.length === 0) {
+    return (
+      <div className="bg-card border rounded-lg p-12 text-center">
         <Clock className="size-6 text-muted-foreground mx-auto mb-2" />
-        <p className="text-sm text-muted-foreground">No changes recorded yet.</p>
-        <p className="text-[11px] text-muted-foreground mt-1">
-          Every time a KYC field, KAM assignment, or score is updated, it will appear here.
-        </p>
+        <p className="text-sm text-muted-foreground">No account history yet.</p>
       </div>
     );
   }
+
   return (
-    <div className="bg-card border rounded-xl overflow-hidden">
-      <div className="px-6 py-4 border-b">
-        <h3 className="text-sm font-bold">Change Log</h3>
-        <p className="text-[11px] text-muted-foreground mt-0.5">
-          All edits to this account — most recent first.
-        </p>
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+        <HistoryMetric
+          icon={History}
+          label="Tracked changes"
+          value={counts.change ?? 0}
+          detail={`${auditHistory.length} audit entries`}
+          tone="accent"
+        />
+        <HistoryMetric
+          icon={ListChecks}
+          label="Open activities"
+          value={openActivities}
+          detail={`${account.activities?.length ?? 0} total actions`}
+          tone="success"
+        />
+        <HistoryMetric
+          icon={Target}
+          label="Account events"
+          value={accountEventCount}
+          detail="Activity, growth, education"
+          tone="primary"
+        />
+        <HistoryMetric
+          icon={Clock}
+          label="Latest update"
+          value={latestEvent ? formatHistoryTime(latestEvent.occurredAt) : "-"}
+          detail={latestEvent ? latestEvent.title : "No dated records"}
+          tone="warn"
+        />
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm text-left min-w-[640px]">
-          <thead>
-            <tr className="bg-muted/30 border-b text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-              <th className="px-6 py-3">Field</th>
-              <th className="px-6 py-3">Old Value</th>
-              <th className="px-6 py-3">New Value</th>
-              <th className="px-6 py-3">Edited By</th>
-              <th className="px-6 py-3 text-right">Time</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {history.map((entry) => (
-              <HistoryRow key={entry.id} entry={entry} />
+
+      <div className="bg-card border rounded-lg overflow-hidden">
+        <div className="px-4 md:px-5 py-4 border-b flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold">Client Timeline</h3>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              {events.length} records for {account.name}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 xl:pb-0">
+            <span className="size-8 rounded-md border flex items-center justify-center text-muted-foreground shrink-0">
+              <Filter className="size-3.5" />
+            </span>
+            {["all", ...HISTORY_TYPES].map((type) => {
+              const label = type === "all" ? "All" : HISTORY_META[type].label;
+              const count = type === "all" ? events.length : (counts[type] ?? 0);
+              const selected = activeType === type;
+              return (
+                <button
+                  key={type}
+                  onClick={() => setActiveType(type)}
+                  className={`h-8 rounded-md border px-3 text-[11px] font-bold whitespace-nowrap transition-colors ${
+                    selected
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "bg-card text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                  }`}
+                >
+                  {label} <span className="font-mono opacity-70">{count}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {filteredEvents.length ? (
+          <div className="divide-y">
+            {filteredEvents.map((event) => (
+              <HistoryTimelineItem key={event.id} event={event} />
             ))}
-          </tbody>
-        </table>
+          </div>
+        ) : (
+          <div className="px-5 py-12 text-center text-xs text-muted-foreground">
+            No records match this filter.
+          </div>
+        )}
       </div>
     </div>
   );
 }
-function HistoryRow({ entry }) {
+
+function HistoryMetric({ icon: Icon, label, value, detail, tone }) {
+  const tones = {
+    accent: "bg-accent/10 text-accent",
+    success: "bg-success/10 text-success",
+    primary: "bg-primary/10 text-primary",
+    warn: "bg-warn/10 text-warn",
+  };
   return (
-    <tr className="hover:bg-muted/20 transition-colors align-top">
-      <td className="px-6 py-3 text-xs font-semibold whitespace-nowrap">{entry.fieldName}</td>
-      <td className="px-6 py-3 text-xs text-muted-foreground max-w-[200px]">
-        <span className="line-clamp-2 block">
-          {entry.oldValue ?? <span className="italic">—</span>}
-        </span>
-      </td>
-      <td className="px-6 py-3 text-xs text-foreground max-w-[200px]">
-        <span className="line-clamp-2 block">
-          {entry.newValue ?? <span className="italic">—</span>}
-        </span>
-      </td>
-      <td className="px-6 py-3 text-xs font-medium whitespace-nowrap">
-        <div className="flex items-center gap-1.5">
-          <div className="size-5 rounded-full bg-accent/10 text-accent flex items-center justify-center text-[9px] font-bold shrink-0">
-            {entry.editedBy
-              .split(" ")
-              .map((p) => p[0])
-              .join("")
-              .slice(0, 2)
-              .toUpperCase()}
-          </div>
-          {entry.editedBy}
-        </div>
-      </td>
-      <td className="px-6 py-3 text-right text-[11px] text-muted-foreground whitespace-nowrap">
-        {formatHistoryTime(entry.editedAt)}
-      </td>
-    </tr>
+    <div className="bg-card border rounded-lg p-4 flex items-start justify-between gap-3 min-w-0">
+      <div className="min-w-0">
+        <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+          {label}
+        </p>
+        <p className="text-xl font-bold mt-1 truncate">{value}</p>
+        <p className="text-[11px] text-muted-foreground mt-1 truncate">{detail}</p>
+      </div>
+      <span
+        className={`size-9 rounded-md flex items-center justify-center shrink-0 ${tones[tone] ?? tones.accent}`}
+      >
+        <Icon className="size-4" />
+      </span>
+    </div>
   );
 }
+
+function HistoryTimelineItem({ event }) {
+  const meta = HISTORY_META[event.type] ?? HISTORY_META.change;
+  const Icon = meta.icon;
+  return (
+    <article className="px-4 md:px-5 py-4 hover:bg-muted/20 transition-colors">
+      <div className="grid grid-cols-[2.25rem_1fr] gap-3">
+        <span className={`size-9 rounded-md flex items-center justify-center ${meta.iconBox}`}>
+          <Icon className="size-4" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span
+                  className={`border rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${meta.badge}`}
+                >
+                  {meta.label}
+                </span>
+                {event.status && (
+                  <span
+                    className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${statusBadgeClass(event.status)}`}
+                  >
+                    {event.status}
+                  </span>
+                )}
+                {event.rag && (
+                  <span
+                    className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${ragBadgeClass(event.rag)}`}
+                  >
+                    {ragLabel(event.rag)}
+                  </span>
+                )}
+              </div>
+              <h4 className="text-sm font-bold mt-2 leading-snug">{event.title}</h4>
+              {event.description && (
+                <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                  {event.description}
+                </p>
+              )}
+            </div>
+            <div className="text-left lg:text-right shrink-0">
+              <p className="text-xs font-bold whitespace-nowrap">
+                {formatHistoryTime(event.occurredAt)}
+              </p>
+              {event.occurredAt && (
+                <p className="text-[10px] text-muted-foreground mt-0.5 whitespace-nowrap">
+                  {formatHistoryDate(event.occurredAt)}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {event.type === "change" ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+              <HistoryValue label="Previous" value={event.oldValue} />
+              <HistoryValue label="Updated" value={event.newValue} emphasize />
+            </div>
+          ) : (
+            event.details.length > 0 && (
+              <dl className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2 mt-3">
+                {event.details.map((detail) => (
+                  <div
+                    key={detail.label}
+                    className="rounded-md border bg-muted/20 px-3 py-2 min-w-0"
+                  >
+                    <dt className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                      {detail.label}
+                    </dt>
+                    <dd className="text-xs font-semibold mt-1 truncate">{detail.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            )
+          )}
+
+          {(event.actor || event.source) && (
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground mt-3">
+              {event.actor && <span>Owner: {event.actor}</span>}
+              {event.source && <span>Source: {event.source}</span>}
+            </div>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function HistoryValue({ label, value, emphasize }) {
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 min-w-0 ${
+        emphasize ? "bg-accent/5 border-accent/20" : "bg-muted/20"
+      }`}
+    >
+      <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+        {label}
+      </p>
+      <p className="text-xs font-semibold mt-1 line-clamp-3 break-words">{toHistoryValue(value)}</p>
+    </div>
+  );
+}
+
+function buildAccountHistoryEvents({ changes, account, escalations, opportunities }) {
+  const changeEvents = (changes ?? []).map((entry) => ({
+    id: `change-${entry.id}`,
+    type: "change",
+    title: entry.fieldName,
+    description: "Account value changed",
+    oldValue: entry.oldValue,
+    newValue: entry.newValue,
+    actor: entry.editedBy,
+    source: "Audit log",
+    occurredAt: firstValidDate(entry.editedAt),
+  }));
+
+  const activityEvents = (account.activities ?? []).map((activity) => ({
+    id: `activity-${activity.id}`,
+    type: "activity",
+    title: activity.title,
+    description: `${activity.area} health action`,
+    actor: activity.owner || "Unassigned",
+    source: "Activity backlog",
+    status: activity.status,
+    rag: activity.rag,
+    occurredAt: firstValidDate(activity.updatedAt, activity.createdAt),
+    details: compactDetails([
+      ["Area", activity.area],
+      ["Due", activity.due],
+      ["Expected lift", activity.expectedLift],
+    ]),
+  }));
+
+  const escalationEvents = (escalations ?? []).map((escalation) => ({
+    id: `escalation-${escalation.id}`,
+    type: "escalation",
+    title: escalation.title,
+    description: escalation.description || escalation.rca || escalation.recommendation || "",
+    source: "Escalation",
+    status: escalation.priority,
+    occurredAt: firstValidDate(escalation.updatedAt, escalation.createdAt, escalation.openedAt),
+    details: compactDetails([
+      ["SLA", `${escalation.slaRemainingHours}h`],
+      ["Stakeholders", escalation.stakeholders],
+      ["Action items", `${escalation.actionItems?.filter((a) => !a.done).length ?? 0} open`],
+    ]),
+  }));
+
+  const educationEvents = (account.educationLog ?? []).map((education) => ({
+    id: `education-${education.date}-${education.topic}`,
+    type: "education",
+    title: education.topic,
+    description: education.outcome,
+    source: "Education history",
+    occurredAt: firstValidDate(education.createdAt, education.date),
+    details: compactDetails([
+      ["Date", education.date],
+      ["Approach", education.approach],
+    ]),
+  }));
+
+  const opportunityEvents = (opportunities ?? []).map((opportunity) => ({
+    id: `opportunity-${opportunity.id}`,
+    type: "opportunity",
+    title: opportunity.title,
+    description: opportunity.nextStep,
+    source: opportunity.source || "Opportunity",
+    status: opportunity.confidence,
+    occurredAt: firstValidDate(opportunity.createdAt, opportunity.signalDate),
+    details: compactDetails([
+      ["Signal date", opportunity.signalDate],
+      ["Potential", formatCurrency(Number(opportunity.potential) || 0)],
+      ["Next step", opportunity.nextStep],
+    ]),
+  }));
+
+  const growthEvents = (account.retentionGrowth ?? []).map((service) => {
+    const status = service.delivered
+      ? "Delivered"
+      : service.offered
+        ? "Offered"
+        : service.applicable
+          ? "White space"
+          : "Not applicable";
+    return {
+      id: `growth-${service.service}`,
+      type: "growth",
+      title: service.service,
+      description: service.trackingNote,
+      source: "Retention & growth",
+      status,
+      occurredAt: null,
+      details: compactDetails([
+        ["Offered", service.offered ? "Yes" : "No"],
+        ["Delivered", service.delivered ? "Yes" : "No"],
+        ["Applicable", service.applicable ? "Yes" : "No"],
+      ]),
+    };
+  });
+
+  return [
+    ...changeEvents,
+    ...activityEvents,
+    ...escalationEvents,
+    ...educationEvents,
+    ...opportunityEvents,
+    ...growthEvents,
+  ].sort((a, b) => {
+    const byDate = historySortValue(b.occurredAt) - historySortValue(a.occurredAt);
+    if (byDate !== 0) return byDate;
+    return a.title.localeCompare(b.title);
+  });
+}
+
+function compactDetails(items) {
+  return items
+    .map(([label, value]) => ({ label, value: toHistoryValue(value) }))
+    .filter((item) => item.value !== "-");
+}
+
+function toHistoryValue(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "-";
+  return String(value);
+}
+
+function firstValidDate(...values) {
+  for (const value of values) {
+    const iso = normalizeHistoryDate(value);
+    if (iso) return iso;
+  }
+  return null;
+}
+
+function normalizeHistoryDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function historySortValue(value) {
+  const iso = normalizeHistoryDate(value);
+  return iso ? new Date(iso).getTime() : 0;
+}
+
 function formatHistoryTime(iso) {
-  const date = new Date(iso);
+  const normalized = normalizeHistoryDate(iso);
+  if (!normalized) return "Current";
+  const date = new Date(normalized);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
+  if (diffMs < 0) return formatHistoryDate(normalized);
   const mins = Math.floor(diffMs / 60_000);
   const hours = Math.floor(diffMs / 3_600_000);
   const days = Math.floor(diffMs / 86_400_000);
@@ -2147,6 +2529,42 @@ function formatHistoryTime(iso) {
   if (hours < 24) return `${hours}h ago`;
   if (days < 7) return `${days}d ago`;
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function formatHistoryDate(iso) {
+  const normalized = normalizeHistoryDate(iso);
+  if (!normalized) return "";
+  return new Date(normalized).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function statusBadgeClass(status) {
+  const normalized = String(status).toLowerCase();
+  if (["done", "delivered", "live", "high"].includes(normalized)) {
+    return "bg-success/10 text-success";
+  }
+  if (["p1", "critical", "red"].includes(normalized)) {
+    return "bg-crit/10 text-crit";
+  }
+  if (["in progress", "offered", "p2", "medium", "white space"].includes(normalized)) {
+    return "bg-warn/10 text-warn";
+  }
+  return "bg-muted text-muted-foreground";
+}
+
+function ragLabel(rag) {
+  return rag === "R" ? "Red" : rag === "A" ? "Amber" : "Green";
+}
+
+function ragBadgeClass(rag) {
+  if (rag === "R") return "bg-crit/10 text-crit";
+  if (rag === "A") return "bg-warn/10 text-warn";
+  return "bg-success/10 text-success";
 }
 /* ============================== Shared atoms ============================== */
 function Card({ title, children }) {

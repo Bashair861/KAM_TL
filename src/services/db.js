@@ -397,6 +397,8 @@ export async function fetchAccount(id) {
       status: a.status,
       rag: a.rag,
       expectedLift: a.expected_lift ?? "",
+      createdAt: a.created_at ?? null,
+      updatedAt: a.updated_at ?? null,
     })),
     retentionGrowth: (retentionGrowth ?? []).map((r) => ({
       service: r.service,
@@ -410,6 +412,7 @@ export async function fetchAccount(id) {
       topic: e.topic,
       approach: e.approach ?? "",
       outcome: e.outcome ?? "",
+      createdAt: e.created_at ?? null,
     })),
   };
 }
@@ -433,6 +436,8 @@ export async function fetchEscalations(accountId) {
     clientFeedback: e.client_feedback ?? undefined,
     stakeholders: e.stakeholders ?? [],
     actionItems: (e.escalation_action_items ?? []).map((a) => ({ label: a.label, done: a.done })),
+    createdAt: e.created_at ?? null,
+    updatedAt: e.updated_at ?? null,
   }));
 }
 // ─── fetch opportunities ──────────────────────────────────────────────────────
@@ -450,6 +455,7 @@ export async function fetchOpportunities(accountId) {
     potential: o.potential ?? 0,
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
+    createdAt: o.created_at ?? null,
   }));
 }
 
