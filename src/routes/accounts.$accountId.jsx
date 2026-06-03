@@ -2645,6 +2645,74 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     closeSchedule();
   }
 
+  function requestMeetingApproval(row) {
+    setDraftRows((current) =>
+      current.map((draftRow) =>
+        draftRow.id === row.id
+          ? {
+              ...draftRow,
+              status: "Pending Approval",
+              approvalStatus: "pending",
+              approvalRequestedAt: new Date().toISOString(),
+              reviewState: `Approval request sent to ${draftRow.approverRole ?? "Head of KAM"} before invite can be sent`,
+              actionItems: draftRow.actionItems.map((actionItem) =>
+                /get approval/i.test(actionItem)
+                  ? `Waiting for ${draftRow.approverRole ?? "Head of KAM"} approval`
+                  : actionItem,
+              ),
+            }
+          : draftRow,
+      ),
+    );
+  }
+
+  function approveMeetingDraft(row) {
+    setDraftRows((current) =>
+      current.map((draftRow) =>
+        draftRow.id === row.id
+          ? {
+              ...draftRow,
+              status: "Approved",
+              approvalStatus: "approved",
+              approvedAt: new Date().toISOString(),
+              reviewState: "Approved. Ready to open in Google Calendar.",
+              actionItems: draftRow.actionItems.map((actionItem) =>
+                /waiting for|approval/i.test(actionItem)
+                  ? "Open Google Calendar invite after confirming availability"
+                  : actionItem,
+              ),
+            }
+          : draftRow,
+      ),
+    );
+  }
+
+  function openGoogleCalendarInvite(row) {
+    const calendarUrl = buildGoogleCalendarUrl(row, account);
+    if (!calendarUrl) return;
+
+    window.open(calendarUrl, "_blank", "noopener,noreferrer");
+    setDraftRows((current) =>
+      current.map((draftRow) =>
+        draftRow.id === row.id
+          ? {
+              ...draftRow,
+              status: "Calendar Opened",
+              calendarStatus: "opened",
+              calendarOpenedAt: new Date().toISOString(),
+              reviewState:
+                "Google Calendar compose opened. Save and send the invite in Google Calendar.",
+              actionItems: draftRow.actionItems.map((actionItem) =>
+                /send invite|open google calendar|calendar availability/i.test(actionItem)
+                  ? "Save and send invite in Google Calendar"
+                  : actionItem,
+              ),
+            }
+          : draftRow,
+      ),
+    );
+  }
+
   function confirmReject() {
     if (!rejectTarget || !rejectReason.trim()) return;
     setResolvedItems((current) => ({
@@ -3062,7 +3130,46 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         </Button>
                       </div>
                     ) : row.rowType === "draft" ? (
-                      <span className="text-[11px] text-muted-foreground">Draft only</span>
+                      <div className="flex justify-end gap-2">
+                        {row.needsApproval && row.approvalStatus === "not_requested" ? (
+                          <Button
+                            size="sm"
+                            disabled={!canAct}
+                            onClick={() => requestMeetingApproval(row)}
+                          >
+                            Request approval
+                          </Button>
+                        ) : row.needsApproval &&
+                          row.approvalStatus === "pending" &&
+                          role === "Head of KAM" ? (
+                          <Button
+                            size="sm"
+                            disabled={!canAct}
+                            onClick={() => approveMeetingDraft(row)}
+                          >
+                            Approve
+                          </Button>
+                        ) : canOpenGoogleCalendar(row) ? (
+                          <Button
+                            size="sm"
+                            disabled={!canAct}
+                            onClick={() => openGoogleCalendarInvite(row)}
+                          >
+                            <Calendar className="mr-1 size-3" />
+                            Open Google Calendar
+                          </Button>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">
+                            {row.approvalStatus === "pending"
+                              ? "Pending approval"
+                              : row.approvalStatus === "approved"
+                                ? "Approved"
+                                : row.calendarStatus === "opened"
+                                  ? "Calendar opened"
+                                : "Draft only"}
+                          </span>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-[11px] text-muted-foreground">View only</span>
                     )}
@@ -3361,7 +3468,9 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                   </select>
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="meeting-contact-email">Contact email</Label>
+                  <Label htmlFor="meeting-contact-email">
+                    Contact email <span className="text-crit">*</span>
+                  </Label>
                   <Input
                     id="meeting-contact-email"
                     type="email"
@@ -3372,9 +3481,6 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                     placeholder="client@example.com"
                     required
                   />
-                  {!form.attendeeEmail.trim() && (
-                    <p className="text-[11px] text-crit">Contact email is required.</p>
-                  )}
                 </div>
               </div>
 
@@ -3406,9 +3512,6 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                       </option>
                     ))}
                   </select>
-                  <p className="text-[11px] text-muted-foreground">
-                    Calendar availability will be checked after Google/Microsoft sync is connected.
-                  </p>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="meeting-duration">Duration</Label>
@@ -3440,10 +3543,6 @@ function MeetingScheduleDialog({ account, profile, target, form, onChange, onClo
                 />
               </div>
 
-              <div className="rounded-lg border border-accent/20 bg-accent/5 p-3 text-xs text-muted-foreground">
-                This MVP creates a draft activity inside KAM. In the next phase, this same form can
-                read free/busy slots from the logged-in person calendar and create the real invite.
-              </div>
             </div>
           </div>
         )}
@@ -3677,9 +3776,16 @@ function RagBadge({ code }) {
 
 function ActivityStatusBadge({ row }) {
   if (row.rowType === "draft") {
+    const styles =
+      row.status === "Approved" || row.status === "Calendar Opened"
+        ? "bg-success/10 text-success"
+        : row.status === "Pending Approval"
+          ? "bg-warn/10 text-warn"
+          : "bg-accent/10 text-accent";
+
     return (
-      <span className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-accent/10 text-accent">
-        Draft
+      <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles}`}>
+        {row.status}
       </span>
     );
   }
@@ -3807,6 +3913,58 @@ function formatMeetingTime(timeValue) {
   return `${normalizedHours}:${minutesText} ${suffix}`;
 }
 
+function buildCalendarDateTime(dateValue, timeValue, durationMinutes = 0) {
+  if (!dateValue || !timeValue) return "";
+  const normalizedTime = timeValue.length === 5 ? `${timeValue}:00` : timeValue;
+  const date = new Date(`${dateValue}T${normalizedTime}`);
+  if (Number.isNaN(date.getTime())) return "";
+
+  if (durationMinutes > 0) {
+    date.setMinutes(date.getMinutes() + durationMinutes);
+  }
+
+  return date.toISOString();
+}
+
+function formatGoogleCalendarDate(isoValue) {
+  if (!isoValue) return "";
+  const date = new Date(isoValue);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+function buildGoogleCalendarUrl(row, account) {
+  const start = formatGoogleCalendarDate(row.calendarStart);
+  const end = formatGoogleCalendarDate(row.calendarEnd);
+  if (!start || !end) return "";
+
+  const details = [
+    `Account: ${account.name}`,
+    row.meetingType ? `Meeting type: ${row.meetingType}` : null,
+    row.reason,
+    "",
+    "Agenda:",
+    row.agenda,
+    "",
+    row.reviewState,
+    row.expectedLift ? `Expected lift: ${row.expectedLift}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const url = new URL("https://calendar.google.com/calendar/render");
+  url.searchParams.set("action", "TEMPLATE");
+  url.searchParams.set("text", row.title);
+  url.searchParams.set("dates", `${start}/${end}`);
+  url.searchParams.set("details", details);
+  url.searchParams.set("trp", "false");
+  if (row.attendeeEmail) {
+    url.searchParams.set("add", row.attendeeEmail);
+  }
+
+  return url.toString();
+}
+
 function mapPriorityToRag(priority) {
   return priority === "High" ? "R" : priority === "Low" ? "G" : "A";
 }
@@ -3928,6 +4086,13 @@ function canScheduleMeeting(item) {
   );
 }
 
+function canOpenGoogleCalendar(row) {
+  if (!row || row.sourceKind?.includes("-meeting") !== true) return false;
+  if (row.calendarStatus === "opened") return false;
+  if (row.needsApproval && row.approvalStatus !== "approved") return false;
+  return Boolean(row.calendarStart && row.calendarEnd && row.attendeeEmail);
+}
+
 function buildDraftRow(target, form) {
   const { kind, item } = target;
   return {
@@ -3958,6 +4123,8 @@ function buildMeetingDraftRow(target, form, account, profile) {
   const { kind, item } = target;
   const meetingTime = `${formatDraftDate(form.date)}${form.time ? ` at ${formatMeetingTime(form.time)}` : ""}`;
   const needsApproval = /ceo|executive/i.test(form.meetingType) || item.approvalRequired;
+  const calendarStart = buildCalendarDateTime(form.date, form.time);
+  const calendarEnd = buildCalendarDateTime(form.date, form.time, Number(form.duration));
 
   return {
     id: `meeting-draft-${item.id}-${Date.now()}`,
@@ -3974,6 +4141,15 @@ function buildMeetingDraftRow(target, form, account, profile) {
     expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
     confidence: item.confidence ?? "Medium",
     reason: `Draft ${form.duration}-minute meeting with ${form.attendeeName}${form.attendeeRole ? ` (${form.attendeeRole})` : ""}.`,
+    meetingType: form.meetingType,
+    agenda: form.agenda,
+    calendarStart,
+    calendarEnd,
+    calendarStatus: "not_opened",
+    attendeeName: form.attendeeName,
+    attendeeEmail: form.attendeeEmail,
+    attendeeRole: form.attendeeRole,
+    organizerEmail: profile?.email ?? form.organizerEmail,
     evidence: [
       {
         source: "Meeting scheduler",
@@ -3991,11 +4167,16 @@ function buildMeetingDraftRow(target, form, account, profile) {
       form.attendeeEmail
         ? `Send invite to ${form.attendeeEmail}`
         : "Add client email before sending invite",
-      needsApproval ? "Get approval before sending executive invite" : "Send agenda before meeting",
+      needsApproval
+        ? "Get approval before sending executive invite"
+        : "Open Google Calendar invite and send agenda",
     ],
+    needsApproval,
+    approvalStatus: needsApproval ? "not_requested" : "not_required",
+    approverRole: item.approverRole ?? "Head of KAM",
     reviewState: needsApproval
       ? "Meeting draft needs approval before invite is sent"
-      : "Meeting draft needs calendar sync",
+      : "Ready to open in Google Calendar",
   };
 }
 
