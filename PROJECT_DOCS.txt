@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT DOCUMENTATION
   Purpose: Technical reference for database, configs, setup, and architecture.
   Keep this file updated after every major phase.
-  Last updated: Phase 4 - User Management + Auth Invites + Contracts Stabilization
+  Last updated: Phase 4.5 - Salesforce Integration (lookup + sync + field-mapping modal)
 ================================================================================
 
 
@@ -29,47 +29,90 @@ NOTE: All source files use .js or .jsx extensions. TypeScript has been removed.
 ────────────────────────────────────────────────────────────────────────────────
 File: .env.local  (root of project, gitignored — NEVER commit to git)
 NOTE: Must be named .env.local — Vite does NOT load plain .env by default.
+NOTE: Share with teammates via password manager only — never via GitHub or chat.
 
   VITE_SUPABASE_URL=https://ogkxkfhigejggnoobypk.supabase.co
   VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   SUPABASE_SERVICE_ROLE_KEY=<service role key - server/Node only>
 
+  # Salesforce — OAuth Client Credentials (server-only, no VITE_ prefix)
+  SALESFORCE_INSTANCE_URL=https://orgfarm-d3e5f8291b-dev-ed.develop.my.salesforce.com
+  SALESFORCE_LOGIN_URL=https://orgfarm-d3e5f8291b-dev-ed.develop.my.salesforce.com
+  SALESFORCE_CLIENT_ID=<Connected App Consumer Key>
+  SALESFORCE_CLIENT_SECRET=<Connected App Consumer Secret>
+
+  # AI mapping assistant — Gemini free tier (server-only, no VITE_ prefix)
+  # Get free key at: aistudio.google.com → Get API Key
+  GEMINI_API_KEY=<your Gemini API key>
+
 Rules:
   - VITE_ prefix = exposed to browser. OK for anon/publishable keys only.
-  - No VITE_ prefix = server/Node.js only. Required for service role key.
+  - No VITE_ prefix = server/Node.js only. Required for all secret keys.
   - Service role key bypasses all RLS. Used only on the server/Node side:
       src/db/seed.js
       src/services/user-admin.js
-  - Never add the service role key to any VITE_ variable.
+      src/services/salesforce-sync.js
+  - Salesforce credentials are server-only. Never add VITE_ prefix to them.
+  - Never add the service role key or any secret to a VITE_ variable.
 
 How env vars are consumed:
-  - Browser (app):   src/lib/supabase.js reads VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
-  - Seed script:     src/db/seed.js reads SUPABASE_SERVICE_ROLE_KEY via process.env
-  - User invites:    src/services/user-admin.js reads SUPABASE_SERVICE_ROLE_KEY
-                     inside a TanStack Start server function only
+  - Browser (app):      src/lib/supabase.js reads VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+  - Seed script:        src/db/seed.js reads SUPABASE_SERVICE_ROLE_KEY via process.env
+  - User invites:       src/services/user-admin.js — SUPABASE_SERVICE_ROLE_KEY (server fn)
+  - Salesforce lookup:  src/services/salesforce.js — SALESFORCE_* vars (server fn)
+  - Salesforce sync:    src/services/salesforce-sync.js — SALESFORCE_* + SERVICE_ROLE_KEY (server fn)
+  - AI field mapping:   src/services/ai-mapping.js — GEMINI_API_KEY (server fn, not yet built)
 
 
 ────────────────────────────────────────────────────────────────────────────────
-CURRENT EDITION SUMMARY - PHASE 4
+CURRENT EDITION SUMMARY - PHASE 4.5
 --------------------------------------------------------------------------------
-This edition adds user administration and invite-based login setup:
+Phase 4 added user administration and invite-based login setup:
+- /users: Head of KAM can list/create/role-change/activate users.
+- /set-password: Invite recipients set their password after clicking the email.
+- src/services/user-admin.js: server fn using SUPABASE_SERVICE_ROLE_KEY for Auth Admin.
+- src/services/db.js: fetchUsers(), createUserProfile(), updateUserRole(), updateUserStatus().
+- src/db/add-user-management.sql: is_active, Head of KAM RPC, profile RLS.
+- src/db/rename-ceo-role.sql: migrates legacy C Level enum back to CEO.
+- Contracts page: null contract_compliance crash fixed, contract_details array/object handled.
 
-- /users: Head of KAM can list all users, create users, change role, and
-  activate/deactivate users.
-- /set-password: Invite recipients can set their password after clicking the
-  Supabase invite email.
-- src/services/user-admin.js: server-only TanStack Start function that uses
-  SUPABASE_SERVICE_ROLE_KEY to call Supabase Auth Admin APIs.
-- src/services/db.js: added fetchUsers(), createUserProfile(), updateUserRole(),
-  updateUserStatus(), robust role normalization, and safer contract mapping.
-- src/db/add-user-management.sql: adds is_active, Head of KAM permission RPC,
-  user role/status RPCs, and RLS policies for profile insert/update.
-- src/db/rename-ceo-role.sql: keeps user_role as CEO and migrates legacy
-  "C Level" values back to CEO.
-- Contracts page: fixed null contract_compliance crash and added fallbacks for
-  missing contract fields.
-- Contract duration: fetchContracts() now maps contract_details.duration whether
-  Supabase returns nested contract_details as an object or array.
+Phase 4.5 adds Salesforce integration:
+- src/services/salesforce.js: lookupSalesforceAccountBundle (createServerFn POST)
+    Searches Salesforce for an Account by exact name, then fetches related Contacts.
+    Auth: OAuth Client Credentials flow (CLIENT_ID + CLIENT_SECRET only).
+    Falls back to static access token env var, then sf CLI (last resort, local only).
+    Returns: { found, account, contacts, formattedText, matchType }
+    If not found: { found: false, message: "Account not found..." }
+- src/services/salesforce-sync.js: syncSalesforceMappedFieldsServer (createServerFn POST)
+    Validates user session via anon key, then uses service role key to write.
+    Whitelists allowed account columns (ACCOUNT_SYNC_COLUMNS set).
+    Whitelists allowed stakeholder columns (STAKEHOLDER_SYNC_COLUMNS set).
+    Upserts stakeholders: matches by email first, name second; inserts if no match.
+- accounts.$accountId.jsx OverviewTab:
+    "Sync from Salesforce" button triggers lookupSalesforceAccountBundle.
+    On found: opens SalesforceMappingModal with pre-built mapping rows.
+    buildSalesforceMappingRows(): maps SF account fields → KYC fields,
+    and creates one row-group per SF Contact → Stakeholder fields.
+    finalizeSalesforceRows(): marks canSync=false if SF value is empty,
+    marks defaultSelected=true if SF value differs from current value.
+- SalesforceMappingModal (inline component in accounts.$accountId.jsx):
+    Table columns: Sync ✓ | Our field | Current value | SF field | SF value.
+    Grouped by: Account/KYC, then one section per Contact.
+    Checkbox per row; disabled when SF value is empty (canSync=false).
+    Select All / Clear buttons.
+    Error display in footer. Sync button with spinner.
+    On sync: calls syncSalesforceMappedFields (db.js) → syncSalesforceMappedFieldsServer.
+    Writes to account_history after sync via logAccountChanges().
+    Updates local fields state + savedSnapshot so UI reflects synced values immediately.
+
+Salesforce auth decision (important):
+  The org (orgfarm-d3e5f8291b-dev-ed.develop.my.salesforce.com) is an Agentforce/OrgFarm
+  org that blocks the OAuth Username-Password flow at the infrastructure level.
+  Client Credentials flow is used instead — no username/password in env vars.
+  The Connected App requires:
+    - "Enable Client Credentials Flow" checked (Setup → App Manager → Edit)
+    - "Run As" user set (Setup → App Manager → Manage → Edit Policies)
+  This is a one-time Salesforce admin configuration, not a code change.
 
 
 3. SUPABASE PROJECT
@@ -552,10 +595,19 @@ Step 3: Install dependencies
   bun install
 
 Step 4: Create .env.local in project root
-  VITE_SUPABASE_URL=https://ogkxkfhigejggnoobypk.supabase.co
-  VITE_SUPABASE_ANON_KEY=<anon key from Supabase Dashboard → Settings → API>
+  Get the full .env.local contents from the team lead via password manager.
+  It contains these variables:
 
-  SUPABASE_SERVICE_ROLE_KEY=<server-only service/secret key, no VITE_ prefix>
+  VITE_SUPABASE_URL=https://ogkxkfhigejggnoobypk.supabase.co
+  VITE_SUPABASE_ANON_KEY=<anon key>
+  SUPABASE_SERVICE_ROLE_KEY=<service/secret key — server only, no VITE_ prefix>
+
+  SALESFORCE_INSTANCE_URL=https://orgfarm-d3e5f8291b-dev-ed.develop.my.salesforce.com
+  SALESFORCE_LOGIN_URL=https://orgfarm-d3e5f8291b-dev-ed.develop.my.salesforce.com
+  SALESFORCE_CLIENT_ID=<Connected App Consumer Key>
+  SALESFORCE_CLIENT_SECRET=<Connected App Consumer Secret>
+
+  GEMINI_API_KEY=<free Gemini API key — get at aistudio.google.com>
 
 Step 5: Run dev server
   bun run dev
@@ -569,6 +621,10 @@ Step 7: Configure Supabase Auth redirect URLs for invite emails
     http://127.0.0.1:5174/set-password
   Add deployed redirect too:
     https://your-domain.com/set-password
+
+NOTE: No additional Salesforce setup is required for developers.
+  The Connected App and Salesforce org are already configured.
+  Salesforce integration works as soon as the env vars are in .env.local.
 
 For FRESH Supabase setup (first time only):
   1. SQL Editor: schema.sql → enable-rls.sql → grant-read.sql
@@ -612,7 +668,65 @@ KAM assignments (set in add-kam-assignment.sql + seed):
 
 
 ────────────────────────────────────────────────────────────────────────────────
-15. DESIGN TOKENS (Tailwind / CSS custom properties in src/styles.css)
+15. SALESFORCE INTEGRATION
+────────────────────────────────────────────────────────────────────────────────
+Salesforce Org:
+  URL:      https://orgfarm-d3e5f8291b-dev-ed.develop.my.salesforce.com
+  Type:     Agentforce / OrgFarm Developer org
+  Username: ahmad.h.06088b0449bf@agentforce.com
+
+Connected App: "Aether KAM Integration"
+  Auth flow:  OAuth Client Credentials (grant_type=client_credentials)
+  Why:        This org blocks the Username-Password flow at infrastructure level.
+              Client Credentials flow requires no user credentials in env vars.
+  Required Salesforce config (one-time admin step, already done):
+    - "Enable Client Credentials Flow" checked on the Connected App
+    - "Run As" user set under App Manager → Manage → Edit Policies
+
+Auth flow in code (src/services/salesforce.js getSalesforceAuth()):
+  Priority 1: OAuth Client Credentials
+    Uses: SALESFORCE_INSTANCE_URL + SALESFORCE_LOGIN_URL + CLIENT_ID + CLIENT_SECRET
+    Token endpoint: {SALESFORCE_LOGIN_URL}/services/oauth2/token
+    Gets a fresh token on every call — never expires mid-session.
+  Priority 2: Static access token (legacy fallback)
+    Uses: SALESFORCE_INSTANCE_URL + SALESFORCE_ACCESS_TOKEN
+    Not recommended — tokens expire after a few hours.
+  Priority 3: sf CLI (last resort)
+    Runs: sf org display -o kamDummy --verbose --json
+    Only works on machines with Salesforce CLI installed and authenticated.
+    Will fail in production and on other developers' machines.
+
+What gets fetched (salesforce.js):
+  Account fields: 40+ fields including Industry, AnnualRevenue, NumberOfEmployees,
+    BillingCity/State/Country, Description, Services_Offered__c, Target_Audience__c,
+    Revenue_Generation_Model__c, Funding_Stage__c, Previous_Communication_Needs__c,
+    KYC_Research_Notes__c, Current/Previous_Salesforce_Platform__c, Tech_Stack_Notes__c,
+    SaaS_Platforms_Used__c, and more.
+  Contact fields: Up to 20 contacts per account — Name, Email, Title, Decision_Maker__c,
+    Primary_KYC_Contact__c, Prospect_Persona__c, and more.
+  Search method: Exact name match SOQL query (case-sensitive) → "not found" if no match.
+
+What gets written (salesforce-sync.js):
+  Account fields whitelist (ACCOUNT_SYNC_COLUMNS):
+    industry, business_info, client_history, revenue, primary_contact_name,
+    primary_contact_role, region, employees, main_business_flow
+  Stakeholder fields whitelist (STAKEHOLDER_SYNC_COLUMNS):
+    name, role, email, influence, last_contact
+  Stakeholder matching: email first → name → insert as new row if no match.
+  Uses SUPABASE_SERVICE_ROLE_KEY to bypass RLS for writes.
+  All synced fields are logged to account_history table.
+
+AI mapping assistant (PLANNED — not yet built):
+  File: src/services/ai-mapping.js (to be created)
+  API:  Google Gemini 2.0 Flash — free tier (1500 req/day)
+  Key:  GEMINI_API_KEY in .env.local
+  Purpose: Given the mapping rows (current value + SF value), recommends which
+    rows to pre-check. User can override. Strictly field-mapping only — no other role.
+  UI: "✨ AI Suggest" button in SalesforceMappingModal header.
+      AI badge next to checkbox on AI-recommended rows.
+
+────────────────────────────────────────────────────────────────────────────────
+17. DESIGN TOKENS (Tailwind / CSS custom properties in src/styles.css)
 ────────────────────────────────────────────────────────────────────────────────
 --accent              → primary blue/teal accent color
 --success             → green (healthy, positive)

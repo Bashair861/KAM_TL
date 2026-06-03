@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 4 - User Management + Auth Invites + Contracts Stabilization
+  Last updated: Phase 4.5 - Salesforce Integration (lookup + sync + field-mapping modal)
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -97,6 +97,17 @@ Recent JS additions:
   src/services/user-admin.js        <- Server-only Supabase Auth invite function
   src/db/add-user-management.sql    <- profiles.is_active + user management RPCs/RLS
   src/db/rename-ceo-role.sql        <- keeps user_role enum value as CEO
+
+Salesforce integration additions (Phase 4.5):
+  src/services/salesforce.js        <- Server fn: lookupSalesforceAccountBundle
+                                       Searches SF by account name, returns account + contacts
+                                       Auth: OAuth Client Credentials flow (CLIENT_ID + CLIENT_SECRET)
+  src/services/salesforce-sync.js   <- Server fn: syncSalesforceMappedFieldsServer
+                                       Writes selected fields to Supabase accounts + stakeholders
+                                       Uses service role key to bypass RLS
+  SalesforceMappingModal            <- Inline component in accounts.$accountId.jsx
+                                       Field-by-field review table with checkboxes
+                                       Groups: Account/KYC + one group per Salesforce Contact
 
 USER ROLES & PERMISSIONS (ROLE_PERMISSIONS in kam-data.js)
 ────────────────────────────────────────────────────────────────────────────────
@@ -347,6 +358,18 @@ PHASE 3 (remaining) — Write operations still to do
 NOTE: As more data gets wired, all of it must be filtered by the KAM's assigned
 accounts. Head of KAM and CEO always see everything unfiltered.
 
+PHASE 4.5 (remaining) — Salesforce AI mapping assistant
+  - Add src/services/ai-mapping.js: server function calling Google Gemini free API
+    Takes the mapping rows (with current values + SF values) and returns
+    { [rowId]: boolean } recommending which rows to pre-check
+  - Add "✨ AI Suggest" button to SalesforceMappingModal header
+    Triggers the AI call, shows spinner while pending
+    Updates checkbox selections with AI recommendations
+    User can still override any checkbox before syncing
+  - Add AI badge next to checkbox on AI-recommended rows
+  - Uses GEMINI_API_KEY env var (Google Gemini free tier — no cost)
+  - AI prompt scope is strictly: field mapping only (no other purpose)
+
 PHASE 5 - AI Assistant (Google Gemini)
   - Wire src/services/ai.js to Google Gemini API
   - AI bot that answers questions about an account based on its data
@@ -376,11 +399,18 @@ Service key: stored in .env.local as SUPABASE_SERVICE_ROLE_KEY
 To set up on a new machine:
   1. Clone repo + git checkout Bashair
   2. bun install
-  3. Create .env.local with VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY,
-     and server-only SUPABASE_SERVICE_ROLE_KEY
+  3. Create .env.local — get values from team lead via password manager (never GitHub):
+       VITE_SUPABASE_URL
+       VITE_SUPABASE_ANON_KEY
+       SUPABASE_SERVICE_ROLE_KEY
+       SALESFORCE_INSTANCE_URL
+       SALESFORCE_LOGIN_URL
+       SALESFORCE_CLIENT_ID
+       SALESFORCE_CLIENT_SECRET
   4. bun run dev
   5. In Supabase Auth URL Configuration, add /set-password redirect URLs
   (DB is already set up on Supabase — shared across all machines)
+  (Salesforce Connected App is already set up — no additional SF config needed)
 
 To set up a FRESH Supabase project from scratch:
   1. Run schema.sql → enable-rls.sql → grant-read.sql in SQL Editor
@@ -407,6 +437,10 @@ KNOWN ISSUES / NOTES FOR NEXT SESSION
   and a TanStack Start server function. Most other write areas still rely on UI
   guards plus table-level RLS policies.
 - Debug error banner on dashboard (index.jsx) — kept intentionally for now
+- Salesforce AI mapping assistant not yet built (Phase 4.5 remaining item above)
+- Salesforce Connected App must have "Enable Client Credentials Flow" checked
+  and a "Run As" user set (Setup → App Manager → Manage → Edit Policies).
+  This is a one-time Salesforce admin step, not a code change.
 
 ================================================================================
 END OF PROJECT CONTEXT FILE

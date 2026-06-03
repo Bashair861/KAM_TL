@@ -9,10 +9,12 @@ import {
   fetchKamUsers,
   updateAccountKam,
   updateAccountKyc,
+  syncSalesforceMappedFields,
   updateHealthBlock,
   fetchAccountHistory,
   logAccountChanges,
 } from "@/services/db";
+import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft,
@@ -72,6 +74,314 @@ const TABS = [
   "Escalation",
   "Client History",
 ];
+function hasSyncValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== "";
+}
+function displaySyncValue(value) {
+  if (!hasSyncValue(value)) return "-";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return String(value);
+}
+function joinSyncParts(parts) {
+  return parts
+    .filter(([, value]) => hasSyncValue(value))
+    .map(([label, value]) => `${label}: ${displaySyncValue(value)}`)
+    .join("\n");
+}
+function formatSalesforceMoney(value) {
+  if (!hasSyncValue(value)) return "";
+  const amount = Number(value);
+  if (Number.isNaN(amount)) return String(value);
+  return amount.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+function formatSalesforceRegion(account) {
+  return [account?.BillingCity, account?.BillingStateCode, account?.BillingCountryCode]
+    .filter(hasSyncValue)
+    .join(", ");
+}
+function getPrimarySalesforceContact(contacts) {
+  return contacts.find((contact) => contact.Primary_KYC_Contact__c) ?? contacts[0] ?? null;
+}
+function deriveStakeholderInfluence(contact) {
+  if (contact?.Decision_Maker__c) return "Decision Maker";
+  if (contact?.Primary_KYC_Contact__c) return "Champion";
+  return "Influencer";
+}
+function findStakeholderForContact(stakeholders, contact) {
+  const email = String(contact?.Email ?? "").trim().toLowerCase();
+  const name = String(contact?.Name ?? "").trim().toLowerCase();
+  return (
+    stakeholders.find((stakeholder) => String(stakeholder.email ?? "").trim().toLowerCase() === email && email) ||
+    stakeholders.find((stakeholder) => String(stakeholder.name ?? "").trim().toLowerCase() === name && name) ||
+    null
+  );
+}
+function finalizeSalesforceRows(rows) {
+  return rows.map((row) => {
+    const dbValue = row.dbValue ?? row.nextValue;
+    const canSync = hasSyncValue(dbValue);
+    const changed = displaySyncValue(row.destinationValue) !== displaySyncValue(row.nextValue);
+    return {
+      ...row,
+      dbValue,
+      canSync,
+      defaultSelected: canSync && changed,
+    };
+  });
+}
+function buildSalesforceMappingRows(bundle, account, fields) {
+  if (!bundle?.found || !bundle.account) return [];
+  const sfAccount = bundle.account;
+  const contacts = bundle.contacts ?? [];
+  const primaryContact = getPrimarySalesforceContact(contacts);
+  const rows = [
+    {
+      id: "account.industry",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Industry Info",
+      destinationValue: fields.industry,
+      sourceLabel: "Account.Industry",
+      sourceValue: sfAccount.Industry,
+      nextValue: sfAccount.Industry,
+      dbColumn: "industry",
+      fieldKey: "industry",
+    },
+    {
+      id: "account.business",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Business Info",
+      destinationValue: fields.business,
+      sourceLabel: "Account business profile",
+      sourceValue: joinSyncParts([
+        ["Description", sfAccount.Description],
+        ["Services Offered", sfAccount.Services_Offered__c],
+        ["Target Audience", sfAccount.Target_Audience__c],
+        ["Revenue Model", sfAccount.Revenue_Generation_Model__c],
+        ["Requested Solution", sfAccount.Requested_Solution__c],
+      ]),
+      nextValue: joinSyncParts([
+        ["Description", sfAccount.Description],
+        ["Services Offered", sfAccount.Services_Offered__c],
+        ["Target Audience", sfAccount.Target_Audience__c],
+        ["Revenue Model", sfAccount.Revenue_Generation_Model__c],
+        ["Requested Solution", sfAccount.Requested_Solution__c],
+      ]),
+      dbColumn: "business_info",
+      fieldKey: "business",
+    },
+    {
+      id: "account.history",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Client History Notes",
+      destinationValue: fields.history,
+      sourceLabel: "Account history notes",
+      sourceValue: joinSyncParts([
+        ["Previous Communication", sfAccount.Previous_Communication_Needs__c],
+        ["Salesforce Usage", sfAccount.Salesforce_Usage_Summary__c],
+        ["KYC Research", sfAccount.KYC_Research_Notes__c],
+      ]),
+      nextValue: joinSyncParts([
+        ["Previous Communication", sfAccount.Previous_Communication_Needs__c],
+        ["Salesforce Usage", sfAccount.Salesforce_Usage_Summary__c],
+        ["KYC Research", sfAccount.KYC_Research_Notes__c],
+      ]),
+      dbColumn: "client_history",
+      fieldKey: "history",
+    },
+    {
+      id: "account.revenue",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Revenue Info",
+      destinationValue: fields.revenue,
+      sourceLabel: "Account.AnnualRevenue / Funding",
+      sourceValue: joinSyncParts([
+        ["Annual Revenue", formatSalesforceMoney(sfAccount.AnnualRevenue)],
+        ["Funding Stage", sfAccount.Funding_Stage__c],
+        ["Funding Amount", formatSalesforceMoney(sfAccount.Funding_Amount__c)],
+      ]),
+      nextValue: joinSyncParts([
+        ["Annual Revenue", formatSalesforceMoney(sfAccount.AnnualRevenue)],
+        ["Funding Stage", sfAccount.Funding_Stage__c],
+        ["Funding Amount", formatSalesforceMoney(sfAccount.Funding_Amount__c)],
+      ]),
+      dbColumn: "revenue",
+      fieldKey: "revenue",
+    },
+    {
+      id: "account.primaryName",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Primary Contact",
+      destinationValue: fields.primary,
+      sourceLabel: "Primary Contact.Name",
+      sourceValue: primaryContact?.Name,
+      nextValue: primaryContact?.Name,
+      dbColumn: "primary_contact_name",
+      fieldKey: "primary",
+    },
+    {
+      id: "account.primaryRole",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Primary Contact Role",
+      destinationValue: account.primaryContact.role,
+      sourceLabel: "Primary Contact.Title",
+      sourceValue: primaryContact?.Title,
+      nextValue: primaryContact?.Title,
+      dbColumn: "primary_contact_role",
+    },
+    {
+      id: "account.region",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Region",
+      destinationValue: account.region,
+      sourceLabel: "Account Billing Location",
+      sourceValue: formatSalesforceRegion(sfAccount),
+      nextValue: formatSalesforceRegion(sfAccount),
+      dbColumn: "region",
+    },
+    {
+      id: "account.employees",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Employees",
+      destinationValue: account.employees,
+      sourceLabel: "Account.NumberOfEmployees",
+      sourceValue: sfAccount.NumberOfEmployees,
+      nextValue: sfAccount.NumberOfEmployees,
+      dbColumn: "employees",
+      dbValue: hasSyncValue(sfAccount.NumberOfEmployees) ? String(sfAccount.NumberOfEmployees) : "",
+    },
+    {
+      id: "account.flow",
+      kind: "account",
+      group: "Account / KYC",
+      destinationLabel: "Main Business Flow",
+      destinationValue: fields.flow,
+      sourceLabel: "Account platform and tech notes",
+      sourceValue: joinSyncParts([
+        ["Current Salesforce Platform", sfAccount.Current_Salesforce_Platform__c],
+        ["Previous Salesforce Platform", sfAccount.Previous_Salesforce_Platform__c],
+        ["SaaS Platforms", sfAccount.SaaS_Platforms_Used__c],
+        ["Tech Stack Notes", sfAccount.Tech_Stack_Notes__c],
+      ]),
+      nextValue: joinSyncParts([
+        ["Current Salesforce Platform", sfAccount.Current_Salesforce_Platform__c],
+        ["Previous Salesforce Platform", sfAccount.Previous_Salesforce_Platform__c],
+        ["SaaS Platforms", sfAccount.SaaS_Platforms_Used__c],
+        ["Tech Stack Notes", sfAccount.Tech_Stack_Notes__c],
+      ]),
+      dbColumn: "main_business_flow",
+      fieldKey: "flow",
+    },
+  ];
+
+  contacts.forEach((contact, index) => {
+    const existing = findStakeholderForContact(account.stakeholders, contact);
+    const contactKey = contact.Id ?? `${index}-${contact.Name}`;
+    const group = `Stakeholder: ${contact.Name ?? `Contact ${index + 1}`}`;
+    rows.push(
+      {
+        id: `stakeholder.${contactKey}.name`,
+        kind: "stakeholder",
+        group,
+        destinationLabel: "Stakeholder Name",
+        destinationValue: existing?.name ?? "",
+        sourceLabel: "Contact.Name",
+        sourceValue: contact.Name,
+        nextValue: contact.Name,
+        contactKey,
+        sourceName: contact.Name,
+        sourceEmail: contact.Email,
+        stakeholderField: "name",
+      },
+      {
+        id: `stakeholder.${contactKey}.role`,
+        kind: "stakeholder",
+        group,
+        destinationLabel: "Stakeholder Role",
+        destinationValue: existing?.role ?? "",
+        sourceLabel: "Contact.Title",
+        sourceValue: contact.Title,
+        nextValue: contact.Title,
+        contactKey,
+        sourceName: contact.Name,
+        sourceEmail: contact.Email,
+        stakeholderField: "role",
+      },
+      {
+        id: `stakeholder.${contactKey}.email`,
+        kind: "stakeholder",
+        group,
+        destinationLabel: "Stakeholder Email",
+        destinationValue: existing?.email ?? "",
+        sourceLabel: "Contact.Email",
+        sourceValue: contact.Email,
+        nextValue: contact.Email,
+        contactKey,
+        sourceName: contact.Name,
+        sourceEmail: contact.Email,
+        stakeholderField: "email",
+      },
+      {
+        id: `stakeholder.${contactKey}.influence`,
+        kind: "stakeholder",
+        group,
+        destinationLabel: "Stakeholder Influence",
+        destinationValue: existing?.influence ?? "",
+        sourceLabel: "Contact.Decision_Maker / Primary_KYC_Contact",
+        sourceValue: joinSyncParts([
+          ["Decision Maker", contact.Decision_Maker__c],
+          ["Primary KYC Contact", contact.Primary_KYC_Contact__c],
+          ["Persona", contact.Prospect_Persona__c],
+        ]),
+        nextValue: deriveStakeholderInfluence(contact),
+        contactKey,
+        sourceName: contact.Name,
+        sourceEmail: contact.Email,
+        stakeholderField: "influence",
+      },
+    );
+  });
+
+  return finalizeSalesforceRows(rows);
+}
+function defaultSalesforceSelection(rows) {
+  return Object.fromEntries(rows.map((row) => [row.id, row.defaultSelected]));
+}
+function buildSalesforceSyncPayload(rows) {
+  const accountUpdates = {};
+  const stakeholderMap = new Map();
+  rows.forEach((row) => {
+    if (row.kind === "account") {
+      accountUpdates[row.dbColumn] = row.dbValue;
+      return;
+    }
+    const existing = stakeholderMap.get(row.contactKey) ?? {
+      sourceName: row.sourceName,
+      sourceEmail: row.sourceEmail,
+      fields: {},
+    };
+    existing.fields[row.stakeholderField] = row.dbValue;
+    stakeholderMap.set(row.contactKey, existing);
+  });
+  return {
+    accountUpdates,
+    stakeholderUpdates: Array.from(stakeholderMap.values()),
+  };
+}
+function buildSalesforceHistoryRows(rows) {
+  return rows.map((row) => ({
+    field: `Salesforce sync - ${row.group} / ${row.destinationLabel}`,
+    oldValue: displaySyncValue(row.destinationValue),
+    newValue: displaySyncValue(row.nextValue),
+  }));
+}
 function AccountDetailPage() {
   const { account } = Route.useLoaderData();
   const { profile } = useAuth();
@@ -251,11 +561,12 @@ function AccountDetailPage() {
 }
 /* ============================== TAB 1: Overview (KYC) ============================== */
 function OverviewTab({ account }) {
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const role = profile?.role ?? "KAM";
   const isHead = role === "Head of KAM" || role === "CEO";
   const editable = getRolePermissions(role).write;
   const queryClient = useQueryClient();
+  const router = useRouter();
   const { data: kamUsers = [] } = useQuery({
     queryKey: ["kamUsers"],
     queryFn: fetchKamUsers,
@@ -355,6 +666,92 @@ function OverviewTab({ account }) {
   // OCR file state
   const [ocrFile, setOcrFile] = useState(null);
   const [ocrStatus, setOcrStatus] = useState("idle");
+  const [salesforceLookup, setSalesforceLookup] = useState({
+    status: "idle",
+    text: "",
+    error: "",
+    bundle: null,
+  });
+  const [salesforceMappingOpen, setSalesforceMappingOpen] = useState(false);
+  const [selectedSalesforceRows, setSelectedSalesforceRows] = useState({});
+  const [salesforceSyncError, setSalesforceSyncError] = useState("");
+  const salesforceMappingRows = useMemo(
+    () => buildSalesforceMappingRows(salesforceLookup.bundle, account, fields),
+    [salesforceLookup.bundle, account, fields],
+  );
+  const { mutate: checkSalesforceAccount, isPending: checkingSalesforce } = useMutation({
+    mutationFn: () =>
+      lookupSalesforceAccountBundle({
+        data: {
+          accountName: account.name,
+          accessToken: session?.access_token,
+        },
+      }),
+    onSuccess: (result) => {
+      const rows = buildSalesforceMappingRows(result, account, fields);
+      setSalesforceLookup({
+        status: result.found ? "found" : "not-found",
+        text: result.formattedText,
+        error: "",
+        bundle: result.found ? result : null,
+      });
+      setSelectedSalesforceRows(defaultSalesforceSelection(rows));
+      setSalesforceSyncError("");
+      if (result.found && rows.length > 0) setSalesforceMappingOpen(true);
+    },
+    onError: (error) => {
+      setSalesforceLookup({
+        status: "error",
+        text: "",
+        error: error.message ?? "Unable to check Salesforce for this account.",
+        bundle: null,
+      });
+    },
+  });
+  const selectedRowsForSync = salesforceMappingRows.filter(
+    (row) => row.canSync && selectedSalesforceRows[row.id],
+  );
+  const { mutate: syncSelectedSalesforceRows, isPending: syncingSalesforceRows } = useMutation({
+    mutationFn: async () => {
+      if (selectedRowsForSync.length === 0) {
+        throw new Error("Select at least one Salesforce field to sync.");
+      }
+      await syncSalesforceMappedFields(account.id, buildSalesforceSyncPayload(selectedRowsForSync));
+      await logAccountChanges(
+        account.id,
+        buildSalesforceHistoryRows(selectedRowsForSync),
+        profile?.name ?? "Unknown",
+      );
+      return selectedRowsForSync;
+    },
+    onSuccess: (syncedRows) => {
+      setFields((current) => {
+        const next = { ...current };
+        syncedRows.forEach((row) => {
+          if (row.kind === "account" && row.fieldKey) next[row.fieldKey] = displaySyncValue(row.dbValue);
+        });
+        return next;
+      });
+      setSavedSnapshot((current) => {
+        const next = { ...current };
+        syncedRows.forEach((row) => {
+          if (row.kind === "account" && row.fieldKey) next[row.fieldKey] = displaySyncValue(row.dbValue);
+        });
+        return next;
+      });
+      setSalesforceSyncError("");
+      setSalesforceMappingOpen(false);
+      setSalesforceLookup((current) => ({
+        ...current,
+        text: `${current.text}\n\nSynced ${syncedRows.length} selected field(s) into this account.`,
+      }));
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setSalesforceSyncError(error.message ?? "Salesforce sync failed. Please try again.");
+    },
+  });
   function runOcrSimulation() {
     if (!ocrFile) return;
     setOcrStatus("processing");
@@ -429,7 +826,73 @@ function OverviewTab({ account }) {
                 ? "Re-extract"
                 : "Extract & Auto-fill"}
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSalesforceLookup({ status: "loading", text: "", error: "", bundle: null });
+              setSalesforceMappingOpen(false);
+              setSalesforceSyncError("");
+              checkSalesforceAccount();
+            }}
+            disabled={checkingSalesforce || !session}
+            className="px-4 py-2.5 border text-xs font-bold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {checkingSalesforce ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Building2 className="size-3.5" />
+            )}
+            {checkingSalesforce ? "Checking Salesforce..." : "Sync from Salesforce"}
+          </button>
         </div>
+        {salesforceLookup.status !== "idle" && (
+          <div
+            className={`mt-4 rounded-lg border p-4 ${
+              salesforceLookup.status === "error"
+                ? "border-crit/30 bg-crit/5"
+                : salesforceLookup.status === "not-found"
+                  ? "border-warn/30 bg-warn/5"
+                  : "bg-muted/30"
+            }`}
+          >
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-1 mb-2">
+              <p className="text-xs font-bold uppercase tracking-wider">Salesforce lookup</p>
+              <span className="text-[10px] font-mono text-muted-foreground">
+                Search name: {account.name}
+              </span>
+            </div>
+            {salesforceLookup.status === "loading" ? (
+              <p className="text-xs text-muted-foreground flex items-center gap-2">
+                <Loader2 className="size-3.5 animate-spin" />
+                Checking Salesforce account and related contacts...
+              </p>
+            ) : salesforceLookup.status === "error" ? (
+              <p className="text-xs text-crit">{salesforceLookup.error}</p>
+            ) : (
+              <>
+                {salesforceLookup.status === "found" && salesforceMappingRows.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSalesforceRows((current) =>
+                        Object.keys(current).length > 0
+                          ? current
+                          : defaultSalesforceSelection(salesforceMappingRows),
+                      );
+                      setSalesforceMappingOpen(true);
+                    }}
+                    className="mb-3 px-3 py-1.5 border text-[11px] font-bold rounded-md hover:bg-muted transition-colors"
+                  >
+                    Review field mapping
+                  </button>
+                )}
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-foreground font-mono">
+                  {salesforceLookup.text}
+                </pre>
+              </>
+            )}
+          </div>
+        )}
         {ocrStatus === "done" && (
           <p className="text-[11px] text-success mt-2 flex items-center gap-1">
             <CheckCircle2 className="size-3" />
@@ -696,6 +1159,184 @@ function OverviewTab({ account }) {
           </table>
         </div>
       </Card>
+      {salesforceMappingOpen && (
+        <SalesforceMappingModal
+          rows={salesforceMappingRows}
+          selectedRows={selectedSalesforceRows}
+          syncing={syncingSalesforceRows}
+          error={salesforceSyncError}
+          onClose={() => setSalesforceMappingOpen(false)}
+          onToggle={(rowId) =>
+            setSelectedSalesforceRows((current) => ({ ...current, [rowId]: !current[rowId] }))
+          }
+          onSelectAll={() =>
+            setSelectedSalesforceRows(
+              Object.fromEntries(salesforceMappingRows.map((row) => [row.id, row.canSync])),
+            )
+          }
+          onClear={() =>
+            setSelectedSalesforceRows(
+              Object.fromEntries(salesforceMappingRows.map((row) => [row.id, false])),
+            )
+          }
+          onSync={() => syncSelectedSalesforceRows()}
+        />
+      )}
+    </div>
+  );
+}
+function SalesforceMappingModal({
+  rows,
+  selectedRows,
+  syncing,
+  error,
+  onClose,
+  onToggle,
+  onSelectAll,
+  onClear,
+  onSync,
+}) {
+  const groupedRows = useMemo(
+    () =>
+      rows.reduce((groups, row) => {
+        if (!groups[row.group]) groups[row.group] = [];
+        groups[row.group].push(row);
+        return groups;
+      }, {}),
+    [rows],
+  );
+  const selectedCount = rows.filter((row) => row.canSync && selectedRows[row.id]).length;
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 flex items-stretch md:items-center justify-center md:p-6 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className="bg-background w-full md:max-w-6xl md:rounded-xl border shadow-2xl flex flex-col max-h-screen md:max-h-[90vh]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-widest font-bold text-accent">
+              Salesforce Sync
+            </p>
+            <h3 className="text-lg font-bold">Review Field Mapping</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-muted-foreground font-mono">
+              {selectedCount} selected
+            </span>
+            <button
+              type="button"
+              onClick={onSelectAll}
+              disabled={syncing}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={syncing}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={syncing}
+              className="size-8 border rounded-md flex items-center justify-center hover:bg-muted disabled:opacity-40"
+              aria-label="Close Salesforce mapping"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          {Object.entries(groupedRows).map(([group, groupRows]) => (
+            <div key={group} className="border-b">
+              <div className="px-5 py-2 bg-muted/40">
+                <p className="text-[11px] font-bold uppercase tracking-wider">{group}</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[880px] text-left">
+                  <thead>
+                    <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
+                      <th className="w-12 px-5 py-2">Sync</th>
+                      <th className="px-3 py-2">Our field</th>
+                      <th className="px-3 py-2">Current value</th>
+                      <th className="px-3 py-2">Salesforce field</th>
+                      <th className="px-3 py-2">Salesforce value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {groupRows.map((row) => (
+                      <tr key={row.id} className={!row.canSync ? "opacity-50" : ""}>
+                        <td className="px-5 py-3 align-top">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selectedRows[row.id])}
+                            disabled={!row.canSync || syncing}
+                            onChange={() => onToggle(row.id)}
+                            className="size-4"
+                            aria-label={`Sync ${row.destinationLabel}`}
+                          />
+                        </td>
+                        <td className="px-3 py-3 align-top">
+                          <p className="text-xs font-bold">{row.destinationLabel}</p>
+                        </td>
+                        <td className="px-3 py-3 align-top max-w-[250px]">
+                          <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono text-muted-foreground">
+                            {displaySyncValue(row.destinationValue)}
+                          </pre>
+                        </td>
+                        <td className="px-3 py-3 align-top">
+                          <p className="text-xs font-semibold">{row.sourceLabel}</p>
+                          <p className="text-[10px] text-muted-foreground mt-1">
+                            Sync value: {displaySyncValue(row.nextValue)}
+                          </p>
+                        </td>
+                        <td className="px-3 py-3 align-top max-w-[320px]">
+                          <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono">
+                            {displaySyncValue(row.sourceValue)}
+                          </pre>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="px-5 py-4 border-t flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <p className={`text-xs ${error ? "text-crit" : "text-muted-foreground"}`}>
+            {error || "Unchecked fields will stay unchanged."}
+          </p>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={syncing}
+              className="px-4 py-2 border rounded-md text-xs font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onSync}
+              disabled={syncing || selectedCount === 0}
+              className="px-4 py-2 bg-accent text-white rounded-md text-xs font-bold disabled:opacity-40 flex items-center gap-2"
+            >
+              {syncing && <Loader2 className="size-3.5 animate-spin" />}
+              Sync selected fields
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

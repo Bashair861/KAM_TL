@@ -1,6 +1,7 @@
 import { supabase } from "@/lib/supabase";
 import { normalizeRole } from "@/data/kam-data";
 import { createManagedAuthUser } from "@/services/user-admin";
+import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -271,6 +272,20 @@ export async function createAccount(data) {
 export async function updateAccountKyc(accountId, updates) {
   const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
   if (error) throw error;
+}
+export async function syncSalesforceMappedFields(accountId, payload) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before syncing Salesforce fields.");
+
+  return syncSalesforceMappedFieldsServer({
+    data: {
+      accountId,
+      payload,
+      accessToken: session.access_token,
+    },
+  });
 }
 // ─── fetch single account (full shape) ───────────────────────────────────────
 export async function fetchAccount(id) {
