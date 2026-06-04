@@ -87,6 +87,7 @@ src/
     add-account-linkedin-url.sql   <- Migration: adds linkedin_url to accounts
     add-linkedin-summary.sql       <- Migration: adds linkedin_summary to accounts
     add-linkedin-summary-updated-at.sql <- Migration: tracks LinkedIn summary timestamp
+    add-account-website-summary.sql <- Migration: adds website URL + AI website summary fields
 
   styles.css                ← Global Tailwind CSS styles + custom design tokens
 
@@ -103,7 +104,9 @@ Recent JS additions:
   src/db/add-account-linkedin-url.sql <- accounts.linkedin_url for Salesforce Account LinkedIn
   src/db/add-linkedin-summary.sql   <- accounts.linkedin_summary for AI-generated LinkedIn brief
   src/db/add-linkedin-summary-updated-at.sql <- accounts.linkedin_summary_updated_at timestamp
+  src/db/add-account-website-summary.sql <- accounts.website_url + website_summary fields
   src/services/linkedin-summary.js  <- Server fn: generates/saves Account's Linkedin Summary
+  src/services/website-summary.js   <- Server fn: generates/saves Account's Website Summary
 
 Salesforce integration additions (Phase 4.5):
   src/services/salesforce.js        <- Server fn: lookupSalesforceAccountBundle
@@ -386,6 +389,11 @@ PHASE 5 - AI Assistant
       - Saves the last generated time to accounts.linkedin_summary_updated_at
       - Focus metrics: new job postings, company major activities,
         competitor information, CEO status / communication updates
+  - Added Account's Website Summary section below LinkedIn Summary
+      - Uses accounts.website_url as input
+      - Calls OpenAI server-side via src/services/website-summary.js
+      - Saves 2-3 paragraph output to accounts.website_summary
+      - Saves the last generated time to accounts.website_summary_updated_at
   - Wire src/services/ai.js to Google Gemini API
   - AI bot that answers questions about an account based on its data
   - Suggested entry: account detail page
@@ -442,6 +450,8 @@ To set up a FRESH Supabase project from scratch:
   12. Run add-user-management.sql in SQL Editor
   13. Run add-account-linkedin-url.sql in SQL Editor
   14. Run add-linkedin-summary.sql in SQL Editor
+  15. Run add-linkedin-summary-updated-at.sql in SQL Editor
+  16. Run add-account-website-summary.sql in SQL Editor
 
 
 ────────────────────────────────────────────────────────────────────────────────

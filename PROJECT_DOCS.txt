@@ -188,6 +188,9 @@ accounts additional column (added by migration):
   linkedin_url     text  Salesforce Account Company_LinkedIn__c mapped into Aether KAM
   linkedin_summary text  AI-generated Account's Linkedin Summary
   linkedin_summary_updated_at timestamptz  Last successful summary generation time
+  website_url      text  Company website URL used for Account's Website Summary
+  website_summary  text  AI-generated Account's Website Summary
+  website_summary_updated_at timestamptz  Last successful website summary generation time
 
 profiles additional column (added by add-user-management.sql and now in schema):
   is_active  boolean  DEFAULT true
@@ -390,7 +393,8 @@ WRITE functions:
     → Updates KYC columns on accounts table
     → fields: industry, business_info, client_history, revenue, mrr_arr,
               primary_contact_name, engagement_tenure, team_size,
-              competitors (array), main_business_flow, linkedin_url, linkedin_summary
+              competitors (array), main_business_flow, linkedin_url, website_url,
+              linkedin_summary, website_summary
 
   updateHealthBlock(accountId, area, score, metricUpdates, kpiData)
     → UPSERTS health_scores: INSERTs if no row exists, UPDATEs if one does
@@ -652,6 +656,7 @@ For FRESH Supabase setup (first time only):
   13. SQL Editor: add-account-linkedin-url.sql
   14. SQL Editor: add-linkedin-summary.sql
   15. SQL Editor: add-linkedin-summary-updated-at.sql
+  16. SQL Editor: add-account-website-summary.sql
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -722,7 +727,8 @@ What gets fetched (salesforce.js):
 What gets written (salesforce-sync.js):
   Account fields whitelist (ACCOUNT_SYNC_COLUMNS):
     industry, business_info, client_history, revenue, primary_contact_name,
-    primary_contact_role, region, employees, main_business_flow, linkedin_url
+    primary_contact_role, region, employees, main_business_flow, linkedin_url,
+    website_url
   Stakeholder fields whitelist (STAKEHOLDER_SYNC_COLUMNS):
     name, role, email, influence, last_contact
   Stakeholder matching: email first → name → insert as new row if no match.
