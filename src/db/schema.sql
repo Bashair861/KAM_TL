@@ -71,6 +71,9 @@ create table if not exists accounts (
   linkedin_url         text,
   linkedin_summary     text,
   linkedin_summary_updated_at timestamptz,
+  website_url          text,
+  website_summary      text,
+  website_summary_updated_at timestamptz,
   created_at           timestamptz default now(),
   updated_at           timestamptz default now()
 );

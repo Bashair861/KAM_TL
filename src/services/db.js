@@ -3,6 +3,7 @@ import { normalizeRole } from "@/data/kam-data";
 import { createManagedAuthUser } from "@/services/user-admin";
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
+import { generateWebsiteSummaryServer } from "@/services/website-summary";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -46,6 +47,9 @@ function mapFlatAccount(r) {
     linkedinUrl: r.linkedin_url ?? "",
     linkedinSummary: r.linkedin_summary ?? "",
     linkedinSummaryUpdatedAt: r.linkedin_summary_updated_at ?? null,
+    websiteUrl: r.website_url ?? "",
+    websiteSummary: r.website_summary ?? "",
+    websiteSummaryUpdatedAt: r.website_summary_updated_at ?? null,
     assignedKamId: r.assigned_kam_id ?? null,
   };
 }
@@ -272,6 +276,11 @@ export async function createAccount(data) {
     ...(data.linkedinSummaryUpdatedAt
       ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
       : {}),
+    ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
+    ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
+    ...(data.websiteSummaryUpdatedAt
+      ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
+      : {}),
     assigned_kam_id: data.assignedKamId || null,
   }]);
   if (error) throw error;
@@ -312,6 +321,21 @@ export async function generateAccountLinkedinSummary(accountId) {
   });
 }
 // ─── fetch single account (full shape) ───────────────────────────────────────
+export async function generateAccountWebsiteSummary(accountId) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error("Please sign in again before generating a website summary.");
+  }
+
+  return generateWebsiteSummaryServer({
+    data: {
+      accountId,
+      accessToken: session.access_token,
+    },
+  });
+}
 export async function fetchAccount(id) {
   const [
     { data: acc, error: accErr },

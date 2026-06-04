@@ -14,6 +14,7 @@ import {
   fetchAccountHistory,
   logAccountChanges,
   generateAccountLinkedinSummary,
+  generateAccountWebsiteSummary,
 } from "@/services/db";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { useAuth } from "@/context/AuthContext";
@@ -89,11 +90,75 @@ function externalUrl(value) {
   if (!url) return "";
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
 }
-function LinkedinSummaryParagraph({ text }) {
-  const chunks = String(text ?? "").split(/(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi);
+const SUMMARY_URL_PATTERN = /(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi;
+const SUMMARY_SOURCE_PATTERN =
+  /\[([^\]]+)\]\((https?:\/\/[^)\s]+|www\.[^)\s]+)\)|(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi;
+
+function splitUrlToken(token) {
+  const [, urlText = token, suffix = ""] = token.match(/^(.+?)([.,;:)\]]*)$/) ?? [];
+  return { urlText, suffix };
+}
+
+function normalizeSourceKey(value) {
+  try {
+    const url = new URL(externalUrl(value));
+    url.hash = "";
+    url.search = "";
+    return url.toString().replace(/\/$/, "").toLowerCase();
+  } catch {
+    return String(value ?? "").replace(/\/$/, "").toLowerCase();
+  }
+}
+
+function isProviderSourceUrl(value) {
+  try {
+    const url = new URL(externalUrl(value));
+    return /(^|\.)openai\.com$/i.test(url.hostname) || /(^|\.)chatgpt\.com$/i.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function formatSourceLabel(value) {
+  try {
+    const url = new URL(externalUrl(value));
+    const host = url.hostname.replace(/^www\./i, "");
+    const path = url.pathname.replace(/\/$/, "");
+    if (!path || path === "/") return host;
+    const shortPath = path.length > 28 ? `${path.slice(0, 25)}...` : path;
+    return `${host}${shortPath}`;
+  } catch {
+    return "Source";
+  }
+}
+
+function dedupeSummaryUrls(value) {
+  const seen = new Set();
+  return String(value ?? "")
+    .replace(SUMMARY_SOURCE_PATTERN, (match, _label, markdownUrl, rawUrl) => {
+      const { urlText, suffix } = splitUrlToken(markdownUrl || rawUrl || match);
+      const key = normalizeSourceKey(urlText);
+      if (isProviderSourceUrl(urlText) || seen.has(key)) {
+        const sentenceSuffix = suffix.match(/[.,;:]$/)?.[0] ?? "";
+        return sentenceSuffix;
+      }
+      seen.add(key);
+      return `${urlText}${suffix}`;
+    })
+    .replace(/\(\s*(https?:\/\/[^)\s]+|www\.[^)\s]+)\s*\)/gi, "$1")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\[\s*\]/g, "")
+    .replace(/\(\s*([.,;:])\s*\)/g, "$1")
+    .replace(/\s+([.,;:])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function SummaryParagraph({ text }) {
+  const chunks = String(text ?? "").split(SUMMARY_URL_PATTERN);
   return chunks.map((chunk, index) => {
     if (!/^(https?:\/\/|www\.)/i.test(chunk)) return <span key={index}>{chunk}</span>;
-    const [, urlText = chunk, suffix = ""] = chunk.match(/^(.+?)([.,);:]+)?$/) ?? [];
+    const { urlText, suffix } = splitUrlToken(chunk);
     return (
       <span key={index}>
         <a
@@ -102,14 +167,29 @@ function LinkedinSummaryParagraph({ text }) {
           rel="noreferrer"
           className="text-accent hover:underline break-all"
         >
-          {urlText}
+          {formatSourceLabel(urlText)}
         </a>
         {suffix}
       </span>
     );
   });
 }
-function formatLinkedinSummaryUpdatedAt(value) {
+function SummaryBody({ summary, emptyText }) {
+  if (!summary) return <p className="text-sm text-muted-foreground italic">{emptyText}</p>;
+  return (
+    <div className="space-y-3">
+      {dedupeSummaryUrls(summary)
+        .split(/\n{2,}/)
+        .filter(Boolean)
+        .map((paragraph, index) => (
+          <p key={index} className="text-sm leading-6 text-foreground whitespace-pre-wrap">
+            <SummaryParagraph text={paragraph} />
+          </p>
+        ))}
+    </div>
+  );
+}
+function formatSummaryUpdatedAt(value) {
   if (!value) return "Last updated: Not generated yet";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Last updated: Not recorded";
@@ -221,6 +301,18 @@ function buildSalesforceMappingRows(bundle, account, fields) {
       nextValue: sfAccount.Company_LinkedIn__c,
       dbColumn: "linkedin_url",
       fieldKey: "linkedinUrl",
+    },
+    {
+      id: "account.websiteUrl",
+      kind: "account",
+      group: "Account Details",
+      destinationLabel: "Website URL",
+      destinationValue: fields.websiteUrl,
+      sourceLabel: "Account.Website",
+      sourceValue: sfAccount.Website,
+      nextValue: sfAccount.Website,
+      dbColumn: "website_url",
+      fieldKey: "websiteUrl",
     },
     {
       id: "account.history",
@@ -653,6 +745,7 @@ function OverviewTab({ account }) {
       competitors: account.competitors.join(", "),
       flow: account.mainBusinessFlow,
       linkedinUrl: account.linkedinUrl ?? "",
+      websiteUrl: account.websiteUrl ?? "",
     }),
     [
       account.businessInfo,
@@ -667,6 +760,7 @@ function OverviewTab({ account }) {
       account.primaryContact.name,
       account.revenue,
       account.teamSize,
+      account.websiteUrl,
     ],
   );
   const [fields, setFields] = useState(initialFields);
@@ -695,6 +789,7 @@ function OverviewTab({ account }) {
     competitors: "Competitors",
     flow: "Main Business Flow",
     linkedinUrl: "LinkedIn URL",
+    websiteUrl: "Website URL",
   };
   const { mutate: saveKyc, isPending: savingKyc } = useMutation({
     mutationFn: async () => {
@@ -714,6 +809,7 @@ function OverviewTab({ account }) {
           .filter(Boolean),
         main_business_flow: fields.flow,
         linkedin_url: fields.linkedinUrl || null,
+        website_url: fields.websiteUrl || null,
       });
       const diffs = Object.keys(fields)
         .filter((k) => fields[k] !== savedSnapshot[k])
@@ -746,6 +842,11 @@ function OverviewTab({ account }) {
     account.linkedinSummaryUpdatedAt ?? null,
   );
   const [linkedinSummaryError, setLinkedinSummaryError] = useState("");
+  const [websiteSummary, setWebsiteSummary] = useState(account.websiteSummary ?? "");
+  const [websiteSummaryUpdatedAt, setWebsiteSummaryUpdatedAt] = useState(
+    account.websiteSummaryUpdatedAt ?? null,
+  );
+  const [websiteSummaryError, setWebsiteSummaryError] = useState("");
   const salesforceMappingRows = useMemo(
     () => buildSalesforceMappingRows(salesforceLookup.bundle, account, fields),
     [salesforceLookup.bundle, account, fields],
@@ -856,6 +957,42 @@ function OverviewTab({ account }) {
     onError: (error) => {
       setLinkedinSummaryError(
         error.message ?? "Unable to generate the LinkedIn summary. Please try again.",
+      );
+    },
+  });
+  const { mutate: generateWebsiteSummary, isPending: generatingWebsiteSummary } = useMutation({
+    mutationFn: async () => {
+      if (!fields.websiteUrl.trim()) {
+        throw new Error("Add a Website URL before generating the account website summary.");
+      }
+      if (fields.websiteUrl !== savedSnapshot.websiteUrl) {
+        await updateAccountKyc(account.id, { website_url: fields.websiteUrl });
+      }
+      const result = await generateAccountWebsiteSummary(account.id);
+      await logAccountChanges(
+        account.id,
+        [
+          {
+            field: "Account's Website Summary",
+            oldValue: websiteSummary,
+            newValue: result.summary,
+          },
+        ],
+        profile?.name ?? "Unknown",
+      );
+      return result;
+    },
+    onSuccess: (result) => {
+      setWebsiteSummary(result.summary);
+      setWebsiteSummaryUpdatedAt(result.updatedAt ?? new Date().toISOString());
+      setWebsiteSummaryError("");
+      setSavedSnapshot((current) => ({ ...current, websiteUrl: fields.websiteUrl }));
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setWebsiteSummaryError(
+        error.message ?? "Unable to generate the website summary. Please try again.",
       );
     },
   });
@@ -1224,6 +1361,55 @@ function OverviewTab({ account }) {
               <p className="text-xs italic text-muted-foreground">No LinkedIn URL saved.</p>
             )}
           </div>
+          <div className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <ExternalLink className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Website URL
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Company website used as the source for website summary.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={fields.websiteUrl}
+                  onChange={(event) =>
+                    setFields((current) => ({ ...current, websiteUrl: event.target.value }))
+                  }
+                  placeholder="https://www.example.com"
+                  className="flex-1 min-w-0 bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                {fields.websiteUrl && (
+                  <a
+                    href={externalUrl(fields.websiteUrl)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="size-9 border rounded-md flex items-center justify-center text-muted-foreground hover:text-accent hover:bg-muted transition-colors shrink-0"
+                    aria-label="Open Website URL"
+                  >
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                )}
+              </div>
+            ) : fields.websiteUrl ? (
+              <a
+                href={externalUrl(fields.websiteUrl)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-semibold text-accent hover:underline break-all"
+              >
+                {fields.websiteUrl}
+              </a>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No Website URL saved.</p>
+            )}
+          </div>
         </div>
       </Card>
 
@@ -1246,7 +1432,7 @@ function OverviewTab({ account }) {
               <p className="text-[11px] font-semibold text-muted-foreground">
                 {generatingLinkedinSummary
                   ? "Last updated: Updating now..."
-                  : formatLinkedinSummaryUpdatedAt(linkedinSummaryUpdatedAt)}
+                  : formatSummaryUpdatedAt(linkedinSummaryUpdatedAt)}
               </p>
               <button
                 type="button"
@@ -1274,19 +1460,62 @@ function OverviewTab({ account }) {
           )}
 
           <div className="border rounded-lg bg-muted/20 p-4 min-h-32">
-            {linkedinSummary ? (
-              <div className="space-y-3">
-                {linkedinSummary.split(/\n{2,}/).map((paragraph, index) => (
-                  <p key={index} className="text-sm leading-6 text-foreground whitespace-pre-wrap">
-                    <LinkedinSummaryParagraph text={paragraph} />
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground italic">
-                No LinkedIn summary generated yet.
+            <SummaryBody
+              summary={linkedinSummary}
+              emptyText="No LinkedIn summary generated yet."
+            />
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Account's Website Summary">
+        <div className="space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              {["New job postings", "Major activities", "Competitors", "CEO updates"].map(
+                (metric) => (
+                  <span
+                    key={metric}
+                    className="px-2 py-1 rounded-md bg-muted text-[10px] font-bold uppercase tracking-wider text-muted-foreground"
+                  >
+                    {metric}
+                  </span>
+                ),
+              )}
+            </div>
+            <div className="flex flex-col items-start md:items-end gap-2">
+              <p className="text-[11px] font-semibold text-muted-foreground">
+                {generatingWebsiteSummary
+                  ? "Last updated: Updating now..."
+                  : formatSummaryUpdatedAt(websiteSummaryUpdatedAt)}
               </p>
-            )}
+              <button
+                type="button"
+                onClick={() => {
+                  setWebsiteSummaryError("");
+                  generateWebsiteSummary();
+                }}
+                disabled={!editable || generatingWebsiteSummary || !fields.websiteUrl.trim()}
+                className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
+              >
+                {generatingWebsiteSummary ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="size-3.5" />
+                )}
+                {generatingWebsiteSummary ? "Generating..." : "Generate Summary"}
+              </button>
+            </div>
+          </div>
+
+          {websiteSummaryError && (
+            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">
+              {websiteSummaryError}
+            </p>
+          )}
+
+          <div className="border rounded-lg bg-muted/20 p-4 min-h-32">
+            <SummaryBody summary={websiteSummary} emptyText="No website summary generated yet." />
           </div>
         </div>
       </Card>
