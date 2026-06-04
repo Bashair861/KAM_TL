@@ -90,6 +90,7 @@ const TABS = [
   "Score Marking Matrics",
   "Activity to Increase Score",
   "Retention VS Growth",
+  "Opportunities",
   "Educate client",
   "Escalation",
   "Client History",
@@ -268,6 +269,13 @@ function AccountDetailPage() {
           )}
           {tab === "Retention VS Growth" && (
             <RetentionGrowthTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
+          )}
+          {tab === "Opportunities" && (
+            <OpportunityTab
               account={account}
               opportunities={accountOpportunities}
               escalations={accountEscalations}
@@ -2300,6 +2308,270 @@ function ResourceHealthBlock({ account }) {
   );
 }
 /* ============================== TAB 3: Activity to Increase Score ============================== */
+function OpportunityTab({ account, opportunities, escalations }) {
+  const { profile } = useAuth();
+  return (
+    <OpportunityTabPlanner
+      account={account}
+      opportunities={opportunities}
+      escalations={escalations}
+      profile={profile}
+    />
+  );
+}
+
+function OpportunityTabPlanner({ account, opportunities, escalations, profile }) {
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const model = useMemo(
+    () => buildActivityTabModel({ account, opportunities, escalations }),
+    [account, escalations, opportunities],
+  );
+
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [draftRows, setDraftRows] = useState([]);
+  const [reviewTarget, setReviewTarget] = useState(null);
+  const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [rejectTarget, setRejectTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [scheduleTarget, setScheduleTarget] = useState(null);
+  const [scheduleForm, setScheduleForm] = useState(
+    createInitialMeetingForm(account, null, profile),
+  );
+
+  useEffect(() => {
+    setResolvedItems({});
+    setDraftRows([]);
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+    setRejectTarget(null);
+    setRejectReason("");
+    setScheduleTarget(null);
+    setScheduleForm(createInitialMeetingForm(account, null, profile));
+  }, [account.id, profile?.email, profile?.name]);
+
+  const activeOpportunities = model.opportunities.filter(
+    (item) =>
+      item.healthArea === "Growth" && isMeetingNoteOpportunity(item) && !resolvedItems[item.id],
+  );
+
+  function openReview(item) {
+    setReviewTarget({ kind: "opportunity", item });
+    setReviewForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closeReview() {
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmReview() {
+    if (!reviewTarget) return;
+    const draftRow = buildDraftRow(reviewTarget, reviewForm);
+    setDraftRows((current) => [draftRow, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [reviewTarget.item.id]: {
+        status: "drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closeReview();
+  }
+
+  function openSchedule(item) {
+    setScheduleTarget({ kind: "opportunity", item });
+    setScheduleForm(createInitialMeetingForm(account, item, profile));
+  }
+
+  function closeSchedule() {
+    setScheduleTarget(null);
+    setScheduleForm(createInitialMeetingForm(account, null, profile));
+  }
+
+  function confirmSchedule() {
+    if (!scheduleTarget) return;
+    const draftRow = buildMeetingDraftRow(scheduleTarget, scheduleForm, account, profile);
+    setDraftRows((current) => [draftRow, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [scheduleTarget.item.id]: {
+        status: "meeting-drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closeSchedule();
+  }
+
+  function confirmReject() {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    setResolvedItems((current) => ({
+      ...current,
+      [rejectTarget.id]: {
+        status: "rejected",
+        reason: rejectReason.trim(),
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    setRejectTarget(null);
+    setRejectReason("");
+  }
+
+  return (
+    <div className="space-y-6">
+      {role === "KAM" && !isAssignedKam && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only opportunity surface for this account</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            Only the assigned KAM can review, schedule, or reject opportunity signals here.
+          </p>
+        </div>
+      )}
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <div className="flex items-start gap-3">
+            <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+              <Lightbulb className="size-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-bold">Opportunities from meeting notes</h3>
+              <p className="text-[11px] text-muted-foreground">
+                Expansion signals where the client asked for more resources, services, domains, or
+                follow-up discovery.
+              </p>
+            </div>
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground self-start md:self-auto">
+            {activeOpportunities.length} open
+          </span>
+        </div>
+
+        {activeOpportunities.length ? (
+          <ul className="divide-y">
+            {activeOpportunities.map((opportunity) => (
+              <li key={opportunity.id} className="px-4 md:px-6 py-4">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
+                      <AreaBadge area={opportunity.healthArea} />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {opportunity.source} Â· {opportunity.signalDate}
+                    </p>
+                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
+                      <div className="rounded-lg border bg-muted/20 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Client signal
+                        </p>
+                        <p className="text-xs leading-relaxed mt-1">
+                          {getPrimaryEvidenceExcerpt(opportunity) || opportunity.nextStep}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border bg-muted/20 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Suggested next step
+                        </p>
+                        <p className="text-xs leading-relaxed mt-1">{opportunity.nextStep}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-start lg:items-center gap-2 shrink-0">
+                    {canScheduleMeeting(opportunity) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canAct}
+                        onClick={() => openSchedule(opportunity)}
+                        className="gap-1.5"
+                      >
+                        <Calendar className="size-3.5" />
+                        Schedule meeting
+                      </Button>
+                    )}
+                    <Button size="sm" disabled={!canAct} onClick={() => openReview(opportunity)}>
+                      Review plan
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={!canAct}
+                      onClick={() => setRejectTarget(opportunity)}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No meeting-note expansion opportunities are active right now.
+          </p>
+        )}
+      </div>
+
+      {draftRows.length ? (
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Reviewed Opportunity Drafts</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Drafts created from opportunity signals during this session.
+            </p>
+          </div>
+          <ul className="divide-y">
+            {draftRows.map((row) => (
+              <li key={row.id} className="px-6 py-4 flex flex-col md:flex-row md:items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold">{row.title}</p>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    {row.owner} Â· {row.dueDate} Â· {row.status}
+                  </p>
+                </div>
+                <span className="text-xs font-semibold text-success whitespace-nowrap">
+                  {row.expectedLift}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <ActivityReviewSheet
+        target={reviewTarget}
+        form={reviewForm}
+        onChange={setReviewForm}
+        onClose={closeReview}
+        onConfirm={confirmReview}
+      />
+
+      <MeetingScheduleDialog
+        account={account}
+        profile={profile}
+        target={scheduleTarget}
+        form={scheduleForm}
+        onChange={setScheduleForm}
+        onClose={closeSchedule}
+        onConfirm={confirmSchedule}
+      />
+
+      <RejectRecommendationDialog
+        target={rejectTarget}
+        value={rejectReason}
+        onChange={setRejectReason}
+        onClose={() => {
+          setRejectTarget(null);
+          setRejectReason("");
+        }}
+        onConfirm={confirmReject}
+      />
+    </div>
+  );
+}
+
 function ActivityTab({ account, opportunities, escalations }) {
   const { profile } = useAuth();
   if (account) {
@@ -2740,6 +3012,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         </div>
       )}
 
+      {false && (
+        <>
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <div className="flex items-start gap-3">
@@ -2937,6 +3211,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
           })}
         </div>
       </div>
+
+        </>
+      )}
 
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
