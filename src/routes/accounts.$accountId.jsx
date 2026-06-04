@@ -550,7 +550,7 @@ function AccountDetailPage() {
           {tab === "Activity to Increase Score" && (
             <ActivityTab account={account} opportunities={accountOpportunities} />
           )}
-          {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} />}
+          {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} escalations={accountEscalations} />}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
           {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
@@ -2211,7 +2211,7 @@ function ActivityTab({ account, opportunities }) {
   );
 }
 /* ============================== TAB 4: Retention VS Growth ============================== */
-function RetentionGrowthTab({ account }) {
+function RetentionGrowthTab({ account, escalations = [] }) {
   const { profile } = useAuth();
   const editable = getRolePermissions(profile?.role).write;
   const delivered = account.retentionGrowth.filter((s) => s.delivered);
@@ -2412,6 +2412,48 @@ function EducateTab({ account }) {
           </button>
         </div>
       </div>
+
+      {escalations.length > 0 && (
+        <Card title="Active Escalations Impacting Retention">
+          <p className="text-[11px] text-muted-foreground mb-3">
+            Open escalations that may affect retention health for {account.name}.
+          </p>
+          <div className="space-y-3">
+            {escalations.map((e) => (
+              <div key={e.id} className="border border-crit/20 bg-crit/5 rounded-lg p-4">
+                <div className="flex items-start justify-between gap-2 mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-crit/10 text-crit">
+                      {e.priority}
+                    </span>
+                    <p className="text-sm font-semibold">{e.title}</p>
+                  </div>
+                  <span className="text-[10px] font-mono text-muted-foreground shrink-0">
+                    {e.slaRemainingHours.toFixed(1)}h SLA
+                  </span>
+                </div>
+                {e.description && (
+                  <p className="text-[11px] text-muted-foreground line-clamp-2">{e.description}</p>
+                )}
+                {e.actionItems?.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {e.actionItems.slice(0, 3).map((a) => (
+                      <span key={a.label} className="text-[10px] bg-card border px-2 py-0.5 rounded-full">
+                        {a.label}
+                      </span>
+                    ))}
+                    {e.actionItems.length > 3 && (
+                      <span className="text-[10px] text-muted-foreground">
+                        +{e.actionItems.length - 3} more
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
