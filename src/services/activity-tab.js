@@ -20,12 +20,65 @@ const HIGH_VALUE_THRESHOLD = 100_000;
 const RETENTION_GROWTH_AREAS = new Set(["Growth", "Retention"]);
 const RETENTION_GROWTH_RULE_IDS = new Set(["RET-01", "GROW-01", "GROW-02"]);
 
+const SCORE_BLOCKS = [
+  {
+    key: "relationship",
+    area: "Relationship",
+    title: "Relationship Health",
+    blockKey: "relationshipHealth",
+    ruleId: "REL-KPI",
+    expectedLift: "+Relationship movement",
+  },
+  {
+    key: "project",
+    area: "Project",
+    title: "Project Health",
+    blockKey: "projectHealth",
+    ruleId: "PROJ-KPI",
+    expectedLift: "+Project movement",
+  },
+  {
+    key: "resource",
+    area: "Resource",
+    title: "Resources Health",
+    blockKey: "resourceHealth",
+    ruleId: "RES-KPI",
+    expectedLift: "+Resource movement",
+  },
+  {
+    key: "financial",
+    area: "Financial",
+    title: "Financial Health",
+    blockKey: "financialHealth",
+    ruleId: "FIN-KPI",
+    expectedLift: "+Financial movement",
+  },
+  {
+    key: "risk",
+    area: "Risk",
+    title: "Risk Scoring",
+    blockKey: "riskScoring",
+    ruleId: "RISK-KPI",
+    expectedLift: "+Risk movement",
+  },
+  {
+    key: "csat",
+    area: "CSAT",
+    title: "Customer Satisfaction Score",
+    blockKey: "csat",
+    ruleId: "CSAT-KPI",
+    expectedLift: "+CSAT movement",
+  },
+];
+
 export function isRetentionGrowthActivityArea(area) {
   return RETENTION_GROWTH_AREAS.has(area);
 }
 
 function toId(value) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-");
 }
 
 function buildEvidence({ source, sourceType, date, excerpt, reason }) {
@@ -132,6 +185,94 @@ function summarizeMetrics(block) {
   const lowest = getLowestMetric(block);
   if (!lowest) return "Recent score signal available.";
   return `${lowest.label} is at ${lowest.value}/10${lowest.hint ? ` (${lowest.hint})` : ""}.`;
+}
+
+function getFallbackKpiData(block) {
+  return (block?.metrics ?? []).map((metric, index) => ({
+    id: `kpi-${index}`,
+    metricId: metric.id,
+    name: metric.label,
+    fields: [
+      { id: `${index}-a`, label: "Monthly meeting held on schedule", weight: 50, checked: true },
+      { id: `${index}-b`, label: "Director-level participation", weight: 25, checked: false },
+      {
+        id: `${index}-c`,
+        label: "Action items closed before next cycle",
+        weight: 25,
+        checked: false,
+      },
+    ],
+  }));
+}
+
+function formatScoreMetricExpectedLift(field) {
+  const weight = Number(field?.weight ?? 0);
+  if (!Number.isFinite(weight)) return "0%";
+  return `${weight}%`;
+}
+
+function getScoreMetricActivities(account) {
+  return SCORE_BLOCKS.flatMap((config) => {
+    const block = account[config.blockKey];
+    const sections = block?.kpiData ?? getFallbackKpiData(block);
+
+    return sections.flatMap((section) =>
+      (section.fields ?? [])
+        .filter((field) => !field.checked)
+        .map((field) => ({
+          id: `score-metric-${account.id}-${config.key}-${toId(section.id)}-${toId(field.id)}`,
+          rowType: "suggested",
+          sourceId: `score-metric-${config.key}-${section.id}-${field.id}`,
+          sourceKind: "score_metric",
+          area: config.area,
+          title: field.label,
+          owner: "KAM Person",
+          dueDate: "In 7d",
+          status: "Suggested",
+          rag: block?.score <= 7 ? "R" : block?.score < 8.5 ? "A" : "G",
+          expectedLift: formatScoreMetricExpectedLift(field),
+          confidence: "High",
+          ruleId: config.ruleId,
+          parameter: config.area,
+          impactedMetric: section.name,
+          weakSignal: `${section.name} has an unchecked score-marking criterion: ${field.label}`,
+          currentValue: `${block?.score ?? "n/a"}/10`,
+          targetValue: "Checked and saved in Score Marking Matrics",
+          triggerLogic: {
+            primary: "A score-marking checklist item is unchecked.",
+            source: "Score Marking Matrics",
+          },
+          evidenceLiftPolicy: [],
+          activityScoreLogic: [],
+          approvalSla: {},
+          reviewCadence: {
+            cadence: "Re-evaluate after Score Marking Matrics are saved.",
+            autoCloseRule:
+              "Remove this suggested activity once the checklist item is checked and saved.",
+          },
+          scoreBand: null,
+          threshold: null,
+          targetScore: null,
+          thresholdSource: null,
+          thresholdReason: null,
+          successCriteria:
+            "Complete this checklist item, mark it checked in Score Marking Matrics, and save the score.",
+          evidenceRequired: ["Updated score marking checklist", "Completion note"],
+          reason: `${config.title} > ${section.name} still needs: ${field.label}.`,
+          evidence: [
+            buildEvidence({
+              source: "Score Marking Matrics",
+              sourceType: "Score Marking Matrics",
+              date: "Current score snapshot",
+              excerpt: `${section.name}: ${field.label} is unchecked with ${field.weight ?? 0}% weight.`,
+              reason:
+                "Unchecked score-marking criteria are converted into activities until they are completed.",
+            }),
+          ],
+          nextStep: `Complete "${field.label}" and check it in ${section.name}`,
+        })),
+    );
+  });
 }
 
 function buildOpportunityEvidence(opportunity, account) {
@@ -353,14 +494,13 @@ function buildRagRecommendations(account, escalations, scoreHistory, thresholdOv
     )
     .filter(Boolean);
 
-  return recommendations
-    .sort((left, right) => {
-      const urgencyOrder = { R: 0, A: 1, G: 2 };
-      const leftOrder = urgencyOrder[left.urgency] ?? 3;
-      const rightOrder = urgencyOrder[right.urgency] ?? 3;
-      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-      return (AREA_ORDER.get(left.healthArea) ?? 99) - (AREA_ORDER.get(right.healthArea) ?? 99);
-    });
+  return recommendations.sort((left, right) => {
+    const urgencyOrder = { R: 0, A: 1, G: 2 };
+    const leftOrder = urgencyOrder[left.urgency] ?? 3;
+    const rightOrder = urgencyOrder[right.urgency] ?? 3;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return (AREA_ORDER.get(left.healthArea) ?? 99) - (AREA_ORDER.get(right.healthArea) ?? 99);
+  });
 }
 
 function buildMeetingAction(account, record, index, fallbacks) {
@@ -616,8 +756,7 @@ function mapSuggestionToActivityRow(suggestion, sourceKind) {
     targetScore: suggestion.targetScore ?? null,
     thresholdSource: suggestion.thresholdSource ?? null,
     thresholdReason: suggestion.thresholdReason ?? null,
-    successCriteria:
-      suggestion.successCriteria ?? "Complete the activity and review score impact.",
+    successCriteria: suggestion.successCriteria ?? "Complete the activity and review score impact.",
     evidenceRequired: suggestion.evidenceRequired ?? ["Activity evidence"],
     reason: suggestion.reason ?? suggestion.nextStep,
     evidence: suggestion.evidence,
@@ -653,14 +792,14 @@ export function buildActivityTabModel({
     scoreHistory,
     thresholdOverrides,
   );
+  const scoreMetricActivities = getScoreMetricActivities(account).filter(
+    (item) => !isRetentionGrowthActivityArea(item.area),
+  );
   const meetingActions = buildMeetingActions(account, opportunities, escalations).filter(
     (item) => !isRetentionGrowthActivityArea(item.healthArea),
   );
-  const existingRows = (account.activities ?? [])
-    .map((activity) => mapExistingActivityRow(account, activity))
-    .filter((row) => !isRetentionGrowthActivityArea(row.area));
   const suggestedRows = [
-    ...ragRecommendations.map((item) => mapSuggestionToActivityRow(item, "rag")),
+    ...scoreMetricActivities,
     ...meetingActions.map((item) => mapSuggestionToActivityRow(item, "meeting")),
   ].sort((left, right) => {
     const leftArea = AREA_ORDER.get(left.area) ?? 99;
@@ -673,7 +812,8 @@ export function buildActivityTabModel({
   return {
     opportunities: opportunityItems,
     ragRecommendations,
+    scoreMetricActivities,
     meetingActions,
-    activityRows: [...existingRows, ...suggestedRows],
+    activityRows: suggestedRows,
   };
 }

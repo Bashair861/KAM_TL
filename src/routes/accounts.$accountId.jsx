@@ -104,6 +104,7 @@ const TABS = [
   "Overview",
   "Score Marking Matrics",
   "Activity to Increase Score",
+  "Opportunities",
   "Retention VS Growth",
   "Educate client",
   "Escalation",
@@ -282,6 +283,13 @@ function AccountDetailPage() {
               escalations={accountEscalations}
             />
           )}
+          {tab === "Opportunities" && (
+            <OpportunitiesTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
+          )}
           {tab === "Retention VS Growth" && (
             <RetentionGrowthTab
               account={account}
@@ -291,9 +299,7 @@ function AccountDetailPage() {
           )}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
-          {tab === "Meeting History" && (
-            <MeetingHistoryTab account={account} profile={profile} />
-          )}
+          {tab === "Meeting History" && <MeetingHistoryTab account={account} profile={profile} />}
           {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
         </div>
       </div>
@@ -1866,7 +1872,17 @@ function ScoreMatricsTab({ account }) {
           )
         }
       />
-      <ResourceHealthBlock account={account} />
+      <ResourceHealthBlock
+        account={account}
+        onExpand={() =>
+          open(
+            "Resources Health",
+            "Backup, leaves, critical roles, team size",
+            account.resourceHealth,
+            "resource",
+          )
+        }
+      />
       <ScoreBlock
         title="Financial Health"
         hint="Revenue generation & resource allocation efficiency"
@@ -2295,21 +2311,33 @@ function ContractScoringBlock({ account }) {
     </div>
   );
 }
-function ResourceHealthBlock({ account }) {
+function ResourceHealthBlock({ account, onExpand }) {
   const r = account.resourceHealth;
   return (
     <div className="bg-card border rounded-xl overflow-hidden">
-      <div className="px-6 py-4 border-b flex justify-between items-start">
+      <div className="px-6 py-4 border-b flex justify-between items-start gap-3">
         <div>
           <h3 className="text-sm font-bold">Resources Health</h3>
           <p className="text-[11px] text-muted-foreground">
             Backup, leaves, critical roles, team size
           </p>
         </div>
-        <p className="text-2xl font-bold">
-          {r.score.toFixed(1)}
-          <span className="text-xs text-muted-foreground">/10</span>
-        </p>
+        <div className="flex items-center gap-3 shrink-0">
+          <p className="text-2xl font-bold">
+            {r.score.toFixed(1)}
+            <span className="text-xs text-muted-foreground">/10</span>
+          </p>
+          {onExpand && (
+            <button
+              onClick={onExpand}
+              className="size-8 rounded-md border flex items-center justify-center hover:bg-accent hover:text-white transition-colors"
+              aria-label="Expand Resources Health"
+              title="Open KPI editor"
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
+          )}
+        </div>
       </div>
       <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs mb-2">
         <Field label="Backup exists" value={r.backupExists ? "Yes" : "No"} ok={r.backupExists} />
@@ -2573,6 +2601,264 @@ function ActivityTab({ account, opportunities, escalations }) {
     </div>
   );
 }
+
+function OpportunitiesTab({ account, opportunities, escalations }) {
+  const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const { data: scoreHistory = [] } = useQuery({
+    queryKey: ["activity-score-history", account.id],
+    queryFn: () => fetchActivityScoreHistory(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: thresholdOverrides = [] } = useQuery({
+    queryKey: ["activity-threshold-overrides", account.id],
+    queryFn: () => fetchActivityRuleThresholdOverrides(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: savedRuleActivities = [] } = useQuery({
+    queryKey: ["activity-rule-activities", account.id],
+    queryFn: () => fetchActivityRuleActivities(account.id),
+    enabled: Boolean(account.id),
+  });
+  const model = useMemo(
+    () =>
+      buildActivityTabModel({
+        account,
+        opportunities,
+        escalations,
+        scoreHistory,
+        thresholdOverrides,
+      }),
+    [account, escalations, opportunities, scoreHistory, thresholdOverrides],
+  );
+
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [reviewTarget, setReviewTarget] = useState(null);
+  const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [rejectTarget, setRejectTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState("");
+
+  useEffect(() => {
+    setResolvedItems({});
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+    setEvidenceTarget(null);
+    setRejectTarget(null);
+    setRejectReason("");
+  }, [account.id, profile?.name]);
+
+  const persistedOpportunityRefs = useMemo(
+    () =>
+      new Set(
+        savedRuleActivities
+          .filter(
+            (activity) =>
+              activity.status !== "Rejected" &&
+              activity.status !== "Closed" &&
+              activity.sourceType === "opportunity",
+          )
+          .map((activity) => activity.sourceRef)
+          .filter((sourceRef) => sourceRef && sourceRef !== "manual"),
+      ),
+    [savedRuleActivities],
+  );
+  const isResolved = useCallback(
+    (item) =>
+      Boolean(resolvedItems[item.id] || persistedOpportunityRefs.has(getSuggestionSourceRef(item))),
+    [persistedOpportunityRefs, resolvedItems],
+  );
+  const activeOpportunities = model.opportunities.filter((item) => !isResolved(item));
+
+  const { mutate: saveRuleActivity, isPending: savingRuleActivity } = useMutation({
+    mutationFn: ({ target, form }) =>
+      createActivityRuleActivity(
+        buildActivityRuleActivityInput({
+          accountId: account.id,
+          target,
+          form,
+        }),
+      ),
+    onSuccess: (_, { target }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [target.item.id]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+      router.invalidate();
+      closeReview();
+    },
+  });
+
+  const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
+    mutationFn: ({ target, reason }) =>
+      rejectActivityRuleSuggestion(
+        buildRejectedRuleActivityInput({
+          accountId: account.id,
+          target,
+          reason,
+          reviewer: profile?.name ?? "Unknown",
+        }),
+      ),
+    onSuccess: (_, { target, reason }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [getSuggestionSourceRef(target)]: {
+          status: "rejected",
+          reason,
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      setRejectTarget(null);
+      setRejectReason("");
+    },
+  });
+
+  function openReview(kind, item) {
+    setReviewTarget({ kind, item });
+    setReviewForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closeReview() {
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmReview() {
+    if (!reviewTarget) return;
+    saveRuleActivity({ target: reviewTarget, form: reviewForm });
+  }
+
+  function confirmReject() {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
+  }
+
+  return (
+    <div className="space-y-6">
+      {role === "KAM" && !isAssignedKam && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only opportunities for this account</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            Only the assigned KAM can pursue or reject opportunity suggestions here.
+          </p>
+        </div>
+      )}
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <div className="flex items-start gap-3">
+            <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+              <Lightbulb className="size-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
+              <p className="text-[11px] text-muted-foreground">
+                Client-specific opportunities sourced from account context, escalation signals,
+                retention/growth context, and Fireflies-derived meeting notes.
+              </p>
+            </div>
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground self-start md:self-auto">
+            {activeOpportunities.length} open
+          </span>
+        </div>
+
+        {activeOpportunities.length ? (
+          <ul className="divide-y">
+            {activeOpportunities.map((opportunity) => (
+              <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
+                      <PriorityBadge priority={opportunity.priority} />
+                      <ConfidenceBadge confidence={opportunity.confidence} />
+                      <AreaBadge area={opportunity.healthArea} />
+                      {opportunity.approvalRequired && (
+                        <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                          Approval required
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {opportunity.source} Â· {opportunity.signalDate}
+                    </p>
+                    <ScoreRuleDetails item={opportunity} />
+                    <EvidencePreview
+                      evidence={opportunity.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: opportunity.title,
+                          subtitle: `${opportunity.source} Â· ${opportunity.healthArea}`,
+                          evidence: opportunity.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => openReview("opportunity", opportunity)}
+                    >
+                      Pursue
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => setRejectTarget({ ...opportunity, sourceKind: "opportunity" })}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No open opportunities are active in this planning cycle.
+          </p>
+        )}
+      </div>
+
+      <ActivityReviewSheet
+        target={reviewTarget}
+        form={reviewForm}
+        onChange={setReviewForm}
+        onClose={closeReview}
+        onConfirm={confirmReview}
+        isSaving={savingRuleActivity}
+      />
+
+      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+
+      <RejectRecommendationDialog
+        target={rejectTarget}
+        value={rejectReason}
+        onChange={setRejectReason}
+        onClose={() => {
+          setRejectTarget(null);
+          setRejectReason("");
+        }}
+        onConfirm={confirmReject}
+        isSaving={rejectingRuleActivity}
+      />
+    </div>
+  );
+}
+
 function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const role = profile?.role ?? "KAM";
   const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
@@ -2612,13 +2898,13 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
   const [evidenceTarget, setEvidenceTarget] = useState(null);
   const [evidenceSubmitTarget, setEvidenceSubmitTarget] = useState(null);
-  const [evidenceForm, setEvidenceForm] = useState(
-    createInitialEvidenceForm(null, profile?.name),
-  );
+  const [evidenceForm, setEvidenceForm] = useState(createInitialEvidenceForm(null, profile?.name));
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
   const [firefliesActions, setFirefliesActions] = useState([]);
   const [firefliesStatus, setFirefliesStatus] = useState("");
+  const [activityAreaFilter, setActivityAreaFilter] = useState("All");
+  const [expectedLiftSort, setExpectedLiftSort] = useState("desc");
 
   const { mutate: rerunFirefliesExtraction, isPending: extractingFireflies } = useMutation({
     mutationFn: () =>
@@ -2628,7 +2914,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
           limit: 5,
           daysBack: 60,
         },
-    }),
+      }),
     onSuccess: (result) => {
       setFirefliesActions([]);
       setFirefliesStatus(result.status ?? "Fireflies extraction completed.");
@@ -2734,18 +3020,26 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     setRejectReason("");
     setFirefliesActions([]);
     setFirefliesStatus("");
+    setActivityAreaFilter("All");
+    setExpectedLiftSort("desc");
   }, [account.id, profile?.name]);
 
+  const activeScoreMetricRefs = useMemo(
+    () => new Set(model.scoreMetricActivities.map((item) => getSuggestionSourceRef(item))),
+    [model.scoreMetricActivities],
+  );
   const activeSavedRuleActivities = useMemo(
     () =>
-      savedRuleActivities.filter(
-        (activity) =>
-          activity.status !== "Rejected" &&
-          activity.status !== "Closed" &&
-          (activity.sourceType === "opportunity" ||
-            !isRetentionGrowthActivityArea(activity.parameter)),
-      ),
-    [savedRuleActivities],
+      savedRuleActivities.filter((activity) => {
+        if (activity.status === "Rejected" || activity.status === "Closed") return false;
+        if (activity.sourceType === "opportunity") return false;
+        if (isRetentionGrowthActivityArea(activity.parameter)) return false;
+        if (activity.sourceType === "score_metric") {
+          return activeScoreMetricRefs.has(activity.sourceRef);
+        }
+        return true;
+      }),
+    [activeScoreMetricRefs, savedRuleActivities],
   );
   const persistedSourceRefs = useMemo(
     () =>
@@ -2761,11 +3055,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       Boolean(resolvedItems[item.id] || persistedSourceRefs.has(getSuggestionSourceRef(item))),
     [persistedSourceRefs, resolvedItems],
   );
-
-  const activeOpportunities = model.opportunities.filter((item) => !isResolved(item));
-  const activeRagRecommendations = model.ragRecommendations.filter(
-    (item) => !isResolved(item),
-  );
+  const activeOpportunities = [];
+  const activeRagRecommendations = [];
+  const showLegacyActivityPanels = Boolean(account.__legacyActivityPanels);
   const savedMeetingActions = useMemo(
     () =>
       activeSavedRuleActivities
@@ -2798,6 +3090,25 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       .map((item) => mapMeetingActionToActivityRow(item, "meeting"));
     return sortActivityRows([...savedRows, ...visibleRows, ...firefliesRows]);
   }, [activeSavedRuleActivities, isResolved, model.activityRows, scoreFirefliesActions]);
+  const activityAreaOptions = useMemo(
+    () =>
+      ACTIVITY_TAB_AREAS.map((area) => {
+        const rows = activityRows.filter((row) => row.area === area);
+        return {
+          area,
+          count: rows.length,
+          expectedLift: summarizeExpectedLift(rows),
+        };
+      }),
+    [activityRows],
+  );
+  const visibleActivityRows = useMemo(() => {
+    const filteredRows =
+      activityAreaFilter === "All"
+        ? activityRows
+        : activityRows.filter((row) => row.area === activityAreaFilter);
+    return sortActivityRowsByExpectedLift(filteredRows, expectedLiftSort);
+  }, [activityAreaFilter, activityRows, expectedLiftSort]);
 
   function openReview(kind, item) {
     setReviewTarget({ kind, item });
@@ -2824,6 +3135,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
   }
 
+  function toggleExpectedLiftSort() {
+    setExpectedLiftSort((current) => (current === "asc" ? "desc" : "asc"));
+  }
+
   return (
     <div className="space-y-6">
       {role === "KAM" && !isAssignedKam && (
@@ -2835,165 +3150,170 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         </div>
       )}
 
-      <div className="bg-card border rounded-xl overflow-hidden">
-        <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-          <div className="flex items-start gap-3">
-            <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
-              <Lightbulb className="size-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
-              <p className="text-[11px] text-muted-foreground">
-                Client-specific opportunities sourced from account context, score gaps, escalation
-                signals, and Fireflies-derived meeting notes.
-              </p>
+      {showLegacyActivityPanels && (
+        <>
+          <div className="bg-card border rounded-xl overflow-hidden">
+            <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+              <div className="flex items-start gap-3">
+                <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                  <Lightbulb className="size-4" />
+                </span>
+                <div>
+                  <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
+                  <p className="text-[11px] text-muted-foreground">
+                    Client-specific opportunities sourced from account context, score gaps,
+                    escalation signals, and Fireflies-derived meeting notes.
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground self-start md:self-auto">
+                {activeOpportunities.length} open
+              </span>
             </div>
-          </div>
-          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground self-start md:self-auto">
-            {activeOpportunities.length} open
-          </span>
-        </div>
 
-        {activeOpportunities.length ? (
-          <ul className="divide-y">
-            {activeOpportunities.map((opportunity) => (
-              <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
-                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
-                  <div className="space-y-2 min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
-                      <PriorityBadge priority={opportunity.priority} />
-                      <ConfidenceBadge confidence={opportunity.confidence} />
-                      <AreaBadge area={opportunity.healthArea} />
-                      {opportunity.approvalRequired && (
-                        <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
-                          Approval required
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">
-                      {opportunity.source} · {opportunity.signalDate}
-                    </p>
-                    <ScoreRuleDetails item={opportunity} />
-                    <EvidencePreview
-                      evidence={opportunity.evidence}
-                      onView={() =>
-                        setEvidenceTarget({
-                          title: opportunity.title,
-                          subtitle: `${opportunity.source} · ${opportunity.healthArea}`,
-                          evidence: opportunity.evidence,
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="flex items-start lg:items-center shrink-0">
-                    <Button
-                      size="sm"
-                      disabled={!canAct}
-                      onClick={() => openReview("opportunity", opportunity)}
-                    >
-                      Pursue
-                    </Button>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="px-6 py-6 text-xs text-muted-foreground">
-            No open opportunities are active in this planning cycle.
-          </p>
-        )}
-      </div>
-
-      <div className="bg-card border rounded-xl p-6">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
-          <div>
-            <h3 className="text-sm font-bold">Global Activity Rule Matrix</h3>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              Standard rules that generate account-specific activities and define validation criteria.
-            </p>
-          </div>
-          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-            {activeRagRecommendations.length} active recommendations
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          {["R", "A", "G"].map((urgency) => {
-            const items = activeRagRecommendations.filter((item) => item.urgency === urgency);
-            return (
-              <div key={urgency} className="border rounded-lg overflow-hidden">
-                <div
-                  className={`px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white ${
-                    urgency === "R" ? "bg-crit" : urgency === "A" ? "bg-warn" : "bg-success"
-                  }`}
-                >
-                  {urgency === "R"
-                    ? "RED — Act Now"
-                    : urgency === "A"
-                      ? "AMBER — Plan"
-                      : "GREEN — Monitor"}
-                  <span className="ml-2 opacity-80">({items.length})</span>
-                </div>
-                <div className="p-3 space-y-3">
-                  {items.length ? (
-                    items.map((item) => (
-                      <div key={item.id} className="rounded-lg border p-3 space-y-3">
+            {activeOpportunities.length ? (
+              <ul className="divide-y">
+                {activeOpportunities.map((opportunity) => (
+                  <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
+                    <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                      <div className="space-y-2 min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-semibold leading-snug">{item.title}</p>
-                          <AreaBadge area={item.healthArea} />
-                          <RuleBadge ruleId={item.ruleId} />
-                          <ConfidenceBadge confidence={item.confidence} />
+                          <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
+                          <PriorityBadge priority={opportunity.priority} />
+                          <ConfidenceBadge confidence={opportunity.confidence} />
+                          <AreaBadge area={opportunity.healthArea} />
+                          {opportunity.approvalRequired && (
+                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                              Approval required
+                            </span>
+                          )}
                         </div>
-                        <p className="text-xs text-muted-foreground">{item.reason}</p>
-                        <ScoreRuleDetails item={item} />
+                        <p className="text-[11px] text-muted-foreground">
+                          {opportunity.source} · {opportunity.signalDate}
+                        </p>
+                        <ScoreRuleDetails item={opportunity} />
                         <EvidencePreview
-                          evidence={item.evidence}
+                          evidence={opportunity.evidence}
                           onView={() =>
                             setEvidenceTarget({
-                              title: item.title,
-                              subtitle: `RAG analysis · ${item.healthArea}`,
-                              evidence: item.evidence,
+                              title: opportunity.title,
+                              subtitle: `${opportunity.source} · ${opportunity.healthArea}`,
+                              evidence: opportunity.evidence,
                             })
                           }
                         />
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            size="sm"
-                            disabled={!canAct}
-                            onClick={() => openReview("rag", item)}
-                          >
-                            Add
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!canAct}
-                            onClick={() => setRejectTarget({ ...item, sourceKind: "rag" })}
-                          >
-                            Reject
-                          </Button>
-                        </div>
                       </div>
-                    ))
-                  ) : (
-                    <p className="text-[11px] text-muted-foreground">
-                      No items in this urgency band.
-                    </p>
-                  )}
-                </div>
+                      <div className="flex items-start lg:items-center shrink-0">
+                        <Button
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() => openReview("opportunity", opportunity)}
+                        >
+                          Pursue
+                        </Button>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="px-6 py-6 text-xs text-muted-foreground">
+                No open opportunities are active in this planning cycle.
+              </p>
+            )}
+          </div>
+
+          <div className="bg-card border rounded-xl p-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
+              <div>
+                <h3 className="text-sm font-bold">Global Activity Rule Matrix</h3>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Standard rules that generate account-specific activities and define validation
+                  criteria.
+                </p>
               </div>
-            );
-          })}
-        </div>
-      </div>
+              <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                {activeRagRecommendations.length} active recommendations
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+              {["R", "A", "G"].map((urgency) => {
+                const items = activeRagRecommendations.filter((item) => item.urgency === urgency);
+                return (
+                  <div key={urgency} className="border rounded-lg overflow-hidden">
+                    <div
+                      className={`px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white ${
+                        urgency === "R" ? "bg-crit" : urgency === "A" ? "bg-warn" : "bg-success"
+                      }`}
+                    >
+                      {urgency === "R"
+                        ? "RED — Act Now"
+                        : urgency === "A"
+                          ? "AMBER — Plan"
+                          : "GREEN — Monitor"}
+                      <span className="ml-2 opacity-80">({items.length})</span>
+                    </div>
+                    <div className="p-3 space-y-3">
+                      {items.length ? (
+                        items.map((item) => (
+                          <div key={item.id} className="rounded-lg border p-3 space-y-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold leading-snug">{item.title}</p>
+                              <AreaBadge area={item.healthArea} />
+                              <RuleBadge ruleId={item.ruleId} />
+                              <ConfidenceBadge confidence={item.confidence} />
+                            </div>
+                            <p className="text-xs text-muted-foreground">{item.reason}</p>
+                            <ScoreRuleDetails item={item} />
+                            <EvidencePreview
+                              evidence={item.evidence}
+                              onView={() =>
+                                setEvidenceTarget({
+                                  title: item.title,
+                                  subtitle: `RAG analysis · ${item.healthArea}`,
+                                  evidence: item.evidence,
+                                })
+                              }
+                            />
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                disabled={!canAct}
+                                onClick={() => openReview("rag", item)}
+                              >
+                                Add
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!canAct}
+                                onClick={() => setRejectTarget({ ...item, sourceKind: "rag" })}
+                              >
+                                Reject
+                              </Button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground">
+                          No items in this urgency band.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold">
-              Sync Meeting Actions from Fireflies
+              Extract Action Items from Meeting Notes to Increase Score
             </h3>
             <p className="text-[11px] text-muted-foreground mt-1">
               Meeting summaries are saved to Meeting History, and guarded action items are saved to
@@ -3008,7 +3328,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
               onClick={() => rerunFirefliesExtraction()}
             >
               {extractingFireflies && <Loader2 className="size-3.5 animate-spin mr-1" />}
-              Sync meetings
+              Extract action items
             </Button>
             <p
               className={`text-[10px] ${
@@ -3105,118 +3425,93 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div>
-            <h3 className="text-sm font-bold">Activities Across All Health Areas</h3>
+            <h3 className="text-sm font-bold">Activities Across Health Areas</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              Existing work, active AI suggestions, and accepted drafts live in one review queue.
+              Unchecked Score Marking Matrics items, meeting actions, and accepted drafts live in
+              one review queue.
             </p>
           </div>
-          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-            {ACTIVITY_TAB_AREAS.length} health areas tracked
-          </p>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+            <div className="grid gap-1">
+              <Label
+                htmlFor="activity-health-area-filter"
+                className="text-[10px] uppercase tracking-widest text-muted-foreground"
+              >
+                Health area
+              </Label>
+              <select
+                id="activity-health-area-filter"
+                value={activityAreaFilter}
+                onChange={(event) => setActivityAreaFilter(event.target.value)}
+                className="h-9 min-w-[240px] rounded-md border bg-background px-3 text-xs font-medium"
+              >
+                <option value="All">
+                  All Health Areas ({activityRows.length}) - {summarizeExpectedLift(activityRows)}
+                </option>
+                {activityAreaOptions.map((option) => (
+                  <option key={option.area} value={option.area}>
+                    {option.area} ({option.count}) - {option.expectedLift}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button size="sm" variant="outline" onClick={toggleExpectedLiftSort}>
+              Expected Lift {expectedLiftSort === "asc" ? "ASC" : "DESC"}
+            </Button>
+          </div>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1180px] text-sm">
-            <thead>
+        <div className="px-6 py-2 border-b bg-muted/20 text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+          Showing {visibleActivityRows.length} of {activityRows.length} items
+        </div>
+        <div className="max-h-[560px] overflow-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead className="sticky top-0 z-10 bg-card">
               <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
                 <th className="px-6 py-3">Area</th>
-                <th className="px-6 py-3">Rule / Metric</th>
                 <th className="px-6 py-3">Activity</th>
+                <th className="px-6 py-3">
+                  <button
+                    type="button"
+                    onClick={toggleExpectedLiftSort}
+                    className="inline-flex items-center gap-1 hover:text-foreground"
+                  >
+                    Expected Lift {expectedLiftSort === "asc" ? "ASC" : "DESC"}
+                  </button>
+                </th>
                 <th className="px-6 py-3">Owner</th>
-                <th className="px-6 py-3">Due</th>
-                <th className="px-6 py-3">Status</th>
                 <th className="px-6 py-3">RAG</th>
-                <th className="px-6 py-3">Evidence</th>
-                <th className="px-6 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y">
-              {activityRows.map((row) => (
+              {visibleActivityRows.map((row) => (
                 <tr key={row.id} className="align-top hover:bg-muted/20">
                   <td className="px-6 py-4 text-xs font-semibold whitespace-nowrap">
                     <AreaBadge area={row.area} />
-                  </td>
-                  <td className="px-6 py-4 text-xs min-w-[220px]">
-                    <ActivityRuleCell row={row} />
                   </td>
                   <td className="px-6 py-4 text-xs min-w-[280px]">
                     <div className="space-y-1">
                       <p className="font-semibold text-foreground">{row.title}</p>
                       <p className="text-muted-foreground leading-relaxed">{row.reason}</p>
-                      {row.rowType === "saved" && (
-                        <p className="text-[11px] text-accent font-medium">{row.reviewState}</p>
-                      )}
                     </div>
+                  </td>
+                  <td className="px-6 py-4 text-xs font-semibold whitespace-nowrap">
+                    {row.expectedLift || "—"}
                   </td>
                   <td className="px-6 py-4 text-xs text-muted-foreground whitespace-nowrap">
                     {row.owner}
                   </td>
-                  <td className="px-6 py-4 text-xs whitespace-nowrap">{row.dueDate}</td>
-                  <td className="px-6 py-4 text-xs">
-                    <ActivityStatusBadge row={row} />
-                  </td>
                   <td className="px-6 py-4">
                     <RagBadge code={row.rag} />
-                  </td>
-                  <td className="px-6 py-4 text-xs min-w-[220px]">
-                    <EvidencePreview
-                      evidence={row.evidence}
-                      onView={() =>
-                        setEvidenceTarget({
-                          title: row.title,
-                          subtitle: `${row.area} · ${row.rowType}`,
-                          evidence: row.evidence,
-                        })
-                      }
-                      compact
-                    />
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    {row.rowType === "suggested" ? (
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          size="sm"
-                          disabled={!canAct}
-                          onClick={() => openReview(row.sourceKind, row)}
-                        >
-                          Add
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={!canAct}
-                          onClick={() => setRejectTarget(row)}
-                        >
-                          Reject
-                        </Button>
-                      </div>
-                    ) : row.rowType === "saved" ? (
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!canAct || row.status === "Validated"}
-                          onClick={() => openEvidenceSubmit(row)}
-                        >
-                          Evidence
-                        </Button>
-                        {canApproveEvidence && row.latestPendingEvidence && (
-                          <Button
-                            size="sm"
-                            disabled={validatingEvidence}
-                            onClick={() => validateEvidence(row)}
-                          >
-                            Validate
-                          </Button>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-[11px] text-muted-foreground">View only</span>
-                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {!visibleActivityRows.length && (
+            <p className="px-6 py-8 text-xs text-muted-foreground">
+              No activities are active for this health area.
+            </p>
+          )}
         </div>
       </div>
 
@@ -3270,8 +3565,7 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm, isSav
             <SheetHeader>
               <SheetTitle>{title}</SheetTitle>
               <SheetDescription>
-                Review the suggestion, adjust the details, and add it to the governed activity
-                plan.
+                Review the suggestion, adjust the details, and add it to the governed activity plan.
               </SheetDescription>
             </SheetHeader>
 
@@ -3760,9 +4054,7 @@ function ActivityRuleCell({ row }) {
         </span>
       </div>
       <p className="font-semibold text-foreground">{row.impactedMetric}</p>
-      {row.scoreBand && (
-        <p className="text-[11px] font-medium text-accent">{row.scoreBand}</p>
-      )}
+      {row.scoreBand && <p className="text-[11px] font-medium text-accent">{row.scoreBand}</p>}
       {(row.currentValue || row.targetValue) && (
         <p className="text-[11px] text-muted-foreground">
           {row.currentValue ?? "Current"} to {row.targetValue ?? "Target"}
@@ -4202,6 +4494,51 @@ function scoreAreaToParameter(area) {
     white_space: "Growth",
   };
   return map[area] ?? area;
+}
+
+function getExpectedLiftSortValue(value) {
+  const match = String(value ?? "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatLiftNumber(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function summarizeExpectedLift(rows) {
+  const percentValues = rows
+    .filter((row) => String(row.expectedLift ?? "").includes("%"))
+    .map((row) => getExpectedLiftSortValue(row.expectedLift))
+    .filter((value) => value !== null);
+
+  if (percentValues.length) {
+    const total = percentValues.reduce((sum, value) => sum + value, 0);
+    return `${formatLiftNumber(total)}% expected lift`;
+  }
+
+  const numericValues = rows
+    .map((row) => getExpectedLiftSortValue(row.expectedLift))
+    .filter((value) => value !== null);
+
+  if (!numericValues.length) return "0 expected lift";
+  return `Max ${formatLiftNumber(Math.max(...numericValues))} expected lift`;
+}
+
+function sortActivityRowsByExpectedLift(rows, direction) {
+  const baseRows = sortActivityRows(rows);
+
+  return [...baseRows].sort((left, right) => {
+    const leftValue = getExpectedLiftSortValue(left.expectedLift);
+    const rightValue = getExpectedLiftSortValue(right.expectedLift);
+
+    if (leftValue === null && rightValue === null) return 0;
+    if (leftValue === null) return 1;
+    if (rightValue === null) return -1;
+
+    return direction === "asc" ? leftValue - rightValue : rightValue - leftValue;
+  });
 }
 
 function sortActivityRows(rows) {
@@ -4786,9 +5123,7 @@ function MeetingHistoryTab({ account, profile }) {
                       label="Agent diagnostics"
                       value={`Source: ${formatMeetingActionSource(
                         meeting.agentDiagnostics?.actionSource,
-                      )}; candidates: ${
-                        meeting.agentDiagnostics?.candidateCount ?? 0
-                      }; accepted: ${
+                      )}; candidates: ${meeting.agentDiagnostics?.candidateCount ?? 0}; accepted: ${
                         meeting.agentDiagnostics?.acceptedCount ?? 0
                       }; opportunity candidates: ${
                         meeting.agentDiagnostics?.opportunity?.candidateCount ?? 0
