@@ -1,8 +1,13 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ROLE_PERMISSIONS, formatCurrency } from "@/data/kam-data";
-import { buildActivityTabModel, ACTIVITY_TAB_AREAS } from "@/services/activity-tab";
+import {
+  buildActivityTabModel,
+  ACTIVITY_TAB_AREAS,
+  isRetentionGrowthActivityArea,
+} from "@/services/activity-tab";
+import { fetchFirefliesRequiredActionItems } from "@/services/fireflies-action-items.server";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import {
   fetchAccount,
@@ -14,6 +19,15 @@ import {
   updateHealthBlock,
   fetchAccountHistory,
   logAccountChanges,
+  fetchActivityScoreHistory,
+  fetchActivityRuleThresholdOverrides,
+  upsertActivityScoreSnapshot,
+  fetchActivityRuleActivities,
+  createActivityRuleActivity,
+  rejectActivityRuleSuggestion,
+  submitActivityRuleEvidence,
+  reviewActivityRuleEvidence,
+  fetchFirefliesMeetingSummaries,
 } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -61,6 +75,7 @@ import {
   Sparkles,
   Lightbulb,
   Loader2,
+  ChevronDown,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -92,6 +107,7 @@ const TABS = [
   "Retention VS Growth",
   "Educate client",
   "Escalation",
+  "Meeting History",
   "Client History",
 ];
 function AccountDetailPage() {
@@ -275,6 +291,9 @@ function AccountDetailPage() {
           )}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
+          {tab === "Meeting History" && (
+            <MeetingHistoryTab account={account} profile={profile} />
+          )}
           {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
         </div>
       </div>
@@ -2003,6 +2022,14 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         )
         .filter(Boolean);
       await updateHealthBlock(accountId, area, newScore, metricUpdates, sections);
+      await upsertActivityScoreSnapshot({
+        accountId,
+        parameter: scoreAreaToParameter(area),
+        metric: title,
+        score: newScore,
+        source: "kpi_editor",
+        notes: `Snapshot captured from KPI editor by ${editorUser}.`,
+      });
       await logAccountChanges(
         accountId,
         [
@@ -2509,7 +2536,6 @@ function ActivityTab({ account, opportunities, escalations }) {
               <th className="px-6 py-3">Due</th>
               <th className="px-6 py-3">Status</th>
               <th className="px-6 py-3">RAG</th>
-              <th className="px-6 py-3 text-right">Expected Lift</th>
             </tr>
           </thead>
           <tbody className="divide-y">
@@ -2538,9 +2564,6 @@ function ActivityTab({ account, opportunities, escalations }) {
                     <td className="px-6 py-3">
                       <span className={`inline-block size-2.5 rounded-full ${ragColor[a.rag]}`} />
                     </td>
-                    <td className="px-6 py-3 text-xs text-right font-semibold text-success">
-                      {a.expectedLift}
-                    </td>
                   </tr>
                 )),
             )}
@@ -2554,41 +2577,227 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const role = profile?.role ?? "KAM";
   const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
   const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const canApproveEvidence = role === "Head of KAM" || role === "CEO";
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const { data: scoreHistory = [] } = useQuery({
+    queryKey: ["activity-score-history", account.id],
+    queryFn: () => fetchActivityScoreHistory(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: thresholdOverrides = [] } = useQuery({
+    queryKey: ["activity-threshold-overrides", account.id],
+    queryFn: () => fetchActivityRuleThresholdOverrides(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: savedRuleActivities = [] } = useQuery({
+    queryKey: ["activity-rule-activities", account.id],
+    queryFn: () => fetchActivityRuleActivities(account.id),
+    enabled: Boolean(account.id),
+  });
   const model = useMemo(
-    () => buildActivityTabModel({ account, opportunities, escalations }),
-    [account, escalations, opportunities],
+    () =>
+      buildActivityTabModel({
+        account,
+        opportunities,
+        escalations,
+        scoreHistory,
+        thresholdOverrides,
+      }),
+    [account, escalations, opportunities, scoreHistory, thresholdOverrides],
   );
 
   const [resolvedItems, setResolvedItems] = useState({});
-  const [draftRows, setDraftRows] = useState([]);
   const [reviewTarget, setReviewTarget] = useState(null);
   const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
   const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [evidenceSubmitTarget, setEvidenceSubmitTarget] = useState(null);
+  const [evidenceForm, setEvidenceForm] = useState(
+    createInitialEvidenceForm(null, profile?.name),
+  );
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [firefliesActions, setFirefliesActions] = useState([]);
+  const [firefliesStatus, setFirefliesStatus] = useState("");
+
+  const { mutate: rerunFirefliesExtraction, isPending: extractingFireflies } = useMutation({
+    mutationFn: () =>
+      fetchFirefliesRequiredActionItems({
+        data: {
+          accountId: account.id,
+          limit: 5,
+          daysBack: 60,
+        },
+    }),
+    onSuccess: (result) => {
+      setFirefliesActions([]);
+      setFirefliesStatus(result.status ?? "Fireflies extraction completed.");
+      queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+    },
+    onError: (error) => {
+      setFirefliesStatus(error?.message ?? "Fireflies extraction failed.");
+    },
+  });
+
+  const { mutate: saveRuleActivity, isPending: savingRuleActivity } = useMutation({
+    mutationFn: ({ target, form }) =>
+      createActivityRuleActivity(
+        buildActivityRuleActivityInput({
+          accountId: account.id,
+          target,
+          form,
+        }),
+      ),
+    onSuccess: (_, { target }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [target.item.id]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      router.invalidate();
+      closeReview();
+    },
+  });
+
+  const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
+    mutationFn: ({ target, reason }) =>
+      rejectActivityRuleSuggestion(
+        buildRejectedRuleActivityInput({
+          accountId: account.id,
+          target,
+          reason,
+          reviewer: profile?.name ?? "Unknown",
+        }),
+      ),
+    onSuccess: (_, { target, reason }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [getSuggestionSourceRef(target)]: {
+          status: "rejected",
+          reason,
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      setRejectTarget(null);
+      setRejectReason("");
+    },
+  });
+
+  const { mutate: submitEvidence, isPending: submittingEvidence } = useMutation({
+    mutationFn: ({ row, form }) =>
+      submitActivityRuleEvidence({
+        ruleActivityId: row.dbId,
+        submittedBy: profile?.name ?? "Unknown",
+        evidenceQuality: form.evidenceQuality,
+        title: form.title.trim(),
+        notes: form.notes.trim(),
+        artifactUrl: form.artifactUrl.trim(),
+        checklist: buildEvidenceChecklistPayload(form.evidenceQuality),
+        requestedLift: row.expectedLift,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      setEvidenceSubmitTarget(null);
+      setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
+    },
+  });
+
+  const { mutate: validateEvidence, isPending: validatingEvidence } = useMutation({
+    mutationFn: (row) =>
+      reviewActivityRuleEvidence({
+        evidenceId: row.latestPendingEvidence.id,
+        ruleActivityId: row.dbId,
+        reviewer: profile?.name ?? "Unknown",
+        reviewStatus: "Approved",
+        approvedLift: row.expectedLift,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      router.invalidate();
+    },
+  });
 
   useEffect(() => {
     setResolvedItems({});
-    setDraftRows([]);
     setReviewTarget(null);
     setReviewForm(createInitialReviewForm(null, profile?.name));
     setEvidenceTarget(null);
+    setEvidenceSubmitTarget(null);
+    setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
     setRejectTarget(null);
     setRejectReason("");
+    setFirefliesActions([]);
+    setFirefliesStatus("");
   }, [account.id, profile?.name]);
 
-  const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
-  const activeRagRecommendations = model.ragRecommendations.filter(
-    (item) => !resolvedItems[item.id],
+  const activeSavedRuleActivities = useMemo(
+    () =>
+      savedRuleActivities.filter(
+        (activity) =>
+          activity.status !== "Rejected" &&
+          activity.status !== "Closed" &&
+          (activity.sourceType === "opportunity" ||
+            !isRetentionGrowthActivityArea(activity.parameter)),
+      ),
+    [savedRuleActivities],
   );
-  const activeMeetingActions = model.meetingActions.filter((item) => !resolvedItems[item.id]);
+  const persistedSourceRefs = useMemo(
+    () =>
+      new Set(
+        activeSavedRuleActivities
+          .map((activity) => activity.sourceRef)
+          .filter((sourceRef) => sourceRef && sourceRef !== "manual"),
+      ),
+    [activeSavedRuleActivities],
+  );
+  const isResolved = useCallback(
+    (item) =>
+      Boolean(resolvedItems[item.id] || persistedSourceRefs.has(getSuggestionSourceRef(item))),
+    [persistedSourceRefs, resolvedItems],
+  );
+
+  const activeOpportunities = model.opportunities.filter((item) => !isResolved(item));
+  const activeRagRecommendations = model.ragRecommendations.filter(
+    (item) => !isResolved(item),
+  );
+  const savedMeetingActions = useMemo(
+    () =>
+      activeSavedRuleActivities
+        .filter((activity) => activity.sourceType === "fireflies_meeting")
+        .map(mapPersistedMeetingActivityToCard),
+    [activeSavedRuleActivities],
+  );
+  const scoreFirefliesActions = useMemo(
+    () => firefliesActions.filter((item) => !isRetentionGrowthActivityArea(item.healthArea)),
+    [firefliesActions],
+  );
+  const mergedMeetingActions = useMemo(() => {
+    const actionsById = new Map();
+    [...model.meetingActions, ...scoreFirefliesActions, ...savedMeetingActions].forEach((item) => {
+      actionsById.set(getSuggestionSourceRef(item), item);
+    });
+    return [...actionsById.values()];
+  }, [model.meetingActions, savedMeetingActions, scoreFirefliesActions]);
+  const activeMeetingActions = mergedMeetingActions.filter(
+    (item) => item.persisted || !isResolved(item),
+  );
 
   const activityRows = useMemo(() => {
+    const savedRows = activeSavedRuleActivities.map(mapPersistedRuleActivityToRow);
     const visibleRows = model.activityRows.filter(
-      (row) => row.rowType === "existing" || !resolvedItems[row.id],
+      (row) => row.rowType === "existing" || !isResolved(row),
     );
-    return sortActivityRows([...visibleRows, ...draftRows]);
-  }, [draftRows, model.activityRows, resolvedItems]);
+    const firefliesRows = scoreFirefliesActions
+      .filter((item) => !isResolved(item))
+      .map((item) => mapMeetingActionToActivityRow(item, "meeting"));
+    return sortActivityRows([...savedRows, ...visibleRows, ...firefliesRows]);
+  }, [activeSavedRuleActivities, isResolved, model.activityRows, scoreFirefliesActions]);
 
   function openReview(kind, item) {
     setReviewTarget({ kind, item });
@@ -2602,30 +2811,17 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
 
   function confirmReview() {
     if (!reviewTarget) return;
-    const draftRow = buildDraftRow(reviewTarget, reviewForm);
-    setDraftRows((current) => [draftRow, ...current]);
-    setResolvedItems((current) => ({
-      ...current,
-      [reviewTarget.item.id]: {
-        status: "drafted",
-        reviewedAt: new Date().toISOString(),
-      },
-    }));
-    closeReview();
+    saveRuleActivity({ target: reviewTarget, form: reviewForm });
+  }
+
+  function openEvidenceSubmit(row) {
+    setEvidenceSubmitTarget(row);
+    setEvidenceForm(createInitialEvidenceForm(row, profile?.name));
   }
 
   function confirmReject() {
     if (!rejectTarget || !rejectReason.trim()) return;
-    setResolvedItems((current) => ({
-      ...current,
-      [rejectTarget.id]: {
-        status: "rejected",
-        reason: rejectReason.trim(),
-        reviewedAt: new Date().toISOString(),
-      },
-    }));
-    setRejectTarget(null);
-    setRejectReason("");
+    rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
   }
 
   return (
@@ -2678,17 +2874,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                     <p className="text-[11px] text-muted-foreground">
                       {opportunity.source} · {opportunity.signalDate}
                     </p>
-                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
-                      <MiniStat
-                        label="Potential value"
-                        value={`+${formatCurrency(opportunity.potentialValue)}`}
-                      />
-                      <MiniStat label="Next step" value={opportunity.nextStep} />
-                      <MiniStat
-                        label="Priority"
-                        value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
-                      />
-                    </div>
+                    <ScoreRuleDetails item={opportunity} />
                     <EvidencePreview
                       evidence={opportunity.evidence}
                       onView={() =>
@@ -2723,9 +2909,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       <div className="bg-card border rounded-xl p-6">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
           <div>
-            <h3 className="text-sm font-bold">RAG Analysis</h3>
+            <h3 className="text-sm font-bold">Global Activity Rule Matrix</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              Recommended score-improvement activities grouped by urgency.
+              Standard rules that generate account-specific activities and define validation criteria.
             </p>
           </div>
           <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
@@ -2757,13 +2943,11 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="text-sm font-semibold leading-snug">{item.title}</p>
                           <AreaBadge area={item.healthArea} />
+                          <RuleBadge ruleId={item.ruleId} />
                           <ConfidenceBadge confidence={item.confidence} />
                         </div>
                         <p className="text-xs text-muted-foreground">{item.reason}</p>
-                        <div className="grid gap-2 sm:grid-cols-2 text-xs">
-                          <MiniStat label="Expected lift" value={item.expectedLift} />
-                          <MiniStat label="Next step" value={item.nextStep} />
-                        </div>
+                        <ScoreRuleDetails item={item} />
                         <EvidencePreview
                           evidence={item.evidence}
                           onView={() =>
@@ -2786,7 +2970,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                             variant="outline"
                             size="sm"
                             disabled={!canAct}
-                            onClick={() => setRejectTarget(item)}
+                            onClick={() => setRejectTarget({ ...item, sourceKind: "rag" })}
                           >
                             Reject
                           </Button>
@@ -2809,18 +2993,32 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold">
-              Extract Action Items from Meeting Notes to Increase Score
+              Sync Meeting Actions from Fireflies
             </h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              Fireflies-derived meeting actions are shown here as reviewable suggestions only.
+              Meeting summaries are saved to Meeting History, and guarded action items are saved to
+              the activity queue.
             </p>
           </div>
           <div className="flex flex-col items-start md:items-end gap-1">
-            <Button size="sm" variant="outline" disabled>
-              Re-run extraction
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canAct || extractingFireflies}
+              onClick={() => rerunFirefliesExtraction()}
+            >
+              {extractingFireflies && <Loader2 className="size-3.5 animate-spin mr-1" />}
+              Sync meetings
             </Button>
-            <p className="text-[10px] text-muted-foreground">
-              Connect a backend extraction hook to enable reruns.
+            <p
+              className={`text-[10px] ${
+                firefliesStatus.includes("failed") || firefliesStatus.includes("Missing")
+                  ? "text-crit"
+                  : "text-muted-foreground"
+              }`}
+            >
+              {firefliesStatus ||
+                "Fetches summaries, derives required actions, and avoids duplicate activities."}
             </p>
           </div>
         </div>
@@ -2835,15 +3033,12 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                       <p className="text-sm font-semibold leading-snug">{item.title}</p>
                       <AreaBadge area={item.healthArea} />
                       <ConfidenceBadge confidence={item.confidence} />
+                      {item.persisted && <ActivityStatusBadge row={item} />}
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                       {item.meetingTitle} · {item.meetingDate}
                     </p>
-                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
-                      <MiniStat label="Source excerpt" value={item.sourceExcerpt} />
-                      <MiniStat label="Expected lift" value={item.expectedLift} />
-                      <MiniStat label="Next step" value={item.nextStep} />
-                    </div>
+                    <ScoreRuleDetails item={item} />
                     <EvidencePreview
                       evidence={item.evidence}
                       onView={() =>
@@ -2856,21 +3051,45 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                     />
                   </div>
                   <div className="flex flex-wrap gap-2 shrink-0">
-                    <Button
-                      size="sm"
-                      disabled={!canAct}
-                      onClick={() => openReview("meeting", item)}
-                    >
-                      Add
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!canAct}
-                      onClick={() => setRejectTarget(item)}
-                    >
-                      Reject
-                    </Button>
+                    {item.persisted ? (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!canAct || item.status === "Validated"}
+                          onClick={() => openEvidenceSubmit(item)}
+                        >
+                          Evidence
+                        </Button>
+                        {canApproveEvidence && item.latestPendingEvidence && (
+                          <Button
+                            size="sm"
+                            disabled={validatingEvidence}
+                            onClick={() => validateEvidence(item)}
+                          >
+                            Validate
+                          </Button>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() => openReview("meeting", item)}
+                        >
+                          Add
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() => setRejectTarget({ ...item, sourceKind: "meeting" })}
+                        >
+                          Reject
+                        </Button>
+                      </>
+                    )}
                   </div>
                 </div>
               </li>
@@ -2896,16 +3115,16 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
           </p>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1120px] text-sm">
+          <table className="w-full min-w-[1180px] text-sm">
             <thead>
               <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
                 <th className="px-6 py-3">Area</th>
+                <th className="px-6 py-3">Rule / Metric</th>
                 <th className="px-6 py-3">Activity</th>
                 <th className="px-6 py-3">Owner</th>
                 <th className="px-6 py-3">Due</th>
                 <th className="px-6 py-3">Status</th>
                 <th className="px-6 py-3">RAG</th>
-                <th className="px-6 py-3">Expected Lift</th>
                 <th className="px-6 py-3">Evidence</th>
                 <th className="px-6 py-3 text-right">Actions</th>
               </tr>
@@ -2916,11 +3135,14 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                   <td className="px-6 py-4 text-xs font-semibold whitespace-nowrap">
                     <AreaBadge area={row.area} />
                   </td>
+                  <td className="px-6 py-4 text-xs min-w-[220px]">
+                    <ActivityRuleCell row={row} />
+                  </td>
                   <td className="px-6 py-4 text-xs min-w-[280px]">
                     <div className="space-y-1">
                       <p className="font-semibold text-foreground">{row.title}</p>
                       <p className="text-muted-foreground leading-relaxed">{row.reason}</p>
-                      {row.rowType === "draft" && (
+                      {row.rowType === "saved" && (
                         <p className="text-[11px] text-accent font-medium">{row.reviewState}</p>
                       )}
                     </div>
@@ -2934,9 +3156,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                   </td>
                   <td className="px-6 py-4">
                     <RagBadge code={row.rag} />
-                  </td>
-                  <td className="px-6 py-4 text-xs font-semibold text-success whitespace-nowrap">
-                    {row.expectedLift}
                   </td>
                   <td className="px-6 py-4 text-xs min-w-[220px]">
                     <EvidencePreview
@@ -2965,19 +3184,31 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                           variant="outline"
                           size="sm"
                           disabled={!canAct}
-                          onClick={() =>
-                            setRejectTarget({
-                              id: row.sourceId,
-                              title: row.title,
-                              sourceKind: row.sourceKind,
-                            })
-                          }
+                          onClick={() => setRejectTarget(row)}
                         >
                           Reject
                         </Button>
                       </div>
-                    ) : row.rowType === "draft" ? (
-                      <span className="text-[11px] text-muted-foreground">Draft only</span>
+                    ) : row.rowType === "saved" ? (
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!canAct || row.status === "Validated"}
+                          onClick={() => openEvidenceSubmit(row)}
+                        >
+                          Evidence
+                        </Button>
+                        {canApproveEvidence && row.latestPendingEvidence && (
+                          <Button
+                            size="sm"
+                            disabled={validatingEvidence}
+                            onClick={() => validateEvidence(row)}
+                          >
+                            Validate
+                          </Button>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-[11px] text-muted-foreground">View only</span>
                     )}
@@ -2995,9 +3226,22 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         onChange={setReviewForm}
         onClose={closeReview}
         onConfirm={confirmReview}
+        isSaving={savingRuleActivity}
       />
 
       <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+
+      <EvidenceSubmissionDialog
+        target={evidenceSubmitTarget}
+        form={evidenceForm}
+        onChange={setEvidenceForm}
+        onClose={() => {
+          setEvidenceSubmitTarget(null);
+          setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
+        }}
+        onConfirm={() => submitEvidence({ row: evidenceSubmitTarget, form: evidenceForm })}
+        isSaving={submittingEvidence}
+      />
 
       <RejectRecommendationDialog
         target={rejectTarget}
@@ -3008,12 +3252,13 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
           setRejectReason("");
         }}
         onConfirm={confirmReject}
+        isSaving={rejectingRuleActivity}
       />
     </div>
   );
 }
 
-function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm, isSaving = false }) {
   const item = target?.item ?? null;
   const title = target?.kind === "opportunity" ? "Review pursuit draft" : "Review activity draft";
 
@@ -3025,8 +3270,8 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
             <SheetHeader>
               <SheetTitle>{title}</SheetTitle>
               <SheetDescription>
-                Review the suggestion, adjust the draft details, and save it as an internal draft
-                activity.
+                Review the suggestion, adjust the details, and add it to the governed activity
+                plan.
               </SheetDescription>
             </SheetHeader>
 
@@ -3034,6 +3279,7 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
               <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <AreaBadge area={item.healthArea ?? item.area} />
+                  <RuleBadge ruleId={item.ruleId} />
                   {item.priority ? <PriorityBadge priority={item.priority} /> : null}
                   {item.confidence ? <ConfidenceBadge confidence={item.confidence} /> : null}
                   {item.approvalRequired && (
@@ -3048,15 +3294,7 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
                     {item.reason ?? item.sourceExcerpt ?? item.nextStep}
                   </p>
                 </div>
-                <div className="grid sm:grid-cols-2 gap-3 text-xs">
-                  <MiniStat
-                    label="Expected outcome"
-                    value={
-                      item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`
-                    }
-                  />
-                  <MiniStat label="Next step" value={item.nextStep} />
-                </div>
+                <ScoreRuleDetails item={item} />
               </div>
 
               <div className="grid gap-4">
@@ -3141,9 +3379,11 @@ function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm }) {
               </Button>
               <Button
                 onClick={onConfirm}
-                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+                disabled={
+                  isSaving || !form.title.trim() || !form.owner.trim() || !form.nextStep.trim()
+                }
               >
-                Create draft activity
+                {isSaving ? "Adding..." : "Add to plan"}
               </Button>
             </SheetFooter>
           </>
@@ -3186,7 +3426,106 @@ function EvidenceDetailSheet({ target, onClose }) {
   );
 }
 
-function RejectRecommendationDialog({ target, value, onChange, onClose, onConfirm }) {
+function EvidenceSubmissionDialog({ target, form, onChange, onClose, onConfirm, isSaving }) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Submit evidence</DialogTitle>
+          <DialogDescription>
+            Evidence quality controls how much lift is eligible after reviewer validation.
+          </DialogDescription>
+        </DialogHeader>
+
+        {target && (
+          <div className="space-y-4">
+            <div className="rounded-lg border p-3 bg-muted/20">
+              <p className="text-sm font-semibold">{target.title}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Current stage: {target.status} / {target.activityScorePct ?? 0}%
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-quality">Evidence quality</Label>
+              <select
+                id="evidence-quality"
+                value={form.evidenceQuality}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, evidenceQuality: event.target.value }))
+                }
+                className="h-10 rounded-md border bg-background px-3 text-sm"
+              >
+                <option value="Meeting note only">Meeting note only</option>
+                <option value="Action tracker plus note">Action tracker plus note</option>
+                <option value="Completed action plus outcome proof">
+                  Completed action plus outcome proof
+                </option>
+              </select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-title">Evidence title</Label>
+              <Input
+                id="evidence-title"
+                value={form.title}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, title: event.target.value }))
+                }
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-notes">Notes</Label>
+              <Textarea
+                id="evidence-notes"
+                rows={4}
+                value={form.notes}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, notes: event.target.value }))
+                }
+                placeholder="Mention meeting, tracker, completion proof, owner, and outcome."
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-url">Artifact URL</Label>
+              <Input
+                id="evidence-url"
+                value={form.artifactUrl}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, artifactUrl: event.target.value }))
+                }
+                placeholder="https://..."
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            disabled={isSaving || !form.title.trim() || !form.notes.trim()}
+            onClick={onConfirm}
+          >
+            {isSaving ? "Submitting..." : "Submit evidence"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RejectRecommendationDialog({
+  target,
+  value,
+  onChange,
+  onClose,
+  onConfirm,
+  isSaving = false,
+}) {
   return (
     <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-md">
@@ -3223,12 +3562,213 @@ function RejectRecommendationDialog({ target, value, onChange, onClose, onConfir
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="destructive" disabled={!value.trim()} onClick={onConfirm}>
-            Reject recommendation
+          <Button variant="destructive" disabled={isSaving || !value.trim()} onClick={onConfirm}>
+            {isSaving ? "Rejecting..." : "Reject recommendation"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function RuleBadge({ ruleId }) {
+  if (!ruleId) return null;
+
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
+      {ruleId}
+    </span>
+  );
+}
+
+function formatEvidenceRequired(evidenceRequired) {
+  if (!evidenceRequired) return "Activity evidence";
+  if (Array.isArray(evidenceRequired)) return evidenceRequired.join(", ");
+  return evidenceRequired;
+}
+
+function formatTriggerLogic(triggerLogic) {
+  if (!triggerLogic) return null;
+  return [
+    triggerLogic.primary ? `Primary: ${triggerLogic.primary}` : null,
+    triggerLogic.threshold ? `Threshold: ${triggerLogic.threshold}` : null,
+    triggerLogic.scoreBand ? `Band: ${triggerLogic.scoreBand}` : null,
+    triggerLogic.overrideReason ? `Reason: ${triggerLogic.overrideReason}` : null,
+    triggerLogic.trend ? `Trend: ${triggerLogic.trend}` : null,
+    triggerLogic.velocity ? `Velocity: ${triggerLogic.velocity}` : null,
+    triggerLogic.compound ? `Compound: ${triggerLogic.compound}` : null,
+    triggerLogic.optimization ? `Target logic: ${triggerLogic.optimization}` : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function formatEvidenceLiftPolicy(policy) {
+  if (!policy?.length) return null;
+  return policy.map((entry) => `${entry.quality}: ${entry.lift}`).join(" | ");
+}
+
+function formatActivityScoreLogic(logic) {
+  if (!logic?.length) return null;
+  return logic.join(" | ");
+}
+
+function formatApprovalSla(approvalSla) {
+  if (!approvalSla?.reviewWindow) return null;
+  return `Review: ${approvalSla.reviewWindow}; approver: ${approvalSla.primaryApprover}; fallback: ${approvalSla.fallbackApprover}; ${approvalSla.rejectionRule}`;
+}
+
+function formatReviewCadence(reviewCadence) {
+  if (!reviewCadence?.cadence) return null;
+  return `${reviewCadence.cadence}; ${reviewCadence.autoCloseRule}`;
+}
+
+function ScoreRuleDetails({ item }) {
+  if (
+    !item?.ruleId &&
+    !item?.successCriteria &&
+    !item?.expectedLift &&
+    !item?.nextStep &&
+    !item?.sourceExcerpt &&
+    !item?.potentialValue
+  ) {
+    return null;
+  }
+
+  const triggerLogic = formatTriggerLogic(item.triggerLogic);
+  const evidenceLiftPolicy = formatEvidenceLiftPolicy(item.evidenceLiftPolicy);
+  const activityScoreLogic = formatActivityScoreLogic(item.activityScoreLogic);
+  const approvalSla = formatApprovalSla(item.approvalSla);
+  const reviewCadence = formatReviewCadence(item.reviewCadence);
+  const summaryParts = [
+    item.scoreBand,
+    item.potentialValue ? `+${formatCurrency(item.potentialValue)}` : null,
+    item.currentValue && item.targetValue ? `${item.currentValue} to ${item.targetValue}` : null,
+    item.threshold || item.targetScore
+      ? `${item.thresholdSource ?? "Global default"} threshold`
+      : null,
+    item.nextStep ? "Next step" : null,
+  ].filter(Boolean);
+
+  return (
+    <details className="group rounded-lg border bg-muted/20 text-xs">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+            {item.ruleId ? "Rule details" : "Details"}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {summaryParts.length ? summaryParts.join(" | ") : "Evidence and next step"}
+          </p>
+        </div>
+        <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="space-y-2 border-t p-3">
+        <RuleDetailDisclosure
+          label="Rule and metric"
+          value={
+            item.ruleId
+              ? `${item.ruleId} / ${item.impactedMetric ?? item.parameter ?? item.healthArea}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure
+          label="Potential value"
+          value={item.potentialValue ? `+${formatCurrency(item.potentialValue)}` : null}
+        />
+        <RuleDetailDisclosure
+          label="Priority"
+          value={
+            item.priority
+              ? `${item.priority}${item.confidence ? ` / ${item.confidence} confidence` : ""}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure label="Expected lift" value={item.expectedLift} />
+        <RuleDetailDisclosure label="Next step" value={item.nextStep} />
+        <RuleDetailDisclosure label="Source excerpt" value={item.sourceExcerpt} />
+        <RuleDetailDisclosure
+          label="Current to target"
+          value={
+            item.currentValue || item.targetValue
+              ? `${item.currentValue ?? "Current"} to ${item.targetValue ?? "Target"}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure label="Score band" value={item.scoreBand} />
+        <RuleDetailDisclosure
+          label="Threshold / target"
+          value={
+            item.threshold || item.targetScore
+              ? `${item.thresholdSource ?? "Global default"}: ${item.threshold ?? "n/a"} to ${item.targetScore ?? "n/a"}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure label="Threshold reason" value={item.thresholdReason} />
+        <RuleDetailDisclosure label="Success criteria" value={item.successCriteria} />
+        <RuleDetailDisclosure
+          label="Evidence required"
+          value={item.evidenceRequired ? formatEvidenceRequired(item.evidenceRequired) : null}
+        />
+        <RuleDetailDisclosure label="Trigger logic" value={triggerLogic} />
+        <RuleDetailDisclosure label="Evidence quality lift" value={evidenceLiftPolicy} />
+        <RuleDetailDisclosure label="Activity score logic" value={activityScoreLogic} />
+        <RuleDetailDisclosure label="Approval SLA" value={approvalSla} />
+        <RuleDetailDisclosure label="Review cadence" value={reviewCadence} />
+      </div>
+    </details>
+  );
+}
+
+function RuleDetailDisclosure({ label, value }) {
+  if (!value) return null;
+
+  return (
+    <details className="group/detail rounded-md border bg-background">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+            {label}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{value}</p>
+        </div>
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/detail:rotate-180" />
+      </summary>
+      <p className="border-t px-3 py-2 text-xs leading-relaxed text-foreground">{value}</p>
+    </details>
+  );
+}
+
+function ActivityRuleCell({ row }) {
+  if (!row.ruleId) {
+    return (
+      <div className="space-y-1">
+        <p className="font-semibold text-muted-foreground">{row.impactedMetric ?? "Tracked"}</p>
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          Existing activity context
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <RuleBadge ruleId={row.ruleId} />
+        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+          {row.parameter}
+        </span>
+      </div>
+      <p className="font-semibold text-foreground">{row.impactedMetric}</p>
+      {row.scoreBand && (
+        <p className="text-[11px] font-medium text-accent">{row.scoreBand}</p>
+      )}
+      {(row.currentValue || row.targetValue) && (
+        <p className="text-[11px] text-muted-foreground">
+          {row.currentValue ?? "Current"} to {row.targetValue ?? "Target"}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -3328,13 +3868,6 @@ function RagBadge({ code }) {
 }
 
 function ActivityStatusBadge({ row }) {
-  if (row.rowType === "draft") {
-    return (
-      <span className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-accent/10 text-accent">
-        Draft
-      </span>
-    );
-  }
   if (row.rowType === "suggested") {
     return (
       <span className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-warn/10 text-warn">
@@ -3343,12 +3876,19 @@ function ActivityStatusBadge({ row }) {
     );
   }
 
-  const styles =
-    row.status === "Done"
-      ? "bg-success/10 text-success"
-      : row.status === "In Progress"
-        ? "bg-accent/10 text-accent"
-        : "bg-muted text-muted-foreground";
+  const statusStyles = {
+    Validated: "bg-success/10 text-success",
+    "Evidence Submitted": "bg-warn/10 text-warn",
+    Completed: "bg-accent/10 text-accent",
+    Planned: "bg-accent/10 text-accent",
+    Accepted: "bg-accent/10 text-accent",
+    Generated: "bg-muted text-muted-foreground",
+    Rejected: "bg-crit/10 text-crit",
+    Closed: "bg-muted text-muted-foreground",
+    Done: "bg-success/10 text-success",
+    "In Progress": "bg-accent/10 text-accent",
+  };
+  const styles = statusStyles[row.status] ?? "bg-muted text-muted-foreground";
 
   return (
     <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles}`}>
@@ -3398,33 +3938,275 @@ function mapPriorityToRag(priority) {
   return priority === "High" ? "R" : priority === "Low" ? "G" : "A";
 }
 
-function buildDraftRow(target, form) {
-  const { kind, item } = target;
+function mapMeetingActionToActivityRow(item, sourceKind) {
   return {
-    id: `draft-${item.id}`,
-    rowType: "draft",
+    id: item.id,
+    rowType: "suggested",
     sourceId: item.id,
-    sourceKind: kind,
-    area: item.healthArea ?? item.area ?? "Relationship",
-    title: form.title.trim(),
-    owner: form.owner.trim(),
-    dueDate: formatDraftDate(form.dueDate),
-    status: "Draft",
-    rag: item.urgency ?? item.rag ?? mapPriorityToRag(item.priority),
-    expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
-    confidence: item.confidence ?? "Medium",
-    reason: item.reason ?? item.sourceExcerpt ?? form.nextStep.trim(),
+    sourceKind,
+    area: item.healthArea,
+    title: item.title,
+    owner: "KAM Person",
+    dueDate: "In 7d",
+    status: "Suggested",
+    rag: item.confidence === "High" ? "R" : "A",
+    expectedLift: item.expectedLift,
+    confidence: item.confidence,
+    ruleId: item.ruleId ?? null,
+    parameter: item.parameter ?? item.healthArea,
+    impactedMetric: item.impactedMetric ?? item.healthArea,
+    weakSignal: item.weakSignal ?? item.reason ?? item.sourceExcerpt,
+    currentValue: item.currentValue ?? null,
+    targetValue: item.targetValue ?? null,
+    triggerLogic: item.triggerLogic ?? null,
+    evidenceLiftPolicy: item.evidenceLiftPolicy ?? null,
+    activityScoreLogic: item.activityScoreLogic ?? null,
+    approvalSla: item.approvalSla ?? null,
+    reviewCadence: item.reviewCadence ?? null,
+    scoreBand: item.scoreBand ?? null,
+    threshold: item.threshold ?? null,
+    targetScore: item.targetScore ?? null,
+    thresholdSource: item.thresholdSource ?? null,
+    thresholdReason: item.thresholdReason ?? null,
+    successCriteria: item.successCriteria ?? "Complete the activity and review score impact.",
+    evidenceRequired: item.evidenceRequired ?? ["Activity evidence"],
+    reason: item.reason ?? item.sourceExcerpt ?? item.nextStep,
     evidence: item.evidence ?? [],
-    nextStep: form.nextStep.trim(),
-    reviewState: item.approvalRequired
-      ? `Pending ${item.approverRole ?? "Head of KAM"} approval`
-      : "Needs Review",
+    nextStep: item.nextStep,
   };
+}
+
+function mapPersistedRuleActivityToRow(activity) {
+  const pendingEvidence = activity.evidenceReviews.find(
+    (evidence) => evidence.reviewStatus === "Pending" || evidence.reviewStatus === "Partial",
+  );
+  const evidence = activity.evidenceReviews.length
+    ? activity.evidenceReviews.map((entry) => ({
+        source: entry.title,
+        sourceType: `${entry.evidenceQuality} / ${entry.reviewStatus}`,
+        date: formatDraftDate(entry.submittedAt),
+        excerpt: entry.notes || entry.artifactUrl || "Evidence submitted for reviewer validation.",
+        reason:
+          entry.reviewStatus === "Approved"
+            ? `Approved by ${entry.reviewer || "reviewer"} for ${entry.approvedLift || activity.expectedLift}.`
+            : entry.reviewStatus === "Rejected"
+              ? entry.rejectionReason
+              : "Awaiting reviewer validation.",
+      }))
+    : [
+        {
+          source: "Evidence pending",
+          sourceType: "Governance workflow",
+          date: activity.generatedAt ? formatDraftDate(activity.generatedAt) : "Current cycle",
+          excerpt: activity.successCriteria || activity.weakSignal,
+          reason: "Submit evidence before any parameter score lift can be validated.",
+        },
+      ];
+
+  return {
+    id: `saved-${activity.id}`,
+    dbId: activity.id,
+    rowType: "saved",
+    sourceId: activity.sourceRef || activity.id,
+    sourceKind: activity.sourceType || "saved",
+    area: activity.parameter,
+    title: activity.title,
+    owner: activity.owner || "Unassigned",
+    dueDate: formatDraftDate(activity.dueDate),
+    status: activity.status,
+    rag: activity.rag,
+    expectedLift: activity.expectedLift || "Governed lift",
+    confidence: "Saved",
+    ruleId: activity.ruleId,
+    parameter: activity.parameter,
+    impactedMetric: activity.impactedMetric,
+    weakSignal: activity.weakSignal,
+    currentValue: activity.currentValue,
+    targetValue: activity.targetValue,
+    triggerLogic: activity.triggerLogic,
+    evidenceLiftPolicy: activity.evidenceLiftPolicy,
+    activityScoreLogic: activity.activityScoreLogic,
+    approvalSla: activity.approvalSla,
+    reviewCadence: activity.reviewCadence,
+    scoreBand: activity.triggerLogic?.scoreBand?.replace(" band is active.", "") ?? null,
+    threshold: extractThresholdNumber(activity.triggerLogic?.threshold),
+    targetScore: extractTargetNumber(activity.triggerLogic?.threshold),
+    thresholdSource: activity.triggerLogic?.threshold?.split(":")[0] ?? null,
+    thresholdReason: activity.triggerLogic?.overrideReason ?? null,
+    successCriteria: activity.successCriteria,
+    evidenceRequired: activity.evidenceRequired,
+    reason: activity.weakSignal || activity.successCriteria,
+    evidence,
+    evidenceReviews: activity.evidenceReviews,
+    latestPendingEvidence: pendingEvidence,
+    nextStep: activity.nextStep,
+    activityScorePct: activity.activityScorePct,
+    reviewState: `Activity score stage: ${activity.activityScorePct}%`,
+  };
+}
+
+function mapPersistedMeetingActivityToCard(activity) {
+  const row = mapPersistedRuleActivityToRow(activity);
+  const sourceLabel =
+    activity.triggerLogic?.source === "llm_fallback"
+      ? "Fireflies meeting (LLM fallback)"
+      : activity.triggerLogic?.source === "summary_derived"
+        ? "Fireflies meeting (summary derived)"
+        : "Fireflies meeting action";
+
+  return {
+    ...row,
+    id: `meeting-saved-${activity.id}`,
+    persisted: true,
+    sourceId: activity.sourceRef || activity.id,
+    sourceKind: "fireflies_meeting",
+    healthArea: row.area,
+    meetingTitle: sourceLabel,
+    meetingDate: formatDraftDate(activity.generatedAt),
+    sourceExcerpt: activity.weakSignal,
+    confidence: activity.rag === "R" ? "High" : activity.rag === "G" ? "Low" : "Medium",
+    urgency: activity.rag,
+  };
+}
+
+function getSuggestionSourceRef(item) {
+  return item.sourceId ?? item.id;
+}
+
+function extractThresholdNumber(summary = "") {
+  const match = summary.match(/threshold\s+([0-9.]+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function extractTargetNumber(summary = "") {
+  const match = summary.match(/target\s+([0-9.]+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function getFallbackRuleId(sourceKind) {
+  if (sourceKind === "opportunity") return "OPP-01";
+  if (sourceKind === "meeting") return "MEET-01";
+  return "MANUAL-01";
+}
+
+function buildActivityRuleActivityInput({ accountId, target, form }) {
+  const { kind, item } = target;
+  const sourceRef = getSuggestionSourceRef(item);
+  const parameter = item.parameter ?? item.healthArea ?? item.area ?? "Relationship";
+  return {
+    accountId,
+    ruleId: item.ruleId ?? getFallbackRuleId(kind),
+    parameter,
+    impactedMetric: item.impactedMetric ?? parameter,
+    title: form.title.trim(),
+    nextStep: form.nextStep.trim(),
+    owner: form.owner.trim(),
+    dueDate: form.dueDate,
+    rag: item.urgency ?? item.rag ?? mapPriorityToRag(item.priority),
+    weakSignal: item.weakSignal ?? item.reason ?? item.sourceExcerpt ?? form.nextStep.trim(),
+    currentValue: item.currentValue ?? null,
+    targetValue: item.targetValue ?? null,
+    expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
+    successCriteria: item.successCriteria ?? "Complete the activity and review score impact.",
+    evidenceRequired: item.evidenceRequired ?? ["Activity evidence"],
+    triggerLogic: item.triggerLogic ?? null,
+    evidenceLiftPolicy: item.evidenceLiftPolicy ?? null,
+    activityScoreLogic: item.activityScoreLogic ?? null,
+    approvalSla: item.approvalSla ?? null,
+    reviewCadence: item.reviewCadence ?? null,
+    scoreBand: item.scoreBand ?? null,
+    threshold: item.threshold ?? null,
+    targetScore: item.targetScore ?? null,
+    thresholdSource: item.thresholdSource ?? null,
+    thresholdReason: item.thresholdReason ?? null,
+    sourceType: kind,
+    sourceRef,
+  };
+}
+
+function buildRejectedRuleActivityInput({ accountId, target, reason, reviewer }) {
+  const sourceKind = target.sourceKind ?? target.healthArea ?? "suggestion";
+  const parameter = target.parameter ?? target.healthArea ?? target.area ?? "Relationship";
+  return {
+    accountId,
+    ruleId: target.ruleId ?? getFallbackRuleId(sourceKind),
+    parameter,
+    impactedMetric: target.impactedMetric ?? parameter,
+    title: target.title,
+    reason,
+    reviewer,
+    rag: target.urgency ?? target.rag ?? mapPriorityToRag(target.priority),
+    weakSignal: target.weakSignal ?? target.reason ?? target.sourceExcerpt ?? reason,
+    currentValue: target.currentValue ?? null,
+    targetValue: target.targetValue ?? null,
+    expectedLift: target.expectedLift ?? "",
+    successCriteria: target.successCriteria ?? "Rejected by reviewer.",
+    evidenceRequired: target.evidenceRequired ?? ["Rejection reason"],
+    triggerLogic: target.triggerLogic ?? null,
+    evidenceLiftPolicy: target.evidenceLiftPolicy ?? null,
+    activityScoreLogic: target.activityScoreLogic ?? null,
+    approvalSla: target.approvalSla ?? null,
+    reviewCadence: target.reviewCadence ?? null,
+    sourceType: sourceKind,
+    sourceRef: getSuggestionSourceRef(target),
+  };
+}
+
+function createInitialEvidenceForm(row, submitterName) {
+  return {
+    submittedBy: submitterName ?? "Unknown",
+    evidenceQuality: "Action tracker plus note",
+    title: row ? `Evidence for ${row.title}` : "",
+    notes: "",
+    artifactUrl: "",
+  };
+}
+
+function buildEvidenceChecklistPayload(evidenceQuality) {
+  const checks = {
+    "Meeting note only": [
+      "Meeting title/date is present",
+      "Action is explicit",
+      "Account/client context is present",
+      "Owner or next step is mentioned",
+    ],
+    "Action tracker plus note": [
+      "Meeting note is present",
+      "Owner is assigned",
+      "Due date is assigned",
+      "Action tracker or task reference is present",
+    ],
+    "Completed action plus outcome proof": [
+      "Completion evidence is present",
+      "Outcome/result is documented",
+      "Client or internal validation exists",
+      "Reviewer can tie outcome to impacted metric",
+    ],
+  };
+
+  return {
+    evidenceQuality,
+    checks: checks[evidenceQuality] ?? [],
+  };
+}
+
+function scoreAreaToParameter(area) {
+  const map = {
+    relationship: "Relationship",
+    project: "Project",
+    resource: "Resource",
+    financial: "Financial",
+    risk: "Risk",
+    csat: "CSAT",
+    contract: "Financial",
+    white_space: "Growth",
+  };
+  return map[area] ?? area;
 }
 
 function sortActivityRows(rows) {
   const rowTypeOrder = {
-    draft: 0,
+    saved: 0,
     suggested: 1,
     existing: 2,
   };
@@ -3782,6 +4564,275 @@ function EscalationsTab({ list }) {
     </div>
   );
 }
+
+function MeetingHistoryTab({ account, profile }) {
+  const queryClient = useQueryClient();
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canSync = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const [syncStatus, setSyncStatus] = useState("");
+  const { data: meetings = [], isLoading } = useQuery({
+    queryKey: ["fireflies-meeting-summaries", account.id],
+    queryFn: () => fetchFirefliesMeetingSummaries(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { mutate: syncFirefliesMeetings, isPending: syncingMeetings } = useMutation({
+    mutationFn: () =>
+      fetchFirefliesRequiredActionItems({
+        data: {
+          accountId: account.id,
+          limit: 10,
+          daysBack: 60,
+        },
+      }),
+    onSuccess: (result) => {
+      setSyncStatus(result.status ?? "Fireflies meetings synced.");
+      queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+    },
+    onError: (error) => {
+      setSyncStatus(error?.message ?? "Fireflies meeting sync failed.");
+    },
+  });
+
+  const actionCount = meetings.reduce(
+    (total, meeting) => total + (meeting.derivedActionItems?.length ?? 0),
+    0,
+  );
+  const opportunityCount = meetings.reduce(
+    (total, meeting) => total + (meeting.derivedOpportunities?.length ?? 0),
+    0,
+  );
+  const summaryDerivedCount = meetings.reduce(
+    (total, meeting) =>
+      total +
+      (meeting.derivedActionItems ?? []).filter((item) => item.actionSource === "summary_derived")
+        .length,
+    0,
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-card border rounded-xl p-6 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div className="space-y-2">
+          <h3 className="text-sm font-bold">Fireflies Meeting History</h3>
+          <p className="text-xs text-muted-foreground max-w-3xl">
+            Each synced meeting stores its Fireflies summary, raw action items, agent-derived action
+            items, and guardrail diagnostics for {account.name}.
+          </p>
+          <p
+            className={`text-[11px] ${
+              syncStatus.includes("failed") || syncStatus.includes("Missing")
+                ? "text-crit"
+                : "text-muted-foreground"
+            }`}
+          >
+            {syncStatus || "Latest saved meetings appear below after Fireflies sync runs."}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!canSync || syncingMeetings}
+          onClick={() => syncFirefliesMeetings()}
+        >
+          {syncingMeetings && <Loader2 className="size-3.5 animate-spin mr-1" />}
+          Sync Fireflies
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <MiniStat label="Meetings saved" value={isLoading ? "Loading" : `${meetings.length}`} />
+        <MiniStat label="Action items detected" value={`${actionCount}`} />
+        <MiniStat label="Opportunities detected" value={`${opportunityCount}`} />
+        <MiniStat label="Summary-derived actions" value={`${summaryDerivedCount}`} />
+      </div>
+
+      {isLoading ? (
+        <div className="py-16 text-center text-xs text-muted-foreground">
+          Loading meeting history...
+        </div>
+      ) : meetings.length ? (
+        <div className="space-y-4">
+          {meetings.map((meeting) => (
+            <div key={meeting.id} className="bg-card border rounded-xl overflow-hidden">
+              <div className="px-6 py-4 border-b flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-bold leading-snug">{meeting.title}</h3>
+                    {meeting.agentDiagnostics?.summaryFallbackUsed && (
+                      <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                        Summary derived
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {formatMeetingHistoryDate(meeting.meetingDate)} · synced{" "}
+                    {formatMeetingHistoryDate(meeting.syncedAt)}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span className="text-[10px] font-bold uppercase rounded-full bg-muted text-muted-foreground px-2 py-1">
+                    {(meeting.derivedActionItems ?? []).length} actions
+                  </span>
+                  <span className="text-[10px] font-bold uppercase rounded-full bg-success/10 text-success px-2 py-1">
+                    {(meeting.derivedOpportunities ?? []).length} opportunities
+                  </span>
+                  {meeting.transcriptUrl && (
+                    <a
+                      href={meeting.transcriptUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] font-bold uppercase tracking-wide text-accent"
+                    >
+                      Transcript
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div className="space-y-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                    Summary
+                  </p>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {meeting.overview || meeting.shortSummary || "No summary text available."}
+                  </p>
+                </div>
+
+                {(meeting.derivedActionItems ?? []).length ? (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      Agent action items
+                    </p>
+                    <div className="grid gap-3">
+                      {meeting.derivedActionItems.map((item) => (
+                        <div key={item.id} className="rounded-lg border bg-muted/20 p-3 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <AreaBadge area={item.healthArea} />
+                            <RuleBadge ruleId={item.ruleId} />
+                            <ConfidenceBadge confidence={item.confidence} />
+                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
+                              {formatMeetingActionSource(item.actionSource)}
+                            </span>
+                          </div>
+                          <p className="text-sm font-semibold">{item.title}</p>
+                          <p className="text-xs text-muted-foreground">{item.expectedLift}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No action item passed the guarded activity rules for this meeting.
+                  </p>
+                )}
+
+                {(meeting.derivedOpportunities ?? []).length ? (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      Agent opportunities
+                    </p>
+                    <div className="grid gap-3">
+                      {meeting.derivedOpportunities.map((opportunity) => (
+                        <div
+                          key={opportunity.id}
+                          className="rounded-lg border bg-success/5 p-3 space-y-2"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <AreaBadge area={opportunity.category} />
+                            <ConfidenceBadge confidence={opportunity.confidence} />
+                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
+                              {formatMeetingActionSource(opportunity.sourceType)}
+                            </span>
+                          </div>
+                          <p className="text-sm font-semibold">{opportunity.title}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {formatCurrency(opportunity.potential ?? 0)} · {opportunity.nextStep}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No commercial or retention opportunity passed the guarded opportunity rules.
+                  </p>
+                )}
+
+                <details className="group rounded-lg border bg-muted/20 text-xs">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                    <span className="font-bold uppercase tracking-widest text-muted-foreground">
+                      Meeting details
+                    </span>
+                    <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                  </summary>
+                  <div className="border-t p-3 space-y-3">
+                    <MiniStat
+                      label="Participants"
+                      value={
+                        meeting.participants?.length
+                          ? meeting.participants.join(", ")
+                          : "Not available"
+                      }
+                    />
+                    <MiniStat
+                      label="Raw Fireflies action items"
+                      value={meeting.actionItems || "No explicit action items from Fireflies."}
+                    />
+                    <MiniStat
+                      label="Agent diagnostics"
+                      value={`Source: ${formatMeetingActionSource(
+                        meeting.agentDiagnostics?.actionSource,
+                      )}; candidates: ${
+                        meeting.agentDiagnostics?.candidateCount ?? 0
+                      }; accepted: ${
+                        meeting.agentDiagnostics?.acceptedCount ?? 0
+                      }; opportunity candidates: ${
+                        meeting.agentDiagnostics?.opportunity?.candidateCount ?? 0
+                      }; opportunities: ${
+                        meeting.agentDiagnostics?.opportunity?.acceptedCount ?? 0
+                      }`}
+                    />
+                  </div>
+                </details>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-card border rounded-xl p-12 text-center">
+          <Clock className="size-6 text-muted-foreground mx-auto mb-2" />
+          <p className="text-sm text-muted-foreground">No Fireflies meetings saved yet.</p>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Sync Fireflies to save meeting summaries and auto-create guarded activity items.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatMeetingHistoryDate(value) {
+  if (!value) return "Recent";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatMeetingActionSource(source) {
+  if (source === "llm_fallback") return "LLM fallback";
+  if (source === "summary_derived") return "Summary derived";
+  if (source === "explicit_action_items") return "Fireflies action item";
+  return "Meeting agent";
+}
+
 /* ============================== TAB 7: Client History ============================== */
 function ClientHistoryTab({ accountId }) {
   const { data: history = [], isLoading } = useQuery({

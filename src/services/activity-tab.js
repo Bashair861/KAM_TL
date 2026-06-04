@@ -1,18 +1,28 @@
+import {
+  GLOBAL_ACTIVITY_RULE_MATRIX,
+  evaluateActivityScoreRule,
+} from "@/services/activity-score-matrix";
+
 export const ACTIVITY_TAB_AREAS = [
   "KYC",
+  "Health",
   "Relationship",
   "Project",
   "Resource",
   "Financial",
   "Risk",
   "Escalation",
-  "Growth",
-  "Retention",
   "CSAT",
 ];
 
 const AREA_ORDER = new Map(ACTIVITY_TAB_AREAS.map((area, index) => [area, index]));
 const HIGH_VALUE_THRESHOLD = 100_000;
+const RETENTION_GROWTH_AREAS = new Set(["Growth", "Retention"]);
+const RETENTION_GROWTH_RULE_IDS = new Set(["RET-01", "GROW-01", "GROW-02"]);
+
+export function isRetentionGrowthActivityArea(area) {
+  return RETENTION_GROWTH_AREAS.has(area);
+}
 
 function toId(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -24,6 +34,13 @@ function buildEvidence({ source, sourceType, date, excerpt, reason }) {
 
 function getScoreSignals(account) {
   return [
+    {
+      key: "health",
+      area: "Health",
+      label: "Health",
+      block: { score: account.health, metrics: [] },
+      metricPrefix: "Overview",
+    },
     {
       key: "relationship",
       area: "Relationship",
@@ -89,6 +106,10 @@ function isMeetingSource(source = "") {
 
 function isEscalationSource(source = "") {
   return /escalation/i.test(source);
+}
+
+function isRetentionOpportunitySource(source = "") {
+  return /retention|renewal|churn|recovery/i.test(source);
 }
 
 function derivePriority(opportunity, account) {
@@ -161,7 +182,10 @@ function buildOpportunityEvidence(opportunity, account) {
 
 function buildBackendOpportunities(account, opportunities) {
   return (opportunities ?? []).map((opportunity) => {
-    const healthArea = isEscalationSource(opportunity.source) ? "Retention" : "Growth";
+    const healthArea =
+      isEscalationSource(opportunity.source) || isRetentionOpportunitySource(opportunity.source)
+        ? "Retention"
+        : "Growth";
     const item = {
       id: `opp-${opportunity.id}`,
       title: opportunity.title,
@@ -262,81 +286,57 @@ function buildRetentionOpportunity(account, escalations) {
   };
 }
 
-function buildMissingKycSuggestion(account) {
-  const fields = [
-    ["Business info", account.businessInfo],
-    ["Client history", account.clientHistory],
-    ["Competitors", account.competitors?.length ? account.competitors.join(", ") : ""],
-    ["Main business flow", account.mainBusinessFlow],
-    ["Primary contact", account.primaryContact?.name],
-    ["Team size", account.teamSize],
-  ];
-  const missing = fields.filter(
-    ([, value]) => value === null || value === undefined || value === "",
-  );
-  if (!missing.length) return null;
+function buildScoreRecommendation(account, escalations, rule, scoreHistory, thresholdOverrides) {
+  const signal = evaluateActivityScoreRule(rule, account, {
+    escalations,
+    scoreHistory,
+    thresholdOverrides,
+  });
+  if (!signal) return null;
 
   return {
-    id: `rag-kyc-${account.id}`,
-    title: "Complete missing account intelligence fields",
-    urgency: "A",
-    healthArea: "KYC",
-    reason: `${missing.length} KYC fields are incomplete, which weakens scoring context and action planning.`,
-    expectedLift: "+KYC health",
-    confidence: "High",
-    nextStep: "Fill the missing account fields in Overview",
+    id: `rag-${signal.ruleId.toLowerCase()}-${account.id}`,
+    ruleId: signal.ruleId,
+    parameter: signal.parameter,
+    impactedMetric: signal.impactedMetric,
+    weakSignal: signal.weakSignal,
+    currentValue: signal.currentValue,
+    targetValue: signal.targetValue,
+    triggerLogic: signal.triggerLogic,
+    evidenceLiftPolicy: signal.evidenceLiftPolicy,
+    activityScoreLogic: signal.activityScoreLogic,
+    approvalSla: signal.approvalSla,
+    reviewCadence: signal.reviewCadence,
+    successCriteria: signal.successCriteria,
+    evidenceRequired: signal.evidenceRequired,
+    scoreBand: signal.scoreBand,
+    threshold: signal.threshold,
+    targetScore: signal.targetScore,
+    thresholdSource: signal.thresholdSource,
+    thresholdReason: signal.thresholdReason,
+    title: signal.title,
+    urgency: signal.urgency,
+    healthArea: signal.parameter,
+    reason: signal.reason,
+    expectedLift: signal.expectedLift,
+    confidence: signal.confidence,
+    nextStep: signal.nextStep,
     evidence: [
       buildEvidence({
-        source: "Overview",
-        sourceType: "KYC/Account health",
-        date: "Today",
-        excerpt: `Missing fields: ${missing.map(([label]) => label).join(", ")}.`,
-        reason: "KYC completeness improves account-quality signals and action quality.",
-      }),
-    ],
-  };
-}
-
-function buildScoreRecommendation(account, escalations, config) {
-  const block = config.block;
-  if (!block) return null;
-
-  const score = block.score ?? 0;
-  if (score >= config.threshold) return null;
-
-  const lowestMetric = getLowestMetric(block);
-  const hasEscalation = (escalations ?? []).length > 0;
-  const urgency =
-    config.forceUrgency ??
-    (score <= config.redThreshold || (config.area === "Retention" && account.renewalDays <= 90)
-      ? "R"
-      : "A");
-
-  return {
-    id: `rag-${config.key}-${account.id}`,
-    title: config.title(account),
-    urgency,
-    healthArea: config.area,
-    reason: config.reason(account, lowestMetric),
-    expectedLift: config.expectedLift(account),
-    confidence: hasEscalation && config.area === "Retention" ? "High" : config.confidence(score),
-    nextStep: config.nextStep(account),
-    evidence: [
-      buildEvidence({
-        source: config.metricPrefix,
-        sourceType: config.metricPrefix,
+        source: signal.source,
+        sourceType: signal.sourceType,
         date: "Current score snapshot",
-        excerpt: `${config.label} score is ${score}/10. ${summarizeMetrics(block)}`,
-        reason: config.evidenceReason,
+        excerpt: signal.excerpt,
+        reason: signal.evidenceReason,
       }),
-      ...(config.area === "Retention" && hasEscalation
+      ...(signal.parameter === "Retention" && (escalations ?? []).length
         ? [
             buildEvidence({
               source: "Escalation",
               sourceType: "Escalation",
               date: "Open",
-              excerpt: `${escalations[0].title} is still open and can affect renewal confidence.`,
-              reason: "Open escalations make this activity more urgent.",
+              excerpt: `${escalations[0].title} is currently active and can influence renewal sentiment.`,
+              reason: "Escalation context increases urgency for a recovery plan.",
             }),
           ]
         : []),
@@ -344,151 +344,14 @@ function buildScoreRecommendation(account, escalations, config) {
   };
 }
 
-function buildRagRecommendations(account, escalations) {
-  const configs = [
-    {
-      key: "relationship",
-      area: "Relationship",
-      label: "Relationship",
-      block: account.relationshipHealth,
-      metricPrefix: "Score Marking Matrics",
-      threshold: 8.5,
-      redThreshold: 7.2,
-      title: () => `Rebuild executive sponsor cadence with ${account.primaryContact.name}`,
-      reason: (currentAccount, lowestMetric) =>
-        `Relationship score is ${currentAccount.relationshipHealth.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} is the weakest live signal` : ""}.`,
-      expectedLift: () => "+1.2 Relationship",
-      nextStep: () => "Lock a sponsor touchpoint before the next business review",
-      confidence: (score) => (score <= 7.4 ? "High" : "Medium"),
-      evidenceReason:
-        "Low relationship signals should be converted into deliberate sponsor coverage.",
-    },
-    {
-      key: "project",
-      area: "Project",
-      label: "Project",
-      block: account.projectHealth,
-      metricPrefix: "Score Marking Matrics",
-      threshold: 8.3,
-      redThreshold: 7.0,
-      title: () => `Run an architecture and delivery review with ${account.primaryContact.role}`,
-      reason: (currentAccount, lowestMetric) =>
-        `Project score is ${currentAccount.projectHealth.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} needs attention` : ""}.`,
-      expectedLift: () => "+1.5 Project",
-      nextStep: () => "Book a working session with delivery and client technical leads",
-      confidence: (score) => (score <= 7.5 ? "High" : "Medium"),
-      evidenceReason:
-        "Delivery health gaps should be addressed before they become client-visible risk.",
-    },
-    {
-      key: "resource",
-      area: "Resource",
-      label: "Resource",
-      block: account.resourceHealth,
-      metricPrefix: "Score Marking Matrics",
-      threshold: 8.2,
-      redThreshold: 7.5,
-      title: () => "Strengthen backup coverage for critical account roles",
-      reason: (currentAccount) =>
-        `Resource score is ${currentAccount.resourceHealth.score}/10 with ${currentAccount.resourceHealth.criticalResources} critical roles and ${currentAccount.resourceHealth.leavesThisMonth} leave events this month.`,
-      expectedLift: () => "+1.3 Resource",
-      nextStep: () => "Confirm backup owners and knowledge-transfer plan this week",
-      confidence: (score) => (score <= 7.5 ? "High" : "Medium"),
-      evidenceReason: "Resource resilience directly impacts delivery continuity and confidence.",
-    },
-    {
-      key: "financial",
-      area: "Financial",
-      label: "Financial",
-      block: account.financialHealth,
-      metricPrefix: "Score Marking Matrics",
-      threshold: 8.8,
-      redThreshold: 7.0,
-      title: () => "Refresh the value realization story for the current engagement",
-      reason: (currentAccount, lowestMetric) =>
-        `Financial score is ${currentAccount.financialHealth.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} is lagging the rest of the account` : ""}.`,
-      expectedLift: () => "+0.8 Financial",
-      nextStep: () => "Package measurable value outcomes for the next client review",
-      confidence: (score) => (score <= 7.5 ? "High" : "Medium"),
-      evidenceReason: "A stronger value story supports both retention and expansion.",
-    },
-    {
-      key: "risk",
-      area: "Risk",
-      label: "Risk",
-      block: account.riskScoring,
-      metricPrefix: "Score Marking Matrics",
-      threshold: 7.8,
-      redThreshold: 6.8,
-      title: () => "Run a risk review on delivery, competitor, and stakeholder blockers",
-      reason: (currentAccount, lowestMetric) =>
-        `Risk score is ${currentAccount.riskScoring.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} is the biggest warning signal` : ""}.`,
-      expectedLift: () => "+1.0 Risk",
-      nextStep: () => "Review blockers and assign owners before the next status update",
-      confidence: (score) => (score <= 7.0 ? "High" : "Medium"),
-      evidenceReason: "Risk signals should be addressed while they are still manageable.",
-    },
-    {
-      key: "csat",
-      area: "CSAT",
-      label: "CSAT",
-      block: account.csat,
-      metricPrefix: "Score Marking Matrics",
-      threshold: 8.9,
-      redThreshold: 7.5,
-      title: () => "Close the feedback loop on sponsor and delivery concerns",
-      reason: (currentAccount, lowestMetric) =>
-        `CSAT score is ${currentAccount.csat.score}/10${lowestMetric ? ` and ${lowestMetric.label.toLowerCase()} needs a follow-up response` : ""}.`,
-      expectedLift: () => "+1.1 CSAT",
-      nextStep: () => "Share an improvement update and confirm sentiment in the next touchpoint",
-      confidence: (score) => (score <= 7.8 ? "High" : "Medium"),
-      evidenceReason: "Customer feedback should be turned into clear follow-up commitments.",
-    },
-  ];
-
-  const recommendations = configs
-    .map((config) => buildScoreRecommendation(account, escalations, config))
+function buildRagRecommendations(account, escalations, scoreHistory, thresholdOverrides) {
+  const recommendations = GLOBAL_ACTIVITY_RULE_MATRIX.filter(
+    (rule) => !RETENTION_GROWTH_RULE_IDS.has(rule.ruleId),
+  )
+    .map((rule) =>
+      buildScoreRecommendation(account, escalations, rule, scoreHistory, thresholdOverrides),
+    )
     .filter(Boolean);
-
-  if (
-    account.retentionRisk !== "Low" ||
-    account.renewalDays <= 120 ||
-    (escalations ?? []).length > 0
-  ) {
-    recommendations.push({
-      id: `rag-retention-${account.id}`,
-      title: "Create a renewal and recovery action plan",
-      urgency: account.retentionRisk === "High" || account.renewalDays <= 90 ? "R" : "A",
-      healthArea: "Retention",
-      reason: `Retention risk is ${account.retentionRisk} with renewal in ${account.renewalDays} days.`,
-      expectedLift: "+Retention confidence",
-      confidence: (escalations ?? []).length ? "High" : "Medium",
-      nextStep: "Align recovery milestones, sponsor messaging, and renewal blockers",
-      evidence: [
-        buildEvidence({
-          source: "Overview",
-          sourceType: "Overview",
-          date: "Today",
-          excerpt: `Health ${account.health}, renewal in ${account.renewalDays} days, retention risk ${account.retentionRisk}.`,
-          reason: "Retention planning is needed before the renewal window narrows further.",
-        }),
-        ...((escalations ?? []).length
-          ? [
-              buildEvidence({
-                source: "Escalation",
-                sourceType: "Escalation",
-                date: "Open",
-                excerpt: `${escalations[0].title} is currently active and can influence renewal sentiment.`,
-                reason: "Escalation context increases urgency for a recovery plan.",
-              }),
-            ]
-          : []),
-      ],
-    });
-  }
-
-  const kycSuggestion = buildMissingKycSuggestion(account);
-  if (kycSuggestion) recommendations.push(kycSuggestion);
 
   return recommendations
     .sort((left, right) => {
@@ -497,8 +360,7 @@ function buildRagRecommendations(account, escalations) {
       const rightOrder = urgencyOrder[right.urgency] ?? 3;
       if (leftOrder !== rightOrder) return leftOrder - rightOrder;
       return (AREA_ORDER.get(left.healthArea) ?? 99) - (AREA_ORDER.get(right.healthArea) ?? 99);
-    })
-    .slice(0, 6);
+    });
 }
 
 function buildMeetingAction(account, record, index, fallbacks) {
@@ -655,6 +517,18 @@ function normalizeExistingArea(activity) {
 }
 
 function buildExistingEvidence(account, activity, area) {
+  if (area === "Health") {
+    return [
+      buildEvidence({
+        source: "Overview",
+        sourceType: "Overview",
+        date: "Current account state",
+        excerpt: `Overall health is ${account.health}/100 with retention risk ${account.retentionRisk}.`,
+        reason: "This existing activity is aligned to overall account health recovery.",
+      }),
+    ];
+  }
+
   const scoreSignal =
     getScoreSignals(account).find((signal) => signal.area === area)?.block ||
     account.relationshipHealth;
@@ -688,6 +562,24 @@ function mapExistingActivityRow(account, activity) {
     rag: activity.rag,
     expectedLift: activity.expectedLift || "—",
     confidence: "Confirmed",
+    ruleId: null,
+    parameter: area,
+    impactedMetric: "Existing activity",
+    weakSignal: "Existing activity is already tracked",
+    currentValue: null,
+    targetValue: null,
+    triggerLogic: null,
+    evidenceLiftPolicy: null,
+    activityScoreLogic: null,
+    approvalSla: null,
+    reviewCadence: null,
+    scoreBand: null,
+    threshold: null,
+    targetScore: null,
+    thresholdSource: null,
+    thresholdReason: null,
+    successCriteria: "Complete the existing activity and confirm the impact during review.",
+    evidenceRequired: ["Activity update"],
     reason: `Active ${area.toLowerCase()} plan already in progress for this account.`,
     evidence: buildExistingEvidence(account, activity, area),
     nextStep: activity.title,
@@ -708,13 +600,38 @@ function mapSuggestionToActivityRow(suggestion, sourceKind) {
     rag: suggestion.urgency ?? "A",
     expectedLift: suggestion.expectedLift,
     confidence: suggestion.confidence,
+    ruleId: suggestion.ruleId ?? null,
+    parameter: suggestion.parameter ?? suggestion.healthArea,
+    impactedMetric: suggestion.impactedMetric ?? suggestion.healthArea,
+    weakSignal: suggestion.weakSignal ?? suggestion.reason,
+    currentValue: suggestion.currentValue ?? null,
+    targetValue: suggestion.targetValue ?? null,
+    triggerLogic: suggestion.triggerLogic ?? null,
+    evidenceLiftPolicy: suggestion.evidenceLiftPolicy ?? null,
+    activityScoreLogic: suggestion.activityScoreLogic ?? null,
+    approvalSla: suggestion.approvalSla ?? null,
+    reviewCadence: suggestion.reviewCadence ?? null,
+    scoreBand: suggestion.scoreBand ?? null,
+    threshold: suggestion.threshold ?? null,
+    targetScore: suggestion.targetScore ?? null,
+    thresholdSource: suggestion.thresholdSource ?? null,
+    thresholdReason: suggestion.thresholdReason ?? null,
+    successCriteria:
+      suggestion.successCriteria ?? "Complete the activity and review score impact.",
+    evidenceRequired: suggestion.evidenceRequired ?? ["Activity evidence"],
     reason: suggestion.reason ?? suggestion.nextStep,
     evidence: suggestion.evidence,
     nextStep: suggestion.nextStep,
   };
 }
 
-export function buildActivityTabModel({ account, opportunities, escalations }) {
+export function buildActivityTabModel({
+  account,
+  opportunities,
+  escalations,
+  scoreHistory = [],
+  thresholdOverrides = [],
+}) {
   const backendOpportunities = buildBackendOpportunities(account, opportunities);
   const whitespaceOpportunity = buildWhitespaceOpportunity(account);
   const retentionOpportunity = buildRetentionOpportunity(account, escalations);
@@ -730,11 +647,18 @@ export function buildActivityTabModel({ account, opportunities, escalations }) {
       return (right.potentialValue ?? 0) - (left.potentialValue ?? 0);
     });
 
-  const ragRecommendations = buildRagRecommendations(account, escalations);
-  const meetingActions = buildMeetingActions(account, opportunities, escalations);
-  const existingRows = (account.activities ?? []).map((activity) =>
-    mapExistingActivityRow(account, activity),
+  const ragRecommendations = buildRagRecommendations(
+    account,
+    escalations,
+    scoreHistory,
+    thresholdOverrides,
   );
+  const meetingActions = buildMeetingActions(account, opportunities, escalations).filter(
+    (item) => !isRetentionGrowthActivityArea(item.healthArea),
+  );
+  const existingRows = (account.activities ?? [])
+    .map((activity) => mapExistingActivityRow(account, activity))
+    .filter((row) => !isRetentionGrowthActivityArea(row.area));
   const suggestedRows = [
     ...ragRecommendations.map((item) => mapSuggestionToActivityRow(item, "rag")),
     ...meetingActions.map((item) => mapSuggestionToActivityRow(item, "meeting")),
