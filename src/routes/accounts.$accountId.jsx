@@ -514,7 +514,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
                       {opportunity.category ? <AreaBadge area={opportunity.category} /> : null}
                     </div>
                     <p className="text-[11px] text-muted-foreground">{opportunity.source}</p>
-                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
                       <MiniStat
                         label="Potential value"
                         value={getPotentialValueLabel(opportunity)}
@@ -2584,7 +2584,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     setScheduleForm(createInitialMeetingForm(account, null, profile));
   }, [account.id, profile?.email, profile?.name]);
 
-  const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
+  const activeOpportunities = model.opportunities.filter(
+    (item) => isMeetingNoteOpportunity(item) && !resolvedItems[item.id],
+  );
   const activeRagRecommendations = model.ragRecommendations.filter(
     (item) => !resolvedItems[item.id],
   );
@@ -2592,10 +2594,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
 
   const activityRows = useMemo(() => {
     const visibleRows = model.activityRows.filter(
-      (row) => row.rowType === "existing" || !resolvedItems[row.id],
+      (row) => row.rowType === "existing",
     );
     return sortActivityRows([...visibleRows, ...draftRows]);
-  }, [draftRows, model.activityRows, resolvedItems]);
+  }, [draftRows, model.activityRows]);
 
   function openReview(kind, item) {
     setReviewTarget({ kind, item });
@@ -2745,10 +2747,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
               <Lightbulb className="size-4" />
             </span>
             <div>
-              <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
+              <h3 className="text-sm font-bold">Opportunities from meeting notes</h3>
               <p className="text-[11px] text-muted-foreground">
-                Client-specific opportunities sourced from account context, score gaps, escalation
-                signals, and Fireflies-derived meeting notes.
+                Expansion signals where the client asked for more resources, services, domains, or
+                follow-up discovery.
               </p>
             </div>
           </div>
@@ -2760,34 +2762,35 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         {activeOpportunities.length ? (
           <ul className="divide-y">
             {activeOpportunities.map((opportunity) => (
-              <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
+              <li key={opportunity.id} className="px-4 md:px-6 py-4">
                 <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
                   <div className="space-y-2 min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
-                      <PriorityBadge priority={opportunity.priority} />
-                      <ConfidenceBadge confidence={opportunity.confidence} />
                       <AreaBadge area={opportunity.healthArea} />
-                      <ParameterBadge parameter={opportunity.parameter} />
-                      {opportunity.approvalRequired && (
-                        <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
-                          Needs approval
-                        </span>
-                      )}
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                       {opportunity.source} · {opportunity.signalDate}
                     </p>
-                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
-                      <MiniStat
-                        label="Potential value"
-                        value={`+${formatCurrency(opportunity.potentialValue)}`}
-                      />
-                      <MiniStat label="Next step" value={opportunity.nextStep} />
-                      <div className="sm:col-span-3">
-                        <ActionItemsList items={opportunity.actionItems} />
+                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
+                      <div className="rounded-lg border bg-muted/20 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Client signal
+                        </p>
+                        <p className="text-xs leading-relaxed mt-1">
+                          {getPrimaryEvidenceExcerpt(opportunity) || opportunity.nextStep}
+                        </p>
                       </div>
-                      <MiniStat
+                      <div className="rounded-lg border bg-muted/20 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Suggested next step
+                        </p>
+                        <p className="text-xs leading-relaxed mt-1">{opportunity.nextStep}</p>
+                      </div>
+                      {false && (
+                        <>
+                      <div className="hidden">
+                        <MiniStat
                         label="Priority"
                         value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
                       />
@@ -2802,6 +2805,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         })
                       }
                     />
+                        </>
+                      )}
+                  </div>
                   </div>
                   <div className="flex flex-wrap items-start lg:items-center gap-2 shrink-0">
                     {canScheduleMeeting(opportunity) && (
@@ -2872,15 +2878,12 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="text-sm font-semibold leading-snug">{item.title}</p>
                           <AreaBadge area={item.healthArea} />
-                          <ConfidenceBadge confidence={item.confidence} />
-                          <ParameterBadge parameter={item.parameter} />
                         </div>
                         <p className="text-xs text-muted-foreground">{item.reason}</p>
-                        <div className="grid gap-2 sm:grid-cols-2 text-xs">
-                          <MiniStat label="Expected lift" value={item.expectedLift} />
-                          <MiniStat label="Next step" value={item.nextStep} />
-                        </div>
-                        <ActionItemsList items={item.actionItems} />
+                        <p className="text-xs">
+                          <span className="font-semibold">Next:</span> {item.nextStep}
+                        </p>
+                        {false && (
                         <EvidencePreview
                           evidence={item.evidence}
                           onView={() =>
@@ -2891,6 +2894,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                             })
                           }
                         />
+                        )}
                         <div className="flex flex-wrap gap-2">
                           <Button
                             size="sm"
@@ -2944,14 +2948,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
               Fireflies-derived meeting actions are shown here as reviewable suggestions only.
             </p>
           </div>
-          <div className="flex flex-col items-start md:items-end gap-1">
-            <Button size="sm" variant="outline" disabled>
-              Re-run extraction
-            </Button>
-            <p className="text-[10px] text-muted-foreground">
-              Connect a backend extraction hook to enable reruns.
-            </p>
-          </div>
         </div>
 
         {activeMeetingActions.length ? (
@@ -2963,18 +2959,26 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="text-sm font-semibold leading-snug">{item.title}</p>
                       <AreaBadge area={item.healthArea} />
-                      <ConfidenceBadge confidence={item.confidence} />
-                      <ParameterBadge parameter={item.parameter} />
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                       {item.meetingTitle} · {item.meetingDate}
                     </p>
-                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
-                      <MiniStat label="Source excerpt" value={item.sourceExcerpt} />
-                      <MiniStat label="Expected lift" value={item.expectedLift} />
-                      <MiniStat label="Next step" value={item.nextStep} />
+                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
+                      <div className="rounded-lg border bg-muted/20 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Meeting signal
+                        </p>
+                        <p className="text-xs leading-relaxed mt-1">{item.sourceExcerpt}</p>
+                      </div>
+                      <div className="rounded-lg border bg-muted/20 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                          Suggested next step
+                        </p>
+                        <p className="text-xs leading-relaxed mt-1">{item.nextStep}</p>
+                      </div>
                     </div>
                     <ActionItemsList items={item.actionItems} />
+                    {false && (
                     <EvidencePreview
                       evidence={item.evidence}
                       onView={() =>
@@ -2985,6 +2989,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                         })
                       }
                     />
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2 shrink-0">
                     <Button
@@ -3029,7 +3034,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
           <div>
             <h3 className="text-sm font-bold">Activities Across All Health Areas</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              Existing work, active AI suggestions, and accepted drafts live in one review queue.
+              Existing activities and accepted drafts live in one execution queue.
             </p>
           </div>
           <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
@@ -4031,6 +4036,28 @@ function getSuggestedMeetingContact(account, item) {
   }
 
   return contacts[0];
+}
+
+function isMeetingNoteOpportunity(item) {
+  const text = [
+    item?.source,
+    item?.title,
+    item?.nextStep,
+    item?.reason,
+    ...(item?.evidence ?? []).map((evidence) =>
+      [evidence.source, evidence.sourceType, evidence.excerpt].filter(Boolean).join(" "),
+    ),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return /fireflies|meeting notes|transcript|discovery call|client call|qbr|meeting|call/i.test(
+    text,
+  );
+}
+
+function getPrimaryEvidenceExcerpt(item) {
+  return item?.evidence?.find((evidence) => evidence.excerpt)?.excerpt ?? "";
 }
 
 function getMeetingSignalText(item) {
