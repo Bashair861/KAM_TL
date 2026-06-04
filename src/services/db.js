@@ -2,6 +2,7 @@ import { supabase } from "@/lib/supabase";
 import { normalizeRole } from "@/data/kam-data";
 import { createManagedAuthUser } from "@/services/user-admin";
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
+import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -42,6 +43,9 @@ function mapFlatAccount(r) {
     teamSize: r.team_size,
     competitors: r.competitors ?? [],
     mainBusinessFlow: r.main_business_flow,
+    linkedinUrl: r.linkedin_url ?? "",
+    linkedinSummary: r.linkedin_summary ?? "",
+    linkedinSummaryUpdatedAt: r.linkedin_summary_updated_at ?? null,
     assignedKamId: r.assigned_kam_id ?? null,
   };
 }
@@ -263,6 +267,11 @@ export async function createAccount(data) {
     is_startup: false,
     region: data.region || null,
     primary_contact_name: data.primaryContactName || null,
+    linkedin_url: data.linkedinUrl || null,
+    linkedin_summary: data.linkedinSummary || null,
+    ...(data.linkedinSummaryUpdatedAt
+      ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
+      : {}),
     assigned_kam_id: data.assignedKamId || null,
   }]);
   if (error) throw error;
@@ -283,6 +292,21 @@ export async function syncSalesforceMappedFields(accountId, payload) {
     data: {
       accountId,
       payload,
+      accessToken: session.access_token,
+    },
+  });
+}
+export async function generateAccountLinkedinSummary(accountId) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error("Please sign in again before generating a LinkedIn summary.");
+  }
+
+  return generateLinkedinSummaryServer({
+    data: {
+      accountId,
       accessToken: session.access_token,
     },
   });

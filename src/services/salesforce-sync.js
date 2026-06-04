@@ -10,6 +10,7 @@ const ACCOUNT_SYNC_COLUMNS = new Set([
   "region",
   "employees",
   "main_business_flow",
+  "linkedin_url",
 ]);
 const STAKEHOLDER_SYNC_COLUMNS = new Set(["name", "role", "email", "influence", "last_contact"]);
 const INFLUENCE_VALUES = new Set(["Champion", "Decision Maker", "Influencer", "Blocker"]);

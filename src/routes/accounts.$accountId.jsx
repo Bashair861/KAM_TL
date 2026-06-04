@@ -13,6 +13,7 @@ import {
   updateHealthBlock,
   fetchAccountHistory,
   logAccountChanges,
+  generateAccountLinkedinSummary,
 } from "@/services/db";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { useAuth } from "@/context/AuthContext";
@@ -41,6 +42,7 @@ import {
   Sparkles,
   Lightbulb,
   Loader2,
+  ExternalLink,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -81,6 +83,43 @@ function displaySyncValue(value) {
   if (!hasSyncValue(value)) return "-";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value);
+}
+function externalUrl(value) {
+  const url = String(value ?? "").trim();
+  if (!url) return "";
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+function LinkedinSummaryParagraph({ text }) {
+  const chunks = String(text ?? "").split(/(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi);
+  return chunks.map((chunk, index) => {
+    if (!/^(https?:\/\/|www\.)/i.test(chunk)) return <span key={index}>{chunk}</span>;
+    const [, urlText = chunk, suffix = ""] = chunk.match(/^(.+?)([.,);:]+)?$/) ?? [];
+    return (
+      <span key={index}>
+        <a
+          href={externalUrl(urlText)}
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent hover:underline break-all"
+        >
+          {urlText}
+        </a>
+        {suffix}
+      </span>
+    );
+  });
+}
+function formatLinkedinSummaryUpdatedAt(value) {
+  if (!value) return "Last updated: Not generated yet";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Last updated: Not recorded";
+  return `Last updated: ${new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date)}`;
 }
 function joinSyncParts(parts) {
   return parts
@@ -170,6 +209,18 @@ function buildSalesforceMappingRows(bundle, account, fields) {
       ]),
       dbColumn: "business_info",
       fieldKey: "business",
+    },
+    {
+      id: "account.linkedinUrl",
+      kind: "account",
+      group: "Account Details",
+      destinationLabel: "LinkedIn URL",
+      destinationValue: fields.linkedinUrl,
+      sourceLabel: "Account.Company_LinkedIn__c",
+      sourceValue: sfAccount.Company_LinkedIn__c,
+      nextValue: sfAccount.Company_LinkedIn__c,
+      dbColumn: "linkedin_url",
+      fieldKey: "linkedinUrl",
     },
     {
       id: "account.history",
@@ -601,9 +652,22 @@ function OverviewTab({ account }) {
       team: String(account.teamSize),
       competitors: account.competitors.join(", "),
       flow: account.mainBusinessFlow,
-      // eslint-disable-next-line react-hooks/exhaustive-deps
+      linkedinUrl: account.linkedinUrl ?? "",
     }),
-    [account.id],
+    [
+      account.businessInfo,
+      account.clientHistory,
+      account.competitors,
+      account.engagementTenure,
+      account.industry,
+      account.isStartup,
+      account.linkedinUrl,
+      account.mainBusinessFlow,
+      account.mrrArr,
+      account.primaryContact.name,
+      account.revenue,
+      account.teamSize,
+    ],
   );
   const [fields, setFields] = useState(initialFields);
   const [savedSnapshot, setSavedSnapshot] = useState(initialFields);
@@ -630,6 +694,7 @@ function OverviewTab({ account }) {
     team: "Team Size",
     competitors: "Competitors",
     flow: "Main Business Flow",
+    linkedinUrl: "LinkedIn URL",
   };
   const { mutate: saveKyc, isPending: savingKyc } = useMutation({
     mutationFn: async () => {
@@ -648,6 +713,7 @@ function OverviewTab({ account }) {
           .map((s) => s.trim())
           .filter(Boolean),
         main_business_flow: fields.flow,
+        linkedin_url: fields.linkedinUrl || null,
       });
       const diffs = Object.keys(fields)
         .filter((k) => fields[k] !== savedSnapshot[k])
@@ -675,6 +741,11 @@ function OverviewTab({ account }) {
   const [salesforceMappingOpen, setSalesforceMappingOpen] = useState(false);
   const [selectedSalesforceRows, setSelectedSalesforceRows] = useState({});
   const [salesforceSyncError, setSalesforceSyncError] = useState("");
+  const [linkedinSummary, setLinkedinSummary] = useState(account.linkedinSummary ?? "");
+  const [linkedinSummaryUpdatedAt, setLinkedinSummaryUpdatedAt] = useState(
+    account.linkedinSummaryUpdatedAt ?? null,
+  );
+  const [linkedinSummaryError, setLinkedinSummaryError] = useState("");
   const salesforceMappingRows = useMemo(
     () => buildSalesforceMappingRows(salesforceLookup.bundle, account, fields),
     [salesforceLookup.bundle, account, fields],
@@ -750,6 +821,42 @@ function OverviewTab({ account }) {
     },
     onError: (error) => {
       setSalesforceSyncError(error.message ?? "Salesforce sync failed. Please try again.");
+    },
+  });
+  const { mutate: generateLinkedinSummary, isPending: generatingLinkedinSummary } = useMutation({
+    mutationFn: async () => {
+      if (!fields.linkedinUrl.trim()) {
+        throw new Error("Add a LinkedIn URL before generating the account summary.");
+      }
+      if (fields.linkedinUrl !== savedSnapshot.linkedinUrl) {
+        await updateAccountKyc(account.id, { linkedin_url: fields.linkedinUrl });
+      }
+      const result = await generateAccountLinkedinSummary(account.id);
+      await logAccountChanges(
+        account.id,
+        [
+          {
+            field: "Account's Linkedin Summary",
+            oldValue: linkedinSummary,
+            newValue: result.summary,
+          },
+        ],
+        profile?.name ?? "Unknown",
+      );
+      return result;
+    },
+    onSuccess: (result) => {
+      setLinkedinSummary(result.summary);
+      setLinkedinSummaryUpdatedAt(result.updatedAt ?? new Date().toISOString());
+      setLinkedinSummaryError("");
+      setSavedSnapshot((current) => ({ ...current, linkedinUrl: fields.linkedinUrl }));
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setLinkedinSummaryError(
+        error.message ?? "Unable to generate the LinkedIn summary. Please try again.",
+      );
     },
   });
   function runOcrSimulation() {
@@ -1065,6 +1172,124 @@ function OverviewTab({ account }) {
           multiline
         />
       </div>
+
+      <Card title="Account Details">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <ExternalLink className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  LinkedIn URL
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Account object field synced from Salesforce.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={fields.linkedinUrl}
+                  onChange={(event) =>
+                    setFields((current) => ({ ...current, linkedinUrl: event.target.value }))
+                  }
+                  placeholder="https://www.linkedin.com/company/example"
+                  className="flex-1 min-w-0 bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                {fields.linkedinUrl && (
+                  <a
+                    href={externalUrl(fields.linkedinUrl)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="size-9 border rounded-md flex items-center justify-center text-muted-foreground hover:text-accent hover:bg-muted transition-colors shrink-0"
+                    aria-label="Open LinkedIn URL"
+                  >
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                )}
+              </div>
+            ) : fields.linkedinUrl ? (
+              <a
+                href={externalUrl(fields.linkedinUrl)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-semibold text-accent hover:underline break-all"
+              >
+                {fields.linkedinUrl}
+              </a>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No LinkedIn URL saved.</p>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Account's Linkedin Summary">
+        <div className="space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              {["New job postings", "Major activities", "Competitors", "CEO updates"].map(
+                (metric) => (
+                  <span
+                    key={metric}
+                    className="px-2 py-1 rounded-md bg-muted text-[10px] font-bold uppercase tracking-wider text-muted-foreground"
+                  >
+                    {metric}
+                  </span>
+                ),
+              )}
+            </div>
+            <div className="flex flex-col items-start md:items-end gap-2">
+              <p className="text-[11px] font-semibold text-muted-foreground">
+                {generatingLinkedinSummary
+                  ? "Last updated: Updating now..."
+                  : formatLinkedinSummaryUpdatedAt(linkedinSummaryUpdatedAt)}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setLinkedinSummaryError("");
+                  generateLinkedinSummary();
+                }}
+                disabled={!editable || generatingLinkedinSummary || !fields.linkedinUrl.trim()}
+                className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
+              >
+                {generatingLinkedinSummary ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="size-3.5" />
+                )}
+                {generatingLinkedinSummary ? "Generating..." : "Generate Summary"}
+              </button>
+            </div>
+          </div>
+
+          {linkedinSummaryError && (
+            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">
+              {linkedinSummaryError}
+            </p>
+          )}
+
+          <div className="border rounded-lg bg-muted/20 p-4 min-h-32">
+            {linkedinSummary ? (
+              <div className="space-y-3">
+                {linkedinSummary.split(/\n{2,}/).map((paragraph, index) => (
+                  <p key={index} className="text-sm leading-6 text-foreground whitespace-pre-wrap">
+                    <LinkedinSummaryParagraph text={paragraph} />
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground italic">
+                No LinkedIn summary generated yet.
+              </p>
+            )}
+          </div>
+        </div>
+      </Card>
 
       {/* Fixed save bar — visible while dirty or briefly after save */}
       {editable && (isDirty || showSaved) && (

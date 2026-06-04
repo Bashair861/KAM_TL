@@ -45,6 +45,10 @@ NOTE: Share with teammates via password manager only — never via GitHub or cha
   # Get free key at: aistudio.google.com → Get API Key
   GEMINI_API_KEY=<your Gemini API key>
 
+  # Account LinkedIn summary can use Gemini or OpenAI (server-only)
+  OPENAI_API_KEY=<your OpenAI API key>
+  OPENAI_MODEL=gpt-5.4-mini
+
 Rules:
   - VITE_ prefix = exposed to browser. OK for anon/publishable keys only.
   - No VITE_ prefix = server/Node.js only. Required for all secret keys.
@@ -61,6 +65,7 @@ How env vars are consumed:
   - User invites:       src/services/user-admin.js — SUPABASE_SERVICE_ROLE_KEY (server fn)
   - Salesforce lookup:  src/services/salesforce.js — SALESFORCE_* vars (server fn)
   - Salesforce sync:    src/services/salesforce-sync.js — SALESFORCE_* + SERVICE_ROLE_KEY (server fn)
+  - LinkedIn summary:   src/services/linkedin-summary.js — GEMINI_API_KEY or OPENAI_API_KEY (server fn)
   - AI field mapping:   src/services/ai-mapping.js — GEMINI_API_KEY (server fn, not yet built)
 
 
@@ -180,6 +185,9 @@ health_scores additional column (added by migration):
 
 accounts additional column (added by migration):
   assigned_kam_id  text  REFERENCES profiles(id)  ← which KAM owns this account
+  linkedin_url     text  Salesforce Account Company_LinkedIn__c mapped into Aether KAM
+  linkedin_summary text  AI-generated Account's Linkedin Summary
+  linkedin_summary_updated_at timestamptz  Last successful summary generation time
 
 profiles additional column (added by add-user-management.sql and now in schema):
   is_active  boolean  DEFAULT true
@@ -382,7 +390,7 @@ WRITE functions:
     → Updates KYC columns on accounts table
     → fields: industry, business_info, client_history, revenue, mrr_arr,
               primary_contact_name, engagement_tenure, team_size,
-              competitors (array), main_business_flow
+              competitors (array), main_business_flow, linkedin_url, linkedin_summary
 
   updateHealthBlock(accountId, area, score, metricUpdates, kpiData)
     → UPSERTS health_scores: INSERTs if no row exists, UPDATEs if one does
@@ -608,6 +616,8 @@ Step 4: Create .env.local in project root
   SALESFORCE_CLIENT_SECRET=<Connected App Consumer Secret>
 
   GEMINI_API_KEY=<free Gemini API key — get at aistudio.google.com>
+  OPENAI_API_KEY=<OpenAI API key, if Gemini is not configured>
+  OPENAI_MODEL=gpt-5.4-mini
 
 Step 5: Run dev server
   bun run dev
@@ -639,6 +649,9 @@ For FRESH Supabase setup (first time only):
   10. SQL Editor: add-health-scores-insert-policy.sql
   11. SQL Editor: rename-ceo-role.sql
   12. SQL Editor: add-user-management.sql
+  13. SQL Editor: add-account-linkedin-url.sql
+  14. SQL Editor: add-linkedin-summary.sql
+  15. SQL Editor: add-linkedin-summary-updated-at.sql
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -709,7 +722,7 @@ What gets fetched (salesforce.js):
 What gets written (salesforce-sync.js):
   Account fields whitelist (ACCOUNT_SYNC_COLUMNS):
     industry, business_info, client_history, revenue, primary_contact_name,
-    primary_contact_role, region, employees, main_business_flow
+    primary_contact_role, region, employees, main_business_flow, linkedin_url
   Stakeholder fields whitelist (STAKEHOLDER_SYNC_COLUMNS):
     name, role, email, influence, last_contact
   Stakeholder matching: email first → name → insert as new row if no match.
