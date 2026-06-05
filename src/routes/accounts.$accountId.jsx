@@ -1,6 +1,7 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { formatCurrency, getRolePermissions } from "@/data/kam-data";
 import {
   fetchAccount,
@@ -20,6 +21,7 @@ import {
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { extractSowFields } from "@/services/sow-upload";
 import { useAuth } from "@/context/AuthContext";
+import { askAccountAi } from "@/services/ai";
 import {
   ArrowLeft,
   Building2,
@@ -51,7 +53,7 @@ import {
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
     meta: [
-      { title: `Account ${params.accountId} — Aether KAM` },
+      { title: `Account ${params.accountId} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Aether KAM` },
       { name: "description", content: "Client 360 detail view." },
     ],
   }),
@@ -109,7 +111,9 @@ function normalizeSourceKey(value) {
     url.search = "";
     return url.toString().replace(/\/$/, "").toLowerCase();
   } catch {
-    return String(value ?? "").replace(/\/$/, "").toLowerCase();
+    return String(value ?? "")
+      .replace(/\/$/, "")
+      .toLowerCase();
   }
 }
 
@@ -214,7 +218,11 @@ function formatSalesforceMoney(value) {
   if (!hasSyncValue(value)) return "";
   const amount = Number(value);
   if (Number.isNaN(amount)) return String(value);
-  return amount.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  return amount.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
 }
 function formatSalesforceRegion(account) {
   return [account?.BillingCity, account?.BillingStateCode, account?.BillingCountryCode]
@@ -230,11 +238,25 @@ function deriveStakeholderInfluence(contact) {
   return "Influencer";
 }
 function findStakeholderForContact(stakeholders, contact) {
-  const email = String(contact?.Email ?? "").trim().toLowerCase();
-  const name = String(contact?.Name ?? "").trim().toLowerCase();
+  const email = String(contact?.Email ?? "")
+    .trim()
+    .toLowerCase();
+  const name = String(contact?.Name ?? "")
+    .trim()
+    .toLowerCase();
   return (
-    stakeholders.find((stakeholder) => String(stakeholder.email ?? "").trim().toLowerCase() === email && email) ||
-    stakeholders.find((stakeholder) => String(stakeholder.name ?? "").trim().toLowerCase() === name && name) ||
+    stakeholders.find(
+      (stakeholder) =>
+        String(stakeholder.email ?? "")
+          .trim()
+          .toLowerCase() === email && email,
+    ) ||
+    stakeholders.find(
+      (stakeholder) =>
+        String(stakeholder.name ?? "")
+          .trim()
+          .toLowerCase() === name && name,
+    ) ||
     null
   );
 }
@@ -612,6 +634,7 @@ function AccountDetailPage() {
   const [tab, setTab] = useState("Overview");
   const [sowMessage, setSowMessage] = useState("");
   const [sowError, setSowError] = useState("");
+  const [askAiOpen, setAskAiOpen] = useState(false);
   const { data: accountEscalations = [] } = useQuery({
     queryKey: ["escalations", account.id],
     queryFn: () => fetchEscalations(account.id),
@@ -687,7 +710,8 @@ function AccountDetailPage() {
               </span>
             </div>
             <p className="text-[11px] md:text-xs text-muted-foreground truncate">
-              {account.industry} · {account.region} · {account.engagementTenure} tenure
+              {account.industry} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {account.region} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·{" "}
+              {account.engagementTenure} tenure
             </p>
           </div>
         </div>
@@ -697,6 +721,13 @@ function AccountDetailPage() {
               <Lock className="size-3" /> Read-only ({role})
             </span>
           )}
+          <button
+            onClick={() => setAskAiOpen(true)}
+            className="px-3 py-2 bg-accent text-white text-xs font-bold rounded-md hover:opacity-90 transition-opacity flex items-center gap-2"
+          >
+            <Sparkles className="size-3.5" />
+            Ask AI
+          </button>
           <div className="flex flex-col items-end gap-1">
             <div className="flex flex-wrap items-center justify-end gap-2">
               <input
@@ -730,7 +761,7 @@ function AccountDetailPage() {
               </button>
             </div>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Last sync with Jira · 4m ago
+              Last sync with Jira ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 4m ago
             </p>
             {(sowMessage || sowError) && (
               <p
@@ -861,6 +892,254 @@ function AccountDetailPage() {
           )}
         </div>
       </div>
+      <AskAiDrawer
+        account={account}
+        open={askAiOpen}
+        onClose={() => setAskAiOpen(false)}
+        profile={profile}
+      />
+    </div>
+  );
+}
+function AskAiDrawer({ account, open, onClose, profile }) {
+  const askAi = useServerFn(askAccountAi);
+  const [question, setQuestion] = useState("Draft a 30-day roadmap for this account.");
+  const [result, setResult] = useState(null);
+  const prompts = [
+    "What is the biggest retention risk for this client?",
+    "Draft a 30-day roadmap for this account.",
+    "What should I do before renewal?",
+    "Which growth opportunities should I prioritize?",
+    "Summarize this account for leadership.",
+  ];
+  const {
+    mutate: runAi,
+    isPending,
+    error,
+  } = useMutation({
+    mutationFn: async () =>
+      askAi({
+        data: {
+          scope: "account",
+          accountId: account.id,
+          question,
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
+        },
+      }),
+    onSuccess: setResult,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    setResult(null);
+  }, [open, account.id]);
+
+  if (!open) return null;
+
+  return (
+    <>
+      <button
+        aria-label="Close Ask AI"
+        className="fixed inset-0 z-40 bg-black/45"
+        onClick={onClose}
+      />
+      <aside className="fixed right-0 top-0 z-50 h-screen w-full max-w-xl bg-card border-l shadow-2xl flex flex-col">
+        <div className="px-5 py-4 border-b flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="size-8 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <Sparkles className="size-4" />
+              </span>
+              <div>
+                <h2 className="text-sm font-bold">Ask AI</h2>
+                <p className="text-[11px] text-muted-foreground">{account.name}</p>
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="size-8 rounded-md border flex items-center justify-center hover:bg-muted transition-colors"
+            aria-label="Close"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <div className="space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Suggested prompts
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {prompts.map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => setQuestion(prompt)}
+                  className="px-2.5 py-1.5 text-[11px] border rounded-md hover:bg-muted transition-colors text-left"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="space-y-2 block">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Question
+            </span>
+            <textarea
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              rows={4}
+              className="w-full rounded-lg border bg-background p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder="Ask about risk, renewal, growth, stakeholders, or next actions..."
+            />
+          </label>
+
+          <button
+            onClick={() => runAi()}
+            disabled={isPending || !question.trim()}
+            className="w-full h-10 rounded-md bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Sparkles className="size-4" />
+            )}
+            {isPending ? "Analyzing account" : "Generate recommendations"}
+          </button>
+
+          {error && (
+            <div className="border border-crit/30 bg-crit/10 text-crit rounded-lg p-3 text-xs">
+              {error.message}
+            </div>
+          )}
+
+          {result && <AiAnswer result={result} />}
+        </div>
+      </aside>
+    </>
+  );
+}
+function AiAnswer({ result }) {
+  const riskColor =
+    result.riskLevel === "critical"
+      ? "text-crit bg-crit/10 border-crit/20"
+      : result.riskLevel === "high"
+        ? "text-crit bg-crit/10 border-crit/20"
+        : result.riskLevel === "medium"
+          ? "text-warn bg-warn/10 border-warn/20"
+          : "text-success bg-success/10 border-success/20";
+
+  return (
+    <div className="space-y-4">
+      <div className="border rounded-xl p-4 bg-background">
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              AI summary
+            </p>
+            <p className="text-sm mt-1 leading-relaxed">{result.summary}</p>
+          </div>
+          <span
+            className={`px-2 py-1 rounded border text-[10px] uppercase font-bold shrink-0 ${riskColor}`}
+          >
+            {result.riskLevel}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+          <span className="font-mono uppercase">Source: {result.source}</span>
+          <span className="font-mono uppercase">
+            Confidence: {Math.round((result.confidence ?? 0) * 100)}%
+          </span>
+        </div>
+      </div>
+
+      <AiList title="Risks" items={result.risks} empty="No major risks returned." />
+      <AiList
+        title="Opportunities"
+        items={result.opportunities}
+        empty="No opportunities returned."
+      />
+      <AiList
+        title="Recommendations"
+        items={result.recommendations}
+        empty="No recommendations returned."
+      />
+
+      <div className="border rounded-xl p-4 bg-background">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">
+          Roadmap
+        </h3>
+        <div className="space-y-3">
+          {result.roadmap?.map((phase) => (
+            <div key={phase.phase} className="border rounded-lg p-3">
+              <p className="text-sm font-bold">{phase.phase}</p>
+              <ul className="mt-2 space-y-1.5">
+                {(phase.actions ?? []).map((action) => (
+                  <li key={action} className="text-xs flex gap-2">
+                    <CheckCircle2 className="size-3.5 text-success shrink-0 mt-0.5" />
+                    <span>{action}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {result.followUpQuestions?.length > 0 && (
+        <div className="border rounded-xl p-4 bg-background">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">
+            Follow-up questions
+          </h3>
+          <ul className="space-y-1.5">
+            {result.followUpQuestions.map((q) => (
+              <li key={q} className="text-xs flex gap-2">
+                <Lightbulb className="size-3.5 text-accent shrink-0 mt-0.5" />
+                <span>{q}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+function AiList({ title, items, empty }) {
+  return (
+    <div className="border rounded-xl p-4 bg-background">
+      <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">
+        {title}
+      </h3>
+      {items?.length ? (
+        <div className="space-y-3">
+          {items.map((item) => (
+            <div
+              key={`${item.title}-${item.evidence}`}
+              className="border-l-2 border-accent/40 pl-3"
+            >
+              <p className="text-sm font-semibold">{item.title}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {item.evidence ?? item.potential ?? item.timeframe ?? ""}
+              </p>
+              {(item.owner || item.timeframe || item.severity || item.potential) && (
+                <p className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mt-1">
+                  {[item.severity, item.potential, item.owner, item.timeframe]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{empty}</p>
+      )}
     </div>
   );
 }
@@ -901,8 +1180,7 @@ function OverviewTab({ account }) {
       business: account.businessInfo,
       history: account.clientHistory,
       revenue: account.revenue,
-      mrrArr: account.isStartup && account.mrrArr ? account.mrrArr : "N/A — not a startup client",
-      primary: account.primaryContact.name,
+      mrrArr: account.isStartup && account.mrrArr ? account.mrrArr : "N/A - not a startup client",
       tenure: account.engagementTenure,
       team: String(account.teamSize),
       competitors: account.competitors.join(", "),
@@ -920,7 +1198,6 @@ function OverviewTab({ account }) {
       account.linkedinUrl,
       account.mainBusinessFlow,
       account.mrrArr,
-      account.primaryContact.name,
       account.revenue,
       account.teamSize,
       account.websiteUrl,
@@ -1064,14 +1341,16 @@ function OverviewTab({ account }) {
       setFields((current) => {
         const next = { ...current };
         syncedRows.forEach((row) => {
-          if (row.kind === "account" && row.fieldKey) next[row.fieldKey] = displaySyncValue(row.dbValue);
+          if (row.kind === "account" && row.fieldKey)
+            next[row.fieldKey] = displaySyncValue(row.dbValue);
         });
         return next;
       });
       setSavedSnapshot((current) => {
         const next = { ...current };
         syncedRows.forEach((row) => {
-          if (row.kind === "account" && row.fieldKey) next[row.fieldKey] = displaySyncValue(row.dbValue);
+          if (row.kind === "account" && row.fieldKey)
+            next[row.fieldKey] = displaySyncValue(row.dbValue);
         });
         return next;
       });
@@ -1166,12 +1445,12 @@ function OverviewTab({ account }) {
   function runOcrSimulation() {
     if (!ocrFile) return;
     setOcrStatus("processing");
-    // Front-end simulation only — real OCR will be wired later
+    // Front-end simulation only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â real OCR will be wired later
     setTimeout(() => {
       setFields((f) => ({
         ...f,
-        industry: `${account.industry} · ${account.region} (auto-filled from "${ocrFile.name}")`,
-        business: `${account.businessInfo} — extracted from uploaded document.`,
+        industry: `${account.industry} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· ${account.region} (auto-filled from "${ocrFile.name}")`,
+        business: `${account.businessInfo} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â extracted from uploaded document.`,
       }));
       setOcrStatus("done");
     }, 1200);
@@ -1190,7 +1469,7 @@ function OverviewTab({ account }) {
           </p>
         </div>
         <span className="px-3 py-1.5 rounded-md bg-success/10 text-success text-[11px] font-bold uppercase tracking-wider border border-success/20 w-fit">
-          ✓ Key Account
+          ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ Key Account
         </span>
       </div>
 
@@ -1205,7 +1484,7 @@ function OverviewTab({ account }) {
             <p className="text-[11px] text-muted-foreground">
               Upload a brief, RFP, NDA, deck or scanned card. We'll extract industry, business,
               stakeholders, revenue and auto-populate any KYC field that's empty or unverified.
-              (Front-end preview — OCR engine wires up later.)
+              (Front-end preview ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â OCR engine wires up later.)
             </p>
           </div>
         </div>
@@ -1213,7 +1492,9 @@ function OverviewTab({ account }) {
           <label className="flex-1 flex items-center gap-2 border-2 border-dashed rounded-md px-3 py-2.5 cursor-pointer hover:bg-muted/40 transition-colors">
             <Upload className="size-4 text-muted-foreground" />
             <span className="text-xs truncate">
-              {ocrFile ? ocrFile.name : "Choose a file (PDF, PNG, JPG, DOCX)…"}
+              {ocrFile
+                ? ocrFile.name
+                : "Choose a file (PDF, PNG, JPG, DOCX)ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦"}
             </span>
             <input
               type="file"
@@ -1232,7 +1513,7 @@ function OverviewTab({ account }) {
           >
             <Sparkles className="size-3.5" />
             {ocrStatus === "processing"
-              ? "Extracting…"
+              ? "ExtractingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦"
               : ocrStatus === "done"
                 ? "Re-extract"
                 : "Extract & Auto-fill"}
@@ -1281,7 +1562,8 @@ function OverviewTab({ account }) {
               <p className="text-xs text-crit">{salesforceLookup.error}</p>
             ) : salesforceLookup.status === "not-found" ? (
               <p className="text-xs text-warn">
-                Account or company <span className="font-semibold">"{account.name}"</span> was not found in Salesforce.
+                Account or company <span className="font-semibold">"{account.name}"</span> was not
+                found in Salesforce.
               </p>
             ) : salesforceLookup.status === "found" && salesforceMappingRows.length > 0 ? (
               <button
@@ -1304,7 +1586,8 @@ function OverviewTab({ account }) {
         {ocrStatus === "done" && (
           <p className="text-[11px] text-success mt-2 flex items-center gap-1">
             <CheckCircle2 className="size-3" />
-            Extraction complete — 2 KYC fields updated. Review highlighted fields below.
+            Extraction complete ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â 2 KYC fields updated. Review
+            highlighted fields below.
           </p>
         )}
       </div>
@@ -1326,7 +1609,8 @@ function OverviewTab({ account }) {
                 className="mt-1 text-sm font-semibold bg-transparent border-b border-muted focus:outline-none focus:border-accent cursor-pointer"
               >
                 <option value="" disabled>
-                  — unassigned —
+                  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â unassigned
+                  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
                 </option>
                 {kamUsers.map((u) => (
                   <option key={u.id} value={u.id}>
@@ -1336,7 +1620,9 @@ function OverviewTab({ account }) {
               </select>
             ) : (
               <p className="text-sm font-semibold mt-0.5">
-                {kamUsers.find((u) => u.id === assignedKamId)?.name ?? profile?.name ?? "—"}
+                {kamUsers.find((u) => u.id === assignedKamId)?.name ??
+                  profile?.name ??
+                  "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
               </p>
             )}
           </div>
@@ -1359,7 +1645,7 @@ function OverviewTab({ account }) {
           <span className="text-success font-semibold">Key Account</span>
           <span className="text-muted-foreground">
             {" "}
-            · all accounts in our system are key accounts
+            ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· all accounts in our system are key accounts
           </span>
         </KycField>
 
@@ -1402,7 +1688,8 @@ function OverviewTab({ account }) {
           <ul className="text-[11px] text-muted-foreground mt-1 space-y-0.5">
             {account.stakeholders.slice(0, 3).map((s) => (
               <li key={s.name}>
-                · {s.name} — {s.role} <span className="text-accent">({s.influence})</span>
+                ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {s.name} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â {s.role}{" "}
+                <span className="text-accent">({s.influence})</span>
               </li>
             ))}
           </ul>
@@ -1624,10 +1911,7 @@ function OverviewTab({ account }) {
           )}
 
           <div className="border rounded-lg bg-muted/20 p-4 min-h-32">
-            <SummaryBody
-              summary={linkedinSummary}
-              emptyText="No LinkedIn summary generated yet."
-            />
+            <SummaryBody summary={linkedinSummary} emptyText="No LinkedIn summary generated yet." />
           </div>
         </div>
       </Card>
@@ -1684,14 +1968,14 @@ function OverviewTab({ account }) {
         </div>
       </Card>
 
-      {/* Fixed save bar — visible while dirty or briefly after save */}
+      {/* Fixed save bar ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â visible while dirty or briefly after save */}
       {editable && (isDirty || showSaved) && (
         <div className="fixed bottom-0 left-0 md:left-64 right-0 z-50 border-t bg-card px-6 py-3 flex items-center justify-between shadow-lg">
           <p
             className={`text-xs font-medium ${showSaved && !isDirty ? "text-success" : "text-muted-foreground"}`}
           >
             {showSaved && !isDirty
-              ? "✓ KYC fields saved successfully"
+              ? "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ KYC fields saved successfully"
               : "You have unsaved changes in KYC fields"}
           </p>
           <div className="flex gap-2">
@@ -1714,7 +1998,8 @@ function OverviewTab({ account }) {
               >
                 {savingKyc ? (
                   <>
-                    <Loader2 className="size-3 animate-spin" /> Saving…
+                    <Loader2 className="size-3 animate-spin" />{" "}
+                    SavingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦
                   </>
                 ) : (
                   <>
@@ -1728,7 +2013,7 @@ function OverviewTab({ account }) {
       )}
 
       {/* Full stakeholders detail */}
-      <Card title="Stakeholders — full detail">
+      <Card title="Stakeholders ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â full detail">
         <div className="overflow-x-auto -mx-6 px-6">
           <table className="w-full text-sm min-w-[520px]">
             <thead>
@@ -1769,7 +2054,7 @@ function OverviewTab({ account }) {
                     </span>
                   </td>
                   <td className="py-3 text-right text-[11px] text-muted-foreground">
-                    {s.lastContact ?? "—"}
+                    {s.lastContact ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
                   </td>
                 </tr>
               ))}
@@ -2006,7 +2291,7 @@ function KycField({ n, label, icon, children, wide, editable, value, onChange, m
           ) : (
             <p className="leading-relaxed whitespace-pre-wrap">
               {value || (
-                <span className="italic text-muted-foreground">— empty — click ✎ to add</span>
+                <span className="italic text-muted-foreground">- empty - click edit to add</span>
               )}
             </p>
           )
@@ -2025,7 +2310,11 @@ function ScoreMatricsTab({ account }) {
     <div className="space-y-6">
       {/* All 8 health areas + overall at a glance */}
       <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2">
-        <ScoreCard title="Overall" score={account.health / 10} subtitle={`${account.trend >= 0 ? "+" : ""}${account.trend}%`} />
+        <ScoreCard
+          title="Overall"
+          score={account.health / 10}
+          subtitle={`${account.trend >= 0 ? "+" : ""}${account.trend}%`}
+        />
         <ScoreCard title="Relationship" score={account.relationshipHealth.score} />
         <ScoreCard title="Project" score={account.projectHealth.score} />
         <ScoreCard title="White Space" score={account.whiteSpace.score} />
@@ -2040,45 +2329,101 @@ function ScoreMatricsTab({ account }) {
         title="Relationship Health"
         hint="Meetups, monthly meetings, director meetings, cooperation"
         block={account.relationshipHealth}
-        onExpand={() => open("Relationship Health", "Meetups, monthly meetings, director meetings, cooperation", account.relationshipHealth, "relationship")}
+        onExpand={() =>
+          open(
+            "Relationship Health",
+            "Meetups, monthly meetings, director meetings, cooperation",
+            account.relationshipHealth,
+            "relationship",
+          )
+        }
       />
       <ScoreBlock
         title="Project Health"
         hint="Deliverables, feedback, quality/defects, scope & change"
         block={account.projectHealth}
-        onExpand={() => open("Project Health", "Deliverables, feedback, quality/defects, scope & change", account.projectHealth, "project")}
+        onExpand={() =>
+          open(
+            "Project Health",
+            "Deliverables, feedback, quality/defects, scope & change",
+            account.projectHealth,
+            "project",
+          )
+        }
       />
       <ScoreBlock
         title="White Space Analysis"
         hint="Meeting cadence, upsell capacity, services penetration"
         block={account.whiteSpace}
-        onExpand={() => open("White Space Analysis", "Meeting cadence, upsell capacity, services penetration", account.whiteSpace, "white_space")}
+        onExpand={() =>
+          open(
+            "White Space Analysis",
+            "Meeting cadence, upsell capacity, services penetration",
+            account.whiteSpace,
+            "white_space",
+          )
+        }
       />
       <ContractScoringBlock
         account={account}
-        onExpand={() => open("Contract Scoring", "Type, duration, terms, compliance, SWOT, customer feedback", account.contractScoring, "contract")}
+        onExpand={() =>
+          open(
+            "Contract Scoring",
+            "Type, duration, terms, compliance, SWOT, customer feedback",
+            account.contractScoring,
+            "contract",
+          )
+        }
       />
       <ScoreBlock
         title="Customer Satisfaction Score"
         hint="NPS, surveys, ticket CSAT, exec sentiment"
         block={account.csat}
-        onExpand={() => open("Customer Satisfaction Score", "NPS, surveys, ticket CSAT, exec sentiment", account.csat, "csat")}
+        onExpand={() =>
+          open(
+            "Customer Satisfaction Score",
+            "NPS, surveys, ticket CSAT, exec sentiment",
+            account.csat,
+            "csat",
+          )
+        }
       />
       <ScoreBlock
         title="Risk Scoring"
         hint="Competitors, geopolitical, POC churn, payments, C-level changes"
         block={account.riskScoring}
-        onExpand={() => open("Risk Scoring", "Competitors, geopolitical, POC churn, payments, C-level changes", account.riskScoring, "risk")}
+        onExpand={() =>
+          open(
+            "Risk Scoring",
+            "Competitors, geopolitical, POC churn, payments, C-level changes",
+            account.riskScoring,
+            "risk",
+          )
+        }
       />
       <ResourceHealthBlock
         account={account}
-        onExpand={() => open("Resources Health", "Backup coverage, leaves, critical roles, team size", account.resourceHealth, "resource")}
+        onExpand={() =>
+          open(
+            "Resources Health",
+            "Backup coverage, leaves, critical roles, team size",
+            account.resourceHealth,
+            "resource",
+          )
+        }
       />
       <ScoreBlock
         title="Financial Health"
         hint="Revenue generation & resource allocation efficiency"
         block={account.financialHealth}
-        onExpand={() => open("Financial Health", "Revenue generation & resource allocation efficiency", account.financialHealth, "financial")}
+        onExpand={() =>
+          open(
+            "Financial Health",
+            "Revenue generation & resource allocation efficiency",
+            account.financialHealth,
+            "financial",
+          )
+        }
       />
 
       {expanded && (
@@ -2144,129 +2489,208 @@ function ScoreBlock({ title, hint, block, onExpand }) {
     </div>
   );
 }
-// Area-specific KPI section templates — minimum 2 meaningful subtasks each, weights sum to 100
+// Area-specific KPI section templates ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â minimum 2 meaningful subtasks each, weights sum to 100
 const AREA_KPI_DEFAULTS = {
   relationship: [
-    { name: "CEO & Executive Engagement", fields: [
-      { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
-      { label: "Director-level meeting completed on schedule", weight: 35 },
-      { label: "Executive sponsor actively engaged", weight: 25 },
-    ]},
-    { name: "Meeting Cadence", fields: [
-      { label: "Monthly cadence meetings held on schedule", weight: 50 },
-      { label: "Action items closed before next cycle", weight: 30 },
-      { label: "Meeting notes shared within 24 hours", weight: 20 },
-    ]},
-    { name: "Cooperation & Trust", fields: [
-      { label: "Client responsive to requests within 48 hours", weight: 60 },
-      { label: "Joint planning or roadmap session completed", weight: 40 },
-    ]},
+    {
+      name: "CEO & Executive Engagement",
+      fields: [
+        { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
+        { label: "Director-level meeting completed on schedule", weight: 35 },
+        { label: "Executive sponsor actively engaged", weight: 25 },
+      ],
+    },
+    {
+      name: "Meeting Cadence",
+      fields: [
+        { label: "Monthly cadence meetings held on schedule", weight: 50 },
+        { label: "Action items closed before next cycle", weight: 30 },
+        { label: "Meeting notes shared within 24 hours", weight: 20 },
+      ],
+    },
+    {
+      name: "Cooperation & Trust",
+      fields: [
+        { label: "Client responsive to requests within 48 hours", weight: 60 },
+        { label: "Joint planning or roadmap session completed", weight: 40 },
+      ],
+    },
   ],
   project: [
-    { name: "Delivery Performance", fields: [
-      { label: "Sprint or milestone delivered on time", weight: 50 },
-      { label: "Defect rate within agreed threshold", weight: 30 },
-      { label: "No critical production incidents this cycle", weight: 20 },
-    ]},
-    { name: "Quality & Feedback", fields: [
-      { label: "Client feedback positive this cycle", weight: 55 },
-      { label: "Feedback actioned and communicated back to client", weight: 45 },
-    ]},
-    { name: "Scope & Change Control", fields: [
-      { label: "Change requests formally reviewed and documented", weight: 50 },
-      { label: "No unmanaged scope creep this cycle", weight: 50 },
-    ]},
+    {
+      name: "Delivery Performance",
+      fields: [
+        { label: "Sprint or milestone delivered on time", weight: 50 },
+        { label: "Defect rate within agreed threshold", weight: 30 },
+        { label: "No critical production incidents this cycle", weight: 20 },
+      ],
+    },
+    {
+      name: "Quality & Feedback",
+      fields: [
+        { label: "Client feedback positive this cycle", weight: 55 },
+        { label: "Feedback actioned and communicated back to client", weight: 45 },
+      ],
+    },
+    {
+      name: "Scope & Change Control",
+      fields: [
+        { label: "Change requests formally reviewed and documented", weight: 50 },
+        { label: "No unmanaged scope creep this cycle", weight: 50 },
+      ],
+    },
   ],
   white_space: [
-    { name: "Service Penetration", fields: [
-      { label: "More than 3 active services currently delivered", weight: 50 },
-      { label: "At least 1 new service proposed this quarter", weight: 50 },
-    ]},
-    { name: "Upsell & Growth Signals", fields: [
-      { label: "Upsell opportunity identified and logged in CRM", weight: 50 },
-      { label: "White-space pitch scheduled with decision maker", weight: 50 },
-    ]},
-    { name: "Account Intelligence", fields: [
-      { label: "Account notes updated this month", weight: 40 },
-      { label: "Competitive landscape reviewed", weight: 30 },
-      { label: "Stakeholder map current and verified", weight: 30 },
-    ]},
+    {
+      name: "Service Penetration",
+      fields: [
+        { label: "More than 3 active services currently delivered", weight: 50 },
+        { label: "At least 1 new service proposed this quarter", weight: 50 },
+      ],
+    },
+    {
+      name: "Upsell & Growth Signals",
+      fields: [
+        { label: "Upsell opportunity identified and logged in CRM", weight: 50 },
+        { label: "White-space pitch scheduled with decision maker", weight: 50 },
+      ],
+    },
+    {
+      name: "Account Intelligence",
+      fields: [
+        { label: "Account notes updated this month", weight: 40 },
+        { label: "Competitive landscape reviewed", weight: 30 },
+        { label: "Stakeholder map current and verified", weight: 30 },
+      ],
+    },
   ],
   contract: [
-    { name: "Contract Terms", fields: [
-      { label: "Auto-renew clause in place", weight: 35 },
-      { label: "Non-terminator clause signed", weight: 35 },
-      { label: "Minimum one-year lock confirmed", weight: 30 },
-    ]},
-    { name: "Compliance & Renewal", fields: [
-      { label: "Process compliance score above 7 out of 10", weight: 50 },
-      { label: "Renewal conversation initiated 90 days before expiry", weight: 50 },
-    ]},
-    { name: "Commercial Terms", fields: [
-      { label: "Annual price-hike clause agreed and documented", weight: 55 },
-      { label: "Annual contract review meeting scheduled", weight: 45 },
-    ]},
+    {
+      name: "Contract Terms",
+      fields: [
+        { label: "Auto-renew clause in place", weight: 35 },
+        { label: "Non-terminator clause signed", weight: 35 },
+        { label: "Minimum one-year lock confirmed", weight: 30 },
+      ],
+    },
+    {
+      name: "Compliance & Renewal",
+      fields: [
+        { label: "Process compliance score above 7 out of 10", weight: 50 },
+        { label: "Renewal conversation initiated 90 days before expiry", weight: 50 },
+      ],
+    },
+    {
+      name: "Commercial Terms",
+      fields: [
+        { label: "Annual price-hike clause agreed and documented", weight: 55 },
+        { label: "Annual contract review meeting scheduled", weight: 45 },
+      ],
+    },
   ],
   csat: [
-    { name: "NPS & Surveys", fields: [
-      { label: "NPS score collected and above 7 this quarter", weight: 45 },
-      { label: "Quarterly satisfaction survey completed", weight: 35 },
-      { label: "Low-score responses addressed within 2 weeks", weight: 20 },
-    ]},
-    { name: "Support Quality", fields: [
-      { label: "Support tickets resolved within SLA", weight: 55 },
-      { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
-    ]},
-    { name: "Executive Sentiment", fields: [
-      { label: "Executive sponsor expressed positive sentiment", weight: 55 },
-      { label: "No major complaints or unresolved escalations", weight: 45 },
-    ]},
+    {
+      name: "NPS & Surveys",
+      fields: [
+        { label: "NPS score collected and above 7 this quarter", weight: 45 },
+        { label: "Quarterly satisfaction survey completed", weight: 35 },
+        { label: "Low-score responses addressed within 2 weeks", weight: 20 },
+      ],
+    },
+    {
+      name: "Support Quality",
+      fields: [
+        { label: "Support tickets resolved within SLA", weight: 55 },
+        { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
+      ],
+    },
+    {
+      name: "Executive Sentiment",
+      fields: [
+        { label: "Executive sponsor expressed positive sentiment", weight: 55 },
+        { label: "No major complaints or unresolved escalations", weight: 45 },
+      ],
+    },
   ],
   risk: [
-    { name: "Competitive Risk", fields: [
-      { label: "Competitor activity monitored and documented", weight: 45 },
-      { label: "Defense strategy or counter-proposal ready", weight: 55 },
-    ]},
-    { name: "Relationship & POC Risk", fields: [
-      { label: "Key POC stable — no resignation or transfer risk", weight: 50 },
-      { label: "C-level sponsor accessible and engaged", weight: 50 },
-    ]},
-    { name: "Financial Risk", fields: [
-      { label: "Invoice paid within agreed payment terms", weight: 55 },
-      { label: "No overdue balance outstanding", weight: 45 },
-    ]},
-    { name: "Operational Risk", fields: [
-      { label: "Compliance and regulatory requirements met", weight: 50 },
-      { label: "No geopolitical disruptions impacting delivery", weight: 50 },
-    ]},
+    {
+      name: "Competitive Risk",
+      fields: [
+        { label: "Competitor activity monitored and documented", weight: 45 },
+        { label: "Defense strategy or counter-proposal ready", weight: 55 },
+      ],
+    },
+    {
+      name: "Relationship & POC Risk",
+      fields: [
+        {
+          label:
+            "Key POC stable ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no resignation or transfer risk",
+          weight: 50,
+        },
+        { label: "C-level sponsor accessible and engaged", weight: 50 },
+      ],
+    },
+    {
+      name: "Financial Risk",
+      fields: [
+        { label: "Invoice paid within agreed payment terms", weight: 55 },
+        { label: "No overdue balance outstanding", weight: 45 },
+      ],
+    },
+    {
+      name: "Operational Risk",
+      fields: [
+        { label: "Compliance and regulatory requirements met", weight: 50 },
+        { label: "No geopolitical disruptions impacting delivery", weight: 50 },
+      ],
+    },
   ],
   resource: [
-    { name: "Backup & Continuity", fields: [
-      { label: "Backup engineer assigned for every critical role", weight: 55 },
-      { label: "Knowledge transfer documentation up to date", weight: 45 },
-    ]},
-    { name: "Staffing Stability", fields: [
-      { label: "No unplanned attrition on account this month", weight: 50 },
-      { label: "Planned leaves managed without delivery impact", weight: 50 },
-    ]},
-    { name: "Critical Resource Retention", fields: [
-      { label: "Critical resources engaged and retained", weight: 55 },
-      { label: "Succession plan in place for key technical roles", weight: 45 },
-    ]},
+    {
+      name: "Backup & Continuity",
+      fields: [
+        { label: "Backup engineer assigned for every critical role", weight: 55 },
+        { label: "Knowledge transfer documentation up to date", weight: 45 },
+      ],
+    },
+    {
+      name: "Staffing Stability",
+      fields: [
+        { label: "No unplanned attrition on account this month", weight: 50 },
+        { label: "Planned leaves managed without delivery impact", weight: 50 },
+      ],
+    },
+    {
+      name: "Critical Resource Retention",
+      fields: [
+        { label: "Critical resources engaged and retained", weight: 55 },
+        { label: "Succession plan in place for key technical roles", weight: 45 },
+      ],
+    },
   ],
   financial: [
-    { name: "Revenue Performance", fields: [
-      { label: "Monthly billing target met", weight: 50 },
-      { label: "ARR growth on track versus annual plan", weight: 50 },
-    ]},
-    { name: "Margin & Efficiency", fields: [
-      { label: "Resource utilization above 80 percent", weight: 50 },
-      { label: "Cost overruns within 5 percent of budget", weight: 50 },
-    ]},
-    { name: "Commercial Growth", fields: [
-      { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
-      { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
-    ]},
+    {
+      name: "Revenue Performance",
+      fields: [
+        { label: "Monthly billing target met", weight: 50 },
+        { label: "ARR growth on track versus annual plan", weight: 50 },
+      ],
+    },
+    {
+      name: "Margin & Efficiency",
+      fields: [
+        { label: "Resource utilization above 80 percent", weight: 50 },
+        { label: "Cost overruns within 5 percent of budget", weight: 50 },
+      ],
+    },
+    {
+      name: "Commercial Growth",
+      fields: [
+        { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
+        { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
+      ],
+    },
   ],
 };
 function buildDefaultSections(area, existingMetrics) {
@@ -2327,7 +2751,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       fields: s.fields.map((f) => (f.id === fieldId ? { ...f, ...patch } : f)),
     }));
   }
-  // dynamic scoring per section — /10 scale, consistent with ScoreBlock display
+  // dynamic scoring per section ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â /10 scale, consistent with ScoreBlock display
   const sectionScores = useMemo(
     () =>
       sections.map((s) => {
@@ -2357,22 +2781,34 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       if (invalid.length > 0) {
         const names = invalid.map((s) => {
           const total = s.fields.reduce((a, f) => a + (Number(f.weight) || 0), 0);
-          return `"${s.name}" (Σ ${total}%)`;
+          return `"${s.name}" (ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â£ ${total}%)`;
         });
-        throw new Error(`Fix weights before saving — each section must sum to 100%: ${names.join(", ")}`);
+        throw new Error(
+          `Fix weights before saving ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â each section must sum to 100%: ${names.join(", ")}`,
+        );
       }
       const newScore = parseFloat(overallOutOfTen.toFixed(1));
       const metricUpdates = sections
         .map((s, idx) =>
           s.metricId
-            ? { id: s.metricId, label: s.name, value: parseFloat(sectionScores[idx].scoreOutOfTen.toFixed(1)) }
+            ? {
+                id: s.metricId,
+                label: s.name,
+                value: parseFloat(sectionScores[idx].scoreOutOfTen.toFixed(1)),
+              }
             : null,
         )
         .filter(Boolean);
       await updateHealthBlock(accountId, area, newScore, metricUpdates, sections);
       await logAccountChanges(
         accountId,
-        [{ field: `Score: ${title}`, oldValue: block.score.toFixed(1), newValue: newScore.toFixed(1) }],
+        [
+          {
+            field: `Score: ${title}`,
+            oldValue: block.score.toFixed(1),
+            newValue: newScore.toFixed(1),
+          },
+        ],
         editorUser,
       );
     },
@@ -2396,7 +2832,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         <div className="px-4 md:px-6 py-4 border-b flex items-start justify-between gap-3 sticky top-0 bg-background z-10">
           <div className="min-w-0">
             <p className="text-[10px] font-bold uppercase tracking-widest text-accent">
-              KPI Editor — Dynamic Scoring
+              KPI Editor ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Dynamic Scoring
             </p>
             <h2 className="text-base md:text-lg font-bold truncate">{title}</h2>
             <p className="text-[11px] text-muted-foreground">{hint}</p>
@@ -2451,7 +2887,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                       className={`text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded ${weightOk ? "bg-success/10 text-success" : "bg-warn/10 text-warn"}`}
                       title={weightOk ? "Weights sum to 100" : "Weights should sum to 100"}
                     >
-                      Σ {ss.totalWeight}%
+                      ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â£ {ss.totalWeight}%
                     </span>
                     <span
                       className={`text-sm font-bold ${ss.scoreOutOfTen >= 8 ? "text-success" : ss.scoreOutOfTen >= 5 ? "text-warn" : "text-crit"}`}
@@ -2460,7 +2896,9 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                       <span className="text-[10px] text-muted-foreground">/10</span>
                     </span>
                     <button
-                      onClick={() => editable && setSections((prev) => prev.filter((s) => s.id !== section.id))}
+                      onClick={() =>
+                        editable && setSections((prev) => prev.filter((s) => s.id !== section.id))
+                      }
                       disabled={!editable}
                       className="size-7 rounded hover:bg-crit/10 hover:text-crit flex items-center justify-center text-muted-foreground transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
                       aria-label="Delete section"
@@ -2536,45 +2974,49 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         {/* footer */}
         <div className="px-4 md:px-6 py-3 border-t flex flex-col gap-2 bg-muted/20 sticky bottom-0">
           {saveError && (
-            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded px-3 py-1.5">{saveError}</p>
+            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded px-3 py-1.5">
+              {saveError}
+            </p>
           )}
           <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-4">
-            <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Scoring is dynamic · checked weights ÷ total weight × 10
-            </p>
-            <button
-              onClick={addSection}
-              disabled={!editable}
-              className="text-[11px] font-bold uppercase tracking-wider text-accent flex items-center gap-1 hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Plus className="size-3" /> Add KPI section
-            </button>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              disabled={savingKpi}
-              className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => saveKpi()}
-              disabled={savingKpi || !editable}
-              className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:opacity-90 transition-opacity"
-            >
-              {savingKpi ? (
-                <>
-                  <Loader2 className="size-3 animate-spin" /> Saving…
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="size-3" /> Save & Close
-                </>
-              )}
-            </button>
-          </div>
+            <div className="flex items-center gap-4">
+              <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+                Scoring is dynamic ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· checked weights ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â· total
+                weight ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 10
+              </p>
+              <button
+                onClick={addSection}
+                disabled={!editable}
+                className="text-[11px] font-bold uppercase tracking-wider text-accent flex items-center gap-1 hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Plus className="size-3" /> Add KPI section
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={onClose}
+                disabled={savingKpi}
+                className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => saveKpi()}
+                disabled={savingKpi || !editable}
+                className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:opacity-90 transition-opacity"
+              >
+                {savingKpi ? (
+                  <>
+                    <Loader2 className="size-3 animate-spin" />{" "}
+                    SavingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="size-3" /> Save & Close
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -2726,7 +3168,7 @@ function ActivityTab({ account, opportunities }) {
   const accountOpportunities = opportunities;
   return (
     <div className="space-y-6">
-      {/* Opportunities — new signals KAM can crack */}
+      {/* Opportunities ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â new signals KAM can crack */}
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <div className="flex items-start gap-3">
@@ -2736,7 +3178,8 @@ function ActivityTab({ account, opportunities }) {
             <div>
               <h3 className="text-sm font-bold">Opportunities for {account.name}</h3>
               <p className="text-[11px] text-muted-foreground">
-                New signals surfaced from calls, filings and procurement events — pick one to crack.
+                New signals surfaced from calls, filings and procurement events
+                ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â pick one to crack.
               </p>
             </div>
           </div>
@@ -2754,7 +3197,7 @@ function ActivityTab({ account, opportunities }) {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold leading-snug">{o.title}</p>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    {o.source} · signal {o.signalDate} ·{" "}
+                    {o.source} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· signal {o.signalDate} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·{" "}
                     <span className="text-accent font-semibold">Next: {o.nextStep}</span>
                   </p>
                 </div>
@@ -2777,7 +3220,7 @@ function ActivityTab({ account, opportunities }) {
                     disabled={!editable}
                     className="text-[10px] font-bold uppercase tracking-wider text-accent disabled:opacity-40 whitespace-nowrap"
                   >
-                    Pursue →
+                    Pursue -&gt;
                   </button>
                 </div>
               </li>
@@ -2803,7 +3246,11 @@ function ActivityTab({ account, opportunities }) {
                 <div
                   className={`px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white ${ragColor[rag]}`}
                 >
-                  {rag === "R" ? "Red — Act now" : rag === "A" ? "Amber — Plan" : "Green — Monitor"}
+                  {rag === "R"
+                    ? "Red ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Act now"
+                    : rag === "A"
+                      ? "Amber ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Plan"
+                      : "Green ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Monitor"}
                   <span className="ml-2 opacity-80">({items.length})</span>
                 </div>
                 <ul className="p-3 space-y-2 text-xs">
@@ -2812,7 +3259,7 @@ function ActivityTab({ account, opportunities }) {
                       <li key={a.id} className="border-b last:border-0 pb-2 last:pb-0">
                         <p className="font-semibold">{a.title}</p>
                         <p className="text-[10px] text-muted-foreground">
-                          {a.area} · {a.owner} · {a.due}
+                          {a.area} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {a.owner} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {a.due}
                         </p>
                       </li>
                     ))
@@ -2834,8 +3281,8 @@ function ActivityTab({ account, opportunities }) {
               Extract Action Items from Meeting Notes to Increase Score
             </h3>
             <p className="text-[11px] text-muted-foreground">
-              Auto-extracted from the last 5 meeting transcripts — accept to push into the
-              activities backlog.
+              Auto-extracted from the last 5 meeting transcripts
+              ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â accept to push into the activities backlog.
             </p>
           </div>
           <button
@@ -2848,23 +3295,23 @@ function ActivityTab({ account, opportunities }) {
         <ul className="divide-y">
           {[
             {
-              src: "QBR · 18 May",
+              src: "QBR ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 18 May",
               text: "Share 2026 product roadmap deck with sponsor by Friday.",
               lift: "+2 Relationship",
             },
             {
-              src: "Weekly Sync · 15 May",
+              src: "Weekly Sync ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 15 May",
               text: "Schedule architecture review with their new CTO.",
               lift: "+3 Project",
             },
             {
-              src: "Escalation Call · 13 May",
+              src: "Escalation Call ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 13 May",
               text: "Send written RCA + service-credit memo within 48h.",
               lift: "+4 CSAT",
             },
             {
-              src: "Discovery · 09 May",
-              text: "Pitch EMEA fulfillment node — confirmed budget exists.",
+              src: "Discovery ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 09 May",
+              text: "Pitch EMEA fulfillment node ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â confirmed budget exists.",
               lift: "+$120k Growth",
             },
           ].map((it, i) => (
@@ -2905,7 +3352,7 @@ function ActivityTab({ account, opportunities }) {
               + Add Activity
             </button>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Last sync with Jira · 4m ago
+              Last sync with Jira ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 4m ago
             </p>
           </div>
         </div>
@@ -3004,7 +3451,7 @@ function RetentionGrowthTab({ account }) {
           </ul>
         </Card>
 
-        <Card title="Growth — applicable but not offered">
+        <Card title="Growth ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â applicable but not offered">
           <p className="text-[11px] text-muted-foreground mb-3">
             White-space services we could expand into.
           </p>
@@ -3020,7 +3467,7 @@ function RetentionGrowthTab({ account }) {
                     disabled={!editable}
                     className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40"
                   >
-                    Plan pitch →
+                    Plan pitch -&gt;
                   </button>
                 </li>
               ))
@@ -3190,14 +3637,16 @@ function EscalationsTab({ list }) {
                 </span>
                 <h3 className="text-sm font-bold">{e.title}</h3>
               </div>
-              <p className="text-xs text-muted-foreground mt-1">Opened {e.openedAt} · 48h SLA</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Opened {e.openedAt} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 48h SLA
+              </p>
             </div>
             <div className="flex flex-col items-end gap-1">
               <div className="bg-primary text-primary-foreground px-3 py-1.5 rounded text-[11px] font-mono flex items-center gap-1">
                 <Clock className="size-3" /> {e.slaRemainingHours.toFixed(1)}h left
               </div>
               <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                Last synced with Jira · 3m ago
+                Last synced with Jira ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 3m ago
               </p>
             </div>
           </div>
@@ -3230,20 +3679,25 @@ function EscalationsTab({ list }) {
               <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
                 Our Recommendation
               </p>
-              <p className="text-xs">{e.recommendation ?? "—"}</p>
+              <p className="text-xs">
+                {e.recommendation ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
+              </p>
             </div>
             <div className="bg-card p-3 rounded border">
               <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
                 Realistic / Achievable?
               </p>
-              <p className="text-xs">{e.realisticCheck ?? "—"}</p>
+              <p className="text-xs">
+                {e.realisticCheck ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
+              </p>
             </div>
             <div className="bg-card p-3 rounded border md:col-span-2">
               <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
                 Client Feedback
               </p>
               <p className="text-xs italic">
-                {e.clientFeedback ?? "Pending — schedule meeting within 48h."}
+                {e.clientFeedback ??
+                  "Pending ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â schedule meeting within 48h."}
               </p>
             </div>
             <div className="bg-card p-3 rounded border md:col-span-2">
@@ -3253,7 +3707,7 @@ function EscalationsTab({ list }) {
                   Jira Conversation Summary
                 </p>
                 <span className="text-[10px] font-mono text-muted-foreground">
-                  3 tickets · 12 comments
+                  3 tickets ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 12 comments
                 </span>
               </div>
               <ul className="space-y-2 text-xs">
@@ -3278,7 +3732,8 @@ function EscalationsTab({ list }) {
                     [ESC-{e.id.toUpperCase()}-3] RCA draft uploaded by SRE lead
                   </p>
                   <p className="text-muted-foreground text-[11px]">
-                    Pending KAM review before sharing externally — flagged for 48h SLA.
+                    Pending KAM review before sharing externally
+                    ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â flagged for 48h SLA.
                   </p>
                 </li>
               </ul>
@@ -3468,7 +3923,11 @@ function ClientHistoryLegacyTab({ accountId }) {
     queryFn: () => fetchAccountHistory(accountId),
   });
   if (isLoading) {
-    return <div className="py-16 text-center text-xs text-muted-foreground">Loading history…</div>;
+    return (
+      <div className="py-16 text-center text-xs text-muted-foreground">
+        Loading historyÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦
+      </div>
+    );
   }
   if (history.length === 0) {
     return (
@@ -3486,7 +3945,7 @@ function ClientHistoryLegacyTab({ accountId }) {
       <div className="px-6 py-4 border-b">
         <h3 className="text-sm font-bold">Change Log</h3>
         <p className="text-[11px] text-muted-foreground mt-0.5">
-          All edits to this account — most recent first.
+          All edits to this account ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â most recent first.
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -3516,12 +3975,12 @@ function HistoryRow({ entry }) {
       <td className="px-6 py-3 text-xs font-semibold whitespace-nowrap">{entry.fieldName}</td>
       <td className="px-6 py-3 text-xs text-muted-foreground max-w-[200px]">
         <span className="line-clamp-2 block">
-          {entry.oldValue ?? <span className="italic">—</span>}
+          {entry.oldValue ?? <span className="italic">ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â</span>}
         </span>
       </td>
       <td className="px-6 py-3 text-xs text-foreground max-w-[200px]">
         <span className="line-clamp-2 block">
-          {entry.newValue ?? <span className="italic">—</span>}
+          {entry.newValue ?? <span className="italic">ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â</span>}
         </span>
       </td>
       <td className="px-6 py-3 text-xs font-medium whitespace-nowrap">

@@ -18,6 +18,7 @@ import { Route as EducateRouteImport } from './routes/educate'
 import { Route as ContractsRouteImport } from './routes/contracts'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountsIndexRouteImport } from './routes/accounts.index'
+import { Route as CalendarCallbackRouteImport } from './routes/calendar.callback'
 import { Route as AccountsAccountIdRouteImport } from './routes/accounts.$accountId'
 
 const UsersRoute = UsersRouteImport.update({
@@ -65,6 +66,11 @@ const AccountsIndexRoute = AccountsIndexRouteImport.update({
   path: '/accounts/',
   getParentRoute: () => rootRouteImport,
 })
+const CalendarCallbackRoute = CalendarCallbackRouteImport.update({
+  id: '/calendar/callback',
+  path: '/calendar/callback',
+  getParentRoute: () => rootRouteImport,
+})
 const AccountsAccountIdRoute = AccountsAccountIdRouteImport.update({
   id: '/accounts/$accountId',
   path: '/accounts/$accountId',
@@ -81,6 +87,7 @@ const rootRouteChildren = {
   StrategyRoute: StrategyRoute,
   UsersRoute: UsersRoute,
   AccountsAccountIdRoute: AccountsAccountIdRoute,
+  CalendarCallbackRoute: CalendarCallbackRoute,
   AccountsIndexRoute: AccountsIndexRoute,
 }
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)

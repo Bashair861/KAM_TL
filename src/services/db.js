@@ -4,7 +4,7 @@ import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-ad
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
-// ─── mappers ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ mappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function mapFlatAccount(r) {
   return {
     id: r.id,
@@ -51,6 +51,8 @@ function mapFlatAccount(r) {
     websiteSummary: r.website_summary ?? "",
     websiteSummaryUpdatedAt: r.website_summary_updated_at ?? null,
     assignedKamId: r.assigned_kam_id ?? null,
+    newsKeywords: r.news_keywords ?? [],
+    lastNewsSyncAt: r.last_news_sync_at ?? null,
   };
 }
 function mapHealthBlock(score, metrics, kpiData, updatedAt) {
@@ -60,13 +62,40 @@ function mapHealthBlock(score, metrics, kpiData, updatedAt) {
       id: m.id,
       label: m.label,
       value: m.value,
+      complete: Boolean(m.complete ?? m.Complete ?? false),
       ...(m.hint ? { hint: m.hint } : {}),
     })),
     kpiData: kpiData ?? null,
     updatedAt: updatedAt ?? null,
   };
 }
-// ─── fetch accounts (flat) ────────────────────────────────────────────────────
+function isMissingTableError(error) {
+  return error?.code === "42P01" || /relation .* does not exist/i.test(error?.message ?? "");
+}
+function getRowComplete(row) {
+  return Boolean(row.complete ?? row.completed ?? row.Complete ?? false);
+}
+function mapTask(row, accountLookup = new Map(), healthMetricLookup = new Map()) {
+  const healthMetric = healthMetricLookup.get(row.health_metric_id);
+  const accountId = row.account_id ?? healthMetric?.accountId ?? null;
+  const account = accountLookup.get(accountId);
+  return {
+    id: row.id,
+    accountId,
+    accountName: account?.name ?? accountId ?? "Portfolio",
+    title: row.title ?? row.name ?? row.label ?? "Untitled task",
+    description: row.description ?? "",
+    due: row.due ?? row.due_date ?? "",
+    priority: row.priority ?? "P3",
+    source: row.source ?? row.type ?? healthMetric?.label ?? "Task",
+    complete: getRowComplete(row),
+    completedAt: row.completed_at ?? null,
+    healthMetricId: row.health_metric_id ?? null,
+    healthMetricLabel: healthMetric?.label ?? "",
+    healthArea: healthMetric?.area ?? "",
+  };
+}
+// â”€â”€â”€ fetch accounts (flat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function fetchAccounts(opts) {
   let q = supabase.from("accounts").select("*");
   // KAMs only see accounts assigned to them
@@ -86,6 +115,109 @@ function isMissingColumnError(error, column) {
   );
 }
 
+export async function fetchKamTasks(opts = {}) {
+  const accountIds = opts.accountIds ?? (opts.accountId ? [opts.accountId] : null);
+  if (accountIds && accountIds.length === 0) return [];
+
+  let q = supabase.from("tasks").select("*").order("created_at", { ascending: false }).limit(100);
+  if (accountIds) q = q.in("account_id", accountIds);
+
+  const { data, error } = await q;
+  if (isMissingTableError(error)) return [];
+  if (error) throw error;
+
+  const tasks = data ?? [];
+  const visibleTasks = opts.includeCompleted
+    ? tasks
+    : tasks.filter((task) => !getRowComplete(task));
+  const taskAccountIds = [
+    ...new Set(visibleTasks.map((task) => task.account_id).filter((id) => Boolean(id))),
+  ];
+  const healthMetricIds = [
+    ...new Set(visibleTasks.map((task) => task.health_metric_id).filter((id) => Boolean(id))),
+  ];
+
+  const [{ data: accounts }, { data: metrics }] = await Promise.all([
+    taskAccountIds.length
+      ? supabase.from("accounts").select("id, name, short_code").in("id", taskAccountIds)
+      : Promise.resolve({ data: [] }),
+    healthMetricIds.length
+      ? supabase
+          .from("health_metrics")
+          .select("id, label, complete, Complete, health_scores(account_id, area)")
+          .in("id", healthMetricIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const accountLookup = new Map((accounts ?? []).map((account) => [account.id, account]));
+  const healthMetricLookup = new Map(
+    (metrics ?? []).map((metric) => {
+      const score = Array.isArray(metric.health_scores)
+        ? metric.health_scores[0]
+        : metric.health_scores;
+      return [
+        metric.id,
+        {
+          label: metric.label,
+          complete: Boolean(metric.complete ?? metric.Complete ?? false),
+          accountId: score?.account_id ?? null,
+          area: score?.area ?? "",
+        },
+      ];
+    }),
+  );
+
+  return visibleTasks.map((task) => mapTask(task, accountLookup, healthMetricLookup));
+}
+export async function fetchDashboardActionItems(opts = {}) {
+  const accounts = await fetchAccounts({ role: opts.role, userId: opts.userId });
+  const accountIds = accounts.map((account) => account.id);
+  if (accountIds.length === 0) return [];
+  const tasks = await fetchKamTasks({ accountIds, includeCompleted: false });
+  if (tasks.length > 0) return tasks;
+
+  const { data, error } = await supabase
+    .from("activities")
+    .select("*, accounts(id, name, short_code)")
+    .in("account_id", accountIds)
+    .neq("status", "Done")
+    .order("created_at", { ascending: false })
+    .limit(20);
+  if (error) throw error;
+  return (data ?? []).map((activity) => ({
+    id: activity.id,
+    accountId: activity.account_id,
+    accountName: activity.accounts?.name ?? activity.account_id,
+    title: activity.title,
+    description: "",
+    due: activity.due ?? "",
+    priority: activity.rag === "R" ? "P1" : activity.rag === "A" ? "P2" : "P3",
+    source: activity.area ?? "Activity",
+    complete: false,
+    completedAt: null,
+    healthMetricId: null,
+    healthMetricLabel: "",
+    healthArea: "",
+    readOnlyFallback: true,
+  }));
+}
+export async function updateDashboardTaskComplete(taskId, complete, healthMetricId) {
+  const completedAt = complete ? new Date().toISOString() : null;
+  const updatedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from("tasks")
+    .update({ Complete: complete, updated_at: updatedAt })
+    .eq("id", taskId);
+  if (error) throw error;
+
+  if (healthMetricId) {
+    const { error: metricError } = await supabase
+      .from("health_metrics")
+      .update({ Complete: complete, complete, completed_at: completedAt })
+      .eq("id", healthMetricId);
+    if (metricError) throw metricError;
+  }
+}
 export async function fetchKamUsers() {
   const withStatus = await supabase
     .from("profiles")
@@ -183,7 +315,10 @@ export async function updateUserRole(userId, role) {
   if (!rpc.error) return;
   if (!isMissingRpcError(rpc.error)) throw rpc.error;
 
-  const { error } = await supabase.from("profiles").update({ role: normalizedRole }).eq("id", userId);
+  const { error } = await supabase
+    .from("profiles")
+    .update({ role: normalizedRole })
+    .eq("id", userId);
   if (!error) return;
   if (isLegacyRoleEnumError(error)) {
     const legacy = await supabase
@@ -204,10 +339,13 @@ export async function updateUserStatus(userId, isActive) {
   if (!rpc.error) return;
   if (!isMissingRpcError(rpc.error)) throw rpc.error;
 
-  const { error } = await supabase.from("profiles").update({ is_active: isActive }).eq("id", userId);
+  const { error } = await supabase
+    .from("profiles")
+    .update({ is_active: isActive })
+    .eq("id", userId);
   if (error) throw error;
 }
-// ─── delete account ───────────────────────────────────────────────────────────
+// â”€â”€â”€ delete account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function deleteUserProfile(userId) {
   const {
     data: { session },
@@ -226,7 +364,7 @@ export async function deleteAccount(accountId) {
   const { error } = await supabase.from("accounts").delete().eq("id", accountId);
   if (error) throw error;
 }
-// ─── update account KAM assignment ───────────────────────────────────────────
+// â”€â”€â”€ update account KAM assignment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function updateAccountKam(accountId, kamId) {
   const { error } = await supabase
     .from("accounts")
@@ -234,7 +372,7 @@ export async function updateAccountKam(accountId, kamId) {
     .eq("id", accountId);
   if (error) throw error;
 }
-// ─── update health block (score + metrics + kpi checkbox state) ──────────────
+// â”€â”€â”€ update health block (score + metrics + kpi checkbox state) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function updateHealthBlock(accountId, area, score, metricUpdates, kpiData) {
   // Use maybeSingle so missing rows don't throw
   const { data: hs } = await supabase
@@ -245,14 +383,14 @@ export async function updateHealthBlock(accountId, area, score, metricUpdates, k
     .maybeSingle();
 
   if (hs) {
-    // Row exists — update score + kpi_data
+    // Row exists â€” update score + kpi_data
     const { error } = await supabase
       .from("health_scores")
       .update({ score, kpi_data: kpiData })
       .eq("id", hs.id);
     if (error) throw error;
   } else {
-    // No row yet (new account) — insert one
+    // No row yet (new account) â€” insert one
     const { error } = await supabase
       .from("health_scores")
       .insert({ account_id: accountId, area, score, kpi_data: kpiData });
@@ -263,134 +401,212 @@ export async function updateHealthBlock(accountId, area, score, metricUpdates, k
   if (metricUpdates.length > 0) {
     await Promise.all(
       metricUpdates.map((mu) =>
-        supabase.from("health_metrics").update({ label: mu.label, value: mu.value }).eq("id", mu.id),
+        supabase
+          .from("health_metrics")
+          .update({ label: mu.label, value: mu.value })
+          .eq("id", mu.id),
       ),
     );
   }
 }
-// ─── KPI section templates used when creating new accounts ───────────────────
+// â”€â”€â”€ KPI section templates used when creating new accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const NEW_ACCOUNT_KPI_TEMPLATES = {
   relationship: [
-    { name: "CEO & Executive Engagement", fields: [
-      { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
-      { label: "Director-level meeting completed on schedule", weight: 35 },
-      { label: "Executive sponsor actively engaged", weight: 25 },
-    ]},
-    { name: "Meeting Cadence", fields: [
-      { label: "Monthly cadence meetings held on schedule", weight: 50 },
-      { label: "Action items closed before next cycle", weight: 30 },
-      { label: "Meeting notes shared within 24 hours", weight: 20 },
-    ]},
-    { name: "Cooperation & Trust", fields: [
-      { label: "Client responsive to requests within 48 hours", weight: 60 },
-      { label: "Joint planning or roadmap session completed", weight: 40 },
-    ]},
+    {
+      name: "CEO & Executive Engagement",
+      fields: [
+        { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
+        { label: "Director-level meeting completed on schedule", weight: 35 },
+        { label: "Executive sponsor actively engaged", weight: 25 },
+      ],
+    },
+    {
+      name: "Meeting Cadence",
+      fields: [
+        { label: "Monthly cadence meetings held on schedule", weight: 50 },
+        { label: "Action items closed before next cycle", weight: 30 },
+        { label: "Meeting notes shared within 24 hours", weight: 20 },
+      ],
+    },
+    {
+      name: "Cooperation & Trust",
+      fields: [
+        { label: "Client responsive to requests within 48 hours", weight: 60 },
+        { label: "Joint planning or roadmap session completed", weight: 40 },
+      ],
+    },
   ],
   project: [
-    { name: "Delivery Performance", fields: [
-      { label: "Sprint or milestone delivered on time", weight: 50 },
-      { label: "Defect rate within agreed threshold", weight: 30 },
-      { label: "No critical production incidents this cycle", weight: 20 },
-    ]},
-    { name: "Quality & Feedback", fields: [
-      { label: "Client feedback positive this cycle", weight: 55 },
-      { label: "Feedback actioned and communicated back to client", weight: 45 },
-    ]},
-    { name: "Scope & Change Control", fields: [
-      { label: "Change requests formally reviewed and documented", weight: 50 },
-      { label: "No unmanaged scope creep this cycle", weight: 50 },
-    ]},
+    {
+      name: "Delivery Performance",
+      fields: [
+        { label: "Sprint or milestone delivered on time", weight: 50 },
+        { label: "Defect rate within agreed threshold", weight: 30 },
+        { label: "No critical production incidents this cycle", weight: 20 },
+      ],
+    },
+    {
+      name: "Quality & Feedback",
+      fields: [
+        { label: "Client feedback positive this cycle", weight: 55 },
+        { label: "Feedback actioned and communicated back to client", weight: 45 },
+      ],
+    },
+    {
+      name: "Scope & Change Control",
+      fields: [
+        { label: "Change requests formally reviewed and documented", weight: 50 },
+        { label: "No unmanaged scope creep this cycle", weight: 50 },
+      ],
+    },
   ],
   white_space: [
-    { name: "Service Penetration", fields: [
-      { label: "More than 3 active services currently delivered", weight: 50 },
-      { label: "At least 1 new service proposed this quarter", weight: 50 },
-    ]},
-    { name: "Upsell & Growth Signals", fields: [
-      { label: "Upsell opportunity identified and logged in CRM", weight: 50 },
-      { label: "White-space pitch scheduled with decision maker", weight: 50 },
-    ]},
-    { name: "Account Intelligence", fields: [
-      { label: "Account notes updated this month", weight: 40 },
-      { label: "Competitive landscape reviewed", weight: 30 },
-      { label: "Stakeholder map current and verified", weight: 30 },
-    ]},
+    {
+      name: "Service Penetration",
+      fields: [
+        { label: "More than 3 active services currently delivered", weight: 50 },
+        { label: "At least 1 new service proposed this quarter", weight: 50 },
+      ],
+    },
+    {
+      name: "Upsell & Growth Signals",
+      fields: [
+        { label: "Upsell opportunity identified and logged in CRM", weight: 50 },
+        { label: "White-space pitch scheduled with decision maker", weight: 50 },
+      ],
+    },
+    {
+      name: "Account Intelligence",
+      fields: [
+        { label: "Account notes updated this month", weight: 40 },
+        { label: "Competitive landscape reviewed", weight: 30 },
+        { label: "Stakeholder map current and verified", weight: 30 },
+      ],
+    },
   ],
   contract: [
-    { name: "Contract Terms", fields: [
-      { label: "Auto-renew clause in place", weight: 35 },
-      { label: "Non-terminator clause signed", weight: 35 },
-      { label: "Minimum one-year lock confirmed", weight: 30 },
-    ]},
-    { name: "Compliance & Renewal", fields: [
-      { label: "Process compliance score above 7 out of 10", weight: 50 },
-      { label: "Renewal conversation initiated 90 days before expiry", weight: 50 },
-    ]},
-    { name: "Commercial Terms", fields: [
-      { label: "Annual price-hike clause agreed and documented", weight: 55 },
-      { label: "Annual contract review meeting scheduled", weight: 45 },
-    ]},
+    {
+      name: "Contract Terms",
+      fields: [
+        { label: "Auto-renew clause in place", weight: 35 },
+        { label: "Non-terminator clause signed", weight: 35 },
+        { label: "Minimum one-year lock confirmed", weight: 30 },
+      ],
+    },
+    {
+      name: "Compliance & Renewal",
+      fields: [
+        { label: "Process compliance score above 7 out of 10", weight: 50 },
+        { label: "Renewal conversation initiated 90 days before expiry", weight: 50 },
+      ],
+    },
+    {
+      name: "Commercial Terms",
+      fields: [
+        { label: "Annual price-hike clause agreed and documented", weight: 55 },
+        { label: "Annual contract review meeting scheduled", weight: 45 },
+      ],
+    },
   ],
   csat: [
-    { name: "NPS & Surveys", fields: [
-      { label: "NPS score collected and above 7 this quarter", weight: 45 },
-      { label: "Quarterly satisfaction survey completed", weight: 35 },
-      { label: "Low-score responses addressed within 2 weeks", weight: 20 },
-    ]},
-    { name: "Support Quality", fields: [
-      { label: "Support tickets resolved within SLA", weight: 55 },
-      { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
-    ]},
-    { name: "Executive Sentiment", fields: [
-      { label: "Executive sponsor expressed positive sentiment", weight: 55 },
-      { label: "No major complaints or unresolved escalations", weight: 45 },
-    ]},
+    {
+      name: "NPS & Surveys",
+      fields: [
+        { label: "NPS score collected and above 7 this quarter", weight: 45 },
+        { label: "Quarterly satisfaction survey completed", weight: 35 },
+        { label: "Low-score responses addressed within 2 weeks", weight: 20 },
+      ],
+    },
+    {
+      name: "Support Quality",
+      fields: [
+        { label: "Support tickets resolved within SLA", weight: 55 },
+        { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
+      ],
+    },
+    {
+      name: "Executive Sentiment",
+      fields: [
+        { label: "Executive sponsor expressed positive sentiment", weight: 55 },
+        { label: "No major complaints or unresolved escalations", weight: 45 },
+      ],
+    },
   ],
   risk: [
-    { name: "Competitive Risk", fields: [
-      { label: "Competitor activity monitored and documented", weight: 45 },
-      { label: "Defense strategy or counter-proposal ready", weight: 55 },
-    ]},
-    { name: "Relationship & POC Risk", fields: [
-      { label: "Key POC stable — no resignation or transfer risk", weight: 50 },
-      { label: "C-level sponsor accessible and engaged", weight: 50 },
-    ]},
-    { name: "Financial Risk", fields: [
-      { label: "Invoice paid within agreed payment terms", weight: 55 },
-      { label: "No overdue balance outstanding", weight: 45 },
-    ]},
-    { name: "Operational Risk", fields: [
-      { label: "Compliance and regulatory requirements met", weight: 50 },
-      { label: "No geopolitical disruptions impacting delivery", weight: 50 },
-    ]},
+    {
+      name: "Competitive Risk",
+      fields: [
+        { label: "Competitor activity monitored and documented", weight: 45 },
+        { label: "Defense strategy or counter-proposal ready", weight: 55 },
+      ],
+    },
+    {
+      name: "Relationship & POC Risk",
+      fields: [
+        { label: "Key POC stable â€” no resignation or transfer risk", weight: 50 },
+        { label: "C-level sponsor accessible and engaged", weight: 50 },
+      ],
+    },
+    {
+      name: "Financial Risk",
+      fields: [
+        { label: "Invoice paid within agreed payment terms", weight: 55 },
+        { label: "No overdue balance outstanding", weight: 45 },
+      ],
+    },
+    {
+      name: "Operational Risk",
+      fields: [
+        { label: "Compliance and regulatory requirements met", weight: 50 },
+        { label: "No geopolitical disruptions impacting delivery", weight: 50 },
+      ],
+    },
   ],
   resource: [
-    { name: "Backup & Continuity", fields: [
-      { label: "Backup engineer assigned for every critical role", weight: 55 },
-      { label: "Knowledge transfer documentation up to date", weight: 45 },
-    ]},
-    { name: "Staffing Stability", fields: [
-      { label: "No unplanned attrition on account this month", weight: 50 },
-      { label: "Planned leaves managed without delivery impact", weight: 50 },
-    ]},
-    { name: "Critical Resource Retention", fields: [
-      { label: "Critical resources engaged and retained", weight: 55 },
-      { label: "Succession plan in place for key technical roles", weight: 45 },
-    ]},
+    {
+      name: "Backup & Continuity",
+      fields: [
+        { label: "Backup engineer assigned for every critical role", weight: 55 },
+        { label: "Knowledge transfer documentation up to date", weight: 45 },
+      ],
+    },
+    {
+      name: "Staffing Stability",
+      fields: [
+        { label: "No unplanned attrition on account this month", weight: 50 },
+        { label: "Planned leaves managed without delivery impact", weight: 50 },
+      ],
+    },
+    {
+      name: "Critical Resource Retention",
+      fields: [
+        { label: "Critical resources engaged and retained", weight: 55 },
+        { label: "Succession plan in place for key technical roles", weight: 45 },
+      ],
+    },
   ],
   financial: [
-    { name: "Revenue Performance", fields: [
-      { label: "Monthly billing target met", weight: 50 },
-      { label: "ARR growth on track versus annual plan", weight: 50 },
-    ]},
-    { name: "Margin & Efficiency", fields: [
-      { label: "Resource utilization above 80 percent", weight: 50 },
-      { label: "Cost overruns within 5 percent of budget", weight: 50 },
-    ]},
-    { name: "Commercial Growth", fields: [
-      { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
-      { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
-    ]},
+    {
+      name: "Revenue Performance",
+      fields: [
+        { label: "Monthly billing target met", weight: 50 },
+        { label: "ARR growth on track versus annual plan", weight: 50 },
+      ],
+    },
+    {
+      name: "Margin & Efficiency",
+      fields: [
+        { label: "Resource utilization above 80 percent", weight: 50 },
+        { label: "Cost overruns within 5 percent of budget", weight: 50 },
+      ],
+    },
+    {
+      name: "Commercial Growth",
+      fields: [
+        { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
+        { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
+      ],
+    },
   ],
 };
 function buildNewAccountKpiData(area) {
@@ -407,42 +623,53 @@ function buildNewAccountKpiData(area) {
     })),
   }));
 }
-const HEALTH_AREAS = ["relationship", "project", "white_space", "contract", "csat", "risk", "resource", "financial"];
+const HEALTH_AREAS = [
+  "relationship",
+  "project",
+  "white_space",
+  "contract",
+  "csat",
+  "risk",
+  "resource",
+  "financial",
+];
 
-// ─── create new account ───────────────────────────────────────────────────────
+// â”€â”€â”€ create new account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function createAccount(data) {
-  const { error } = await supabase.from("accounts").insert([{
-    id: data.id,
-    name: data.name,
-    short_code: data.shortCode,
-    industry: data.industry,
-    tier: data.tier,
-    health: 50,
-    trend: 0,
-    contract_value: data.contractValue,
-    arr: data.arr,
-    renewal_days: data.renewalDays,
-    contract_type: data.contractType,
-    last_touch: "Just now",
-    status: "healthy",
-    retention_risk: "Low",
-    growth_upside: 0,
-    white_space_count: 0,
-    is_startup: false,
-    region: data.region || null,
-    primary_contact_name: data.primaryContactName || null,
-    linkedin_url: data.linkedinUrl || null,
-    linkedin_summary: data.linkedinSummary || null,
-    ...(data.linkedinSummaryUpdatedAt
-      ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
-      : {}),
-    ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
-    ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
-    ...(data.websiteSummaryUpdatedAt
-      ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
-      : {}),
-    assigned_kam_id: data.assignedKamId || null,
-  }]);
+  const { error } = await supabase.from("accounts").insert([
+    {
+      id: data.id,
+      name: data.name,
+      short_code: data.shortCode,
+      industry: data.industry,
+      tier: data.tier,
+      health: 50,
+      trend: 0,
+      contract_value: data.contractValue,
+      arr: data.arr,
+      renewal_days: data.renewalDays,
+      contract_type: data.contractType,
+      last_touch: "Just now",
+      status: "healthy",
+      retention_risk: "Low",
+      growth_upside: 0,
+      white_space_count: 0,
+      is_startup: false,
+      region: data.region || null,
+      primary_contact_name: data.primaryContactName || null,
+      linkedin_url: data.linkedinUrl || null,
+      linkedin_summary: data.linkedinSummary || null,
+      ...(data.linkedinSummaryUpdatedAt
+        ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
+        : {}),
+      ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
+      ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
+      ...(data.websiteSummaryUpdatedAt
+        ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
+        : {}),
+      assigned_kam_id: data.assignedKamId || null,
+    },
+  ]);
   if (error) throw error;
 
   // Pre-populate health_scores for all 8 areas so KPI sections show immediately
@@ -457,7 +684,7 @@ export async function createAccount(data) {
   if (hsError) throw hsError;
 }
 
-// ─── update account KYC fields ───────────────────────────────────────────────
+// â”€â”€â”€ update account KYC fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function updateAccountKyc(accountId, updates) {
   const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
   if (error) throw error;
@@ -504,7 +731,8 @@ export async function syncSalesforceMappedFields(accountId, payload) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
-  if (!session?.access_token) throw new Error("Please sign in again before syncing Salesforce fields.");
+  if (!session?.access_token)
+    throw new Error("Please sign in again before syncing Salesforce fields.");
 
   return syncSalesforceMappedFieldsServer({
     data: {
@@ -529,7 +757,7 @@ export async function generateAccountLinkedinSummary(accountId) {
     },
   });
 }
-// ─── fetch single account (full shape) ───────────────────────────────────────
+// â”€â”€â”€ fetch single account (full shape) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function generateAccountWebsiteSummary(accountId) {
   const {
     data: { session },
@@ -570,14 +798,18 @@ export async function fetchAccount(id) {
     if (!s) return { score: 0, metrics: [], kpiData: null, updatedAt: null };
 
     // When kpi_data exists, derive progress bars from it so ScoreBlock always
-    // mirrors what the KPI editor shows — section name + weighted checkbox score.
+    // mirrors what the KPI editor shows â€” section name + weighted checkbox score.
     if (Array.isArray(s.kpi_data) && s.kpi_data.length > 0) {
       const derived = s.kpi_data.map((sec, i) => {
         const fields = sec.fields ?? [];
         const totalWeight = fields.reduce((a, f) => a + (Number(f.weight) || 0), 0);
         const earned = fields.reduce((a, f) => a + (f.checked ? Number(f.weight) || 0 : 0), 0);
         const pct = totalWeight > 0 ? (earned / totalWeight) * 100 : 0;
-        return { id: `derived-${i}`, label: sec.name, value: parseFloat(((pct / 100) * 10).toFixed(1)) };
+        return {
+          id: `derived-${i}`,
+          label: sec.name,
+          value: parseFloat(((pct / 100) * 10).toFixed(1)),
+        };
       });
       return mapHealthBlock(s.score, derived, s.kpi_data, s.updated_at);
     }
@@ -649,7 +881,7 @@ export async function fetchAccount(id) {
     })),
   };
 }
-// ─── fetch escalations ────────────────────────────────────────────────────────
+// â”€â”€â”€ fetch escalations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function fetchEscalations(accountId) {
   let q = supabase.from("escalations").select("*, escalation_action_items(*)");
   if (accountId) q = q.eq("account_id", accountId);
@@ -671,7 +903,7 @@ export async function fetchEscalations(accountId) {
     actionItems: (e.escalation_action_items ?? []).map((a) => ({ label: a.label, done: a.done })),
   }));
 }
-// ─── fetch opportunities ──────────────────────────────────────────────────────
+// â”€â”€â”€ fetch opportunities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function fetchOpportunities(accountId) {
   let q = supabase.from("opportunities").select("*");
   if (accountId) q = q.eq("account_id", accountId);
@@ -707,10 +939,10 @@ export async function fetchContracts(opts) {
     const cd = firstRelatedRow(row.contract_details);
     return {
       ...mapFlatAccount(row),
-      duration: cd?.duration ?? "—",
+      duration: cd?.duration ?? "â€”",
       autoRenew: Boolean(cd?.auto_renew),
       nonTerminator: Boolean(cd?.non_terminator),
-      priceHike: cd?.price_hike ?? "—",
+      priceHike: cd?.price_hike ?? "â€”",
     };
   });
 }
@@ -743,7 +975,7 @@ export async function logAccountChanges(accountId, changes, editedBy) {
   );
   if (error) throw error;
 }
-// ─── fetch notifications ──────────────────────────────────────────────────────
+// â”€â”€â”€ fetch notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export async function fetchNotifications() {
   const { data, error } = await supabase
     .from("notifications")
