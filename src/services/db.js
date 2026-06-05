@@ -75,24 +75,69 @@ function isMissingTableError(error) {
 function getRowComplete(row) {
   return Boolean(row.complete ?? row.completed ?? row.Complete ?? false);
 }
+function asNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function areaLabel(area) {
+  return String(area ?? "")
+    .split(/[_-]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+function actionLabelFromKpi(label) {
+  const clean = String(label ?? "").trim();
+  if (!clean) return "Complete KPI follow-up";
+  if (
+    /^(complete|send|schedule|share|review|prepare|confirm|resolve|submit|update)\b/i.test(clean)
+  ) {
+    return clean;
+  }
+  return `Complete: ${clean}`;
+}
+function priorityRank(priority) {
+  if (priority === "P1") return 0;
+  if (priority === "P2") return 1;
+  return 2;
+}
+function metricPriorityFromWeight(weight) {
+  if (weight >= 50) return "P1";
+  if (weight >= 30) return "P2";
+  return "P3";
+}
+function sortDashboardActionItems(items) {
+  return [...items].sort((a, b) => {
+    if (a.isEscalation !== b.isEscalation) return a.isEscalation ? -1 : 1;
+    const priorityDelta = priorityRank(a.priority) - priorityRank(b.priority);
+    if (priorityDelta !== 0) return priorityDelta;
+    return (b.importanceScore ?? 0) - (a.importanceScore ?? 0);
+  });
+}
 function mapTask(row, accountLookup = new Map(), healthMetricLookup = new Map()) {
   const healthMetric = healthMetricLookup.get(row.health_metric_id);
   const accountId = row.account_id ?? healthMetric?.accountId ?? null;
   const account = accountLookup.get(accountId);
+  const isEscalation = Boolean(row.escalation_id);
   return {
     id: row.id,
+    sourceType: "task",
     accountId,
     accountName: account?.name ?? accountId ?? "Portfolio",
     title: row.title ?? row.name ?? row.label ?? "Untitled task",
     description: row.description ?? "",
     due: row.due ?? row.due_date ?? "",
-    priority: row.priority ?? "P3",
-    source: row.source ?? row.type ?? healthMetric?.label ?? "Task",
+    priority: isEscalation ? "P1" : (row.priority ?? "P3"),
+    source: isEscalation ? "Escalation" : (row.source ?? row.type ?? healthMetric?.label ?? "Task"),
     complete: getRowComplete(row),
     completedAt: row.completed_at ?? null,
+    escalationId: row.escalation_id ?? null,
+    isEscalation,
     healthMetricId: row.health_metric_id ?? null,
     healthMetricLabel: healthMetric?.label ?? "",
+    healthScoreId: healthMetric?.healthScoreId ?? null,
     healthArea: healthMetric?.area ?? "",
+    importanceScore: isEscalation ? 100 : row.health_metric_id ? 70 : 20,
   };
 }
 // --- fetch accounts (flat) ----------------------------------------------------
@@ -144,7 +189,7 @@ export async function fetchKamTasks(opts = {}) {
     healthMetricIds.length
       ? supabase
           .from("health_metrics")
-          .select("id, label, complete, Complete, health_scores(account_id, area)")
+          .select("id, label, complete, Complete, health_scores(id, account_id, area)")
           .in("id", healthMetricIds)
       : Promise.resolve({ data: [] }),
   ]);
@@ -161,6 +206,7 @@ export async function fetchKamTasks(opts = {}) {
           label: metric.label,
           complete: Boolean(metric.complete ?? metric.Complete ?? false),
           accountId: score?.account_id ?? null,
+          healthScoreId: score?.id ?? null,
           area: score?.area ?? "",
         },
       ];
@@ -169,54 +215,121 @@ export async function fetchKamTasks(opts = {}) {
 
   return visibleTasks.map((task) => mapTask(task, accountLookup, healthMetricLookup));
 }
+async function fetchDashboardKpiActionItems(accountIds, accountLookup) {
+  const { data, error } = await supabase
+    .from("health_scores")
+    .select("id, account_id, area, kpi_data")
+    .in("account_id", accountIds);
+  if (error) throw error;
+
+  const items = [];
+  for (const score of data ?? []) {
+    const account = accountLookup.get(score.account_id);
+    const area = areaLabel(score.area);
+    const kpiData = Array.isArray(score.kpi_data) ? score.kpi_data : null;
+    if (!kpiData?.length) continue;
+
+    for (const section of kpiData) {
+      for (const field of section.fields ?? []) {
+        if (field.checked) continue;
+        const weight = asNumber(field.weight);
+        items.push({
+          id: `kpi:${score.id}:${section.id}:${field.id}`,
+          sourceType: "kpi_data",
+          accountId: score.account_id,
+          accountName: account?.name ?? score.account_id,
+          title: actionLabelFromKpi(field.label),
+          description: `${section.name} KPI is unchecked in the ${area} scorecard.`,
+          due: "KPI action",
+          priority: metricPriorityFromWeight(weight),
+          source: `KPI Data - ${area}`,
+          complete: false,
+          completedAt: null,
+          escalationId: null,
+          isEscalation: false,
+          healthMetricId: section.metricId ?? null,
+          healthMetricLabel: section.name,
+          healthScoreId: score.id,
+          kpiSectionId: section.id,
+          kpiFieldId: field.id,
+          healthArea: score.area,
+          importanceScore: weight,
+        });
+      }
+    }
+  }
+  return items;
+}
 export async function fetchDashboardActionItems(opts = {}) {
   const accounts = await fetchAccounts({ role: opts.role, userId: opts.userId });
   const accountIds = accounts.map((account) => account.id);
   if (accountIds.length === 0) return [];
+  const accountLookup = new Map(accounts.map((account) => [account.id, account]));
   const tasks = await fetchKamTasks({ accountIds, includeCompleted: false });
-  if (tasks.length > 0) return tasks;
-
-  const { data, error } = await supabase
-    .from("activities")
-    .select("*, accounts(id, name, short_code)")
-    .in("account_id", accountIds)
-    .neq("status", "Done")
-    .order("created_at", { ascending: false })
-    .limit(20);
-  if (error) throw error;
-  return (data ?? []).map((activity) => ({
-    id: activity.id,
-    accountId: activity.account_id,
-    accountName: activity.accounts?.name ?? activity.account_id,
-    title: activity.title,
-    description: "",
-    due: activity.due ?? "",
-    priority: activity.rag === "R" ? "P1" : activity.rag === "A" ? "P2" : "P3",
-    source: activity.area ?? "Activity",
-    complete: false,
-    completedAt: null,
-    healthMetricId: null,
-    healthMetricLabel: "",
-    healthArea: "",
-    readOnlyFallback: true,
-  }));
+  const kpiItems = await fetchDashboardKpiActionItems(accountIds, accountLookup);
+  const primaryItems = sortDashboardActionItems([...tasks, ...kpiItems]);
+  return primaryItems;
 }
-export async function updateDashboardTaskComplete(taskId, complete, healthMetricId) {
-  const completedAt = complete ? new Date().toISOString() : null;
+function setKpiDataFieldChecked(kpiData, patch) {
+  if (!Array.isArray(kpiData)) return { kpiData, changed: false };
+  let changed = false;
+  const next = kpiData.map((section) => {
+    if (section.id !== patch.kpiSectionId) return section;
+    const fields = (section.fields ?? []).map((field) => {
+      if (field.id !== patch.kpiFieldId) return field;
+      if (Boolean(field.checked) === patch.complete) return field;
+      changed = true;
+      return { ...field, checked: patch.complete };
+    });
+    return changed ? { ...section, fields } : section;
+  });
+  return { kpiData: next, changed };
+}
+async function updateKpiDataActionComplete({ healthScoreId, kpiSectionId, kpiFieldId, complete }) {
+  if (!healthScoreId) return;
+
+  const { data: scoreRow, error: scoreError } = await supabase
+    .from("health_scores")
+    .select("id, kpi_data")
+    .eq("id", healthScoreId)
+    .maybeSingle();
+  if (scoreError) throw scoreError;
+  if (!scoreRow) return;
+
+  const { kpiData, changed } = setKpiDataFieldChecked(scoreRow.kpi_data, {
+    kpiSectionId,
+    kpiFieldId,
+    complete,
+  });
+  if (!changed) return;
+
+  const { error: updateError } = await supabase
+    .from("health_scores")
+    .update({ kpi_data: kpiData, updated_at: new Date().toISOString() })
+    .eq("id", healthScoreId);
+  if (updateError) throw updateError;
+}
+export async function updateDashboardActionItemComplete(action) {
+  const sourceType = action.sourceType ?? "task";
+  if (sourceType === "kpi_data") {
+    await updateKpiDataActionComplete(action);
+    return;
+  }
+
   const updatedAt = new Date().toISOString();
   const { error } = await supabase
     .from("tasks")
-    .update({ Complete: complete, updated_at: updatedAt })
-    .eq("id", taskId);
+    .update({ Complete: action.complete, updated_at: updatedAt })
+    .eq("id", action.id);
   if (error) throw error;
-
-  if (healthMetricId) {
-    const { error: metricError } = await supabase
-      .from("health_metrics")
-      .update({ Complete: complete, complete, completed_at: completedAt })
-      .eq("id", healthMetricId);
-    if (metricError) throw metricError;
-  }
+}
+export async function updateDashboardTaskComplete(taskId, complete, healthMetricId) {
+  await updateDashboardActionItemComplete({
+    id: taskId,
+    sourceType: "task",
+    complete,
+    healthMetricId,
+  });
 }
 export async function fetchKamUsers() {
   const withStatus = await supabase
