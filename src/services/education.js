@@ -55,7 +55,7 @@ Return ONLY a valid JSON array — no markdown, no code fences:
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o",
+        model: "gpt-5.4-mini",
         tools: [{ type: "web_search_preview" }],
         input: prompt,
       }),
@@ -118,7 +118,7 @@ async function fetchWithChatCompletions(apiKey, prompt) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o",
+      model: "gpt-5.4-mini",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
     }),
