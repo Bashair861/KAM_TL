@@ -2,9 +2,9 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatCurrency } from "@/data/kam-data";
-import { fetchAccounts, fetchKamUsers, updateAccountKam, createAccount } from "@/services/db";
+import { fetchAccounts, fetchKamUsers, updateAccountKam, createAccount, deleteAccount } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
-import { TrendingDown, TrendingUp, X, Loader2, Building2 } from "lucide-react";
+import { TrendingDown, TrendingUp, X, Loader2, Building2, Trash2, AlertTriangle } from "lucide-react";
 
 export const Route = createFileRoute("/accounts/")({
   head: () => ({
@@ -36,6 +36,8 @@ function AccountsListPage() {
   const queryClient = useQueryClient();
 
   const [showNewModal, setShowNewModal] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [deleteError, setDeleteError] = useState("");
 
   const { data: accounts = [], isLoading } = useQuery({
     queryKey: ["accounts", userId, role],
@@ -51,6 +53,16 @@ function AccountsListPage() {
   const { mutate: assignKam } = useMutation({
     mutationFn: ({ accountId, kamId }) => updateAccountKam(accountId, kamId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+
+  const { mutate: confirmDelete, isPending: deleting } = useMutation({
+    mutationFn: (accountId) => deleteAccount(accountId),
+    onSuccess: () => {
+      setConfirmDeleteId(null);
+      setDeleteError("");
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+    },
+    onError: (err) => setDeleteError(err.message ?? "Delete failed. Make sure the RLS policy is applied in Supabase."),
   });
 
   return (
@@ -92,6 +104,7 @@ function AccountsListPage() {
                 <th className="px-6 py-3 text-right">ARR</th>
                 <th className="px-6 py-3 text-right">Renewal</th>
                 <th className="px-6 py-3 text-right">Last Touch</th>
+                {isHead && <th className="px-6 py-3" />}
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -152,6 +165,17 @@ function AccountsListPage() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right text-xs text-muted-foreground">{a.lastTouch}</td>
+                  {isHead && (
+                    <td className="px-6 py-4">
+                      <button
+                        onClick={() => setConfirmDeleteId(a.id)}
+                        title="Delete account"
+                        className="size-7 rounded-md hover:bg-crit/10 hover:text-crit flex items-center justify-center text-muted-foreground transition-colors ml-auto"
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -169,6 +193,68 @@ function AccountsListPage() {
           }}
         />
       )}
+
+      {confirmDeleteId && (
+        <DeleteConfirmModal
+          account={accounts.find((a) => a.id === confirmDeleteId)}
+          deleting={deleting}
+          error={deleteError}
+          onCancel={() => { setConfirmDeleteId(null); setDeleteError(""); }}
+          onConfirm={() => confirmDelete(confirmDeleteId)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Delete Confirmation Modal ─────────────────────────────────────────────────
+
+function DeleteConfirmModal({ account, deleting, error, onCancel, onConfirm }) {
+  if (!account) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+      onClick={!deleting ? onCancel : undefined}
+    >
+      <div
+        className="bg-background w-full max-w-md rounded-xl border shadow-2xl p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start gap-4 mb-5">
+          <span className="size-10 rounded-full bg-crit/10 text-crit flex items-center justify-center shrink-0">
+            <AlertTriangle className="size-5" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-base font-bold">Delete account?</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              <span className="font-semibold text-foreground">{account.name}</span> and all its
+              data — health scores, activities, escalations, contracts, history — will be
+              permanently deleted. This cannot be undone.
+            </p>
+          </div>
+        </div>
+        {error && (
+          <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2 mb-4">
+            {error}
+          </p>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={deleting}
+            className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={deleting}
+            className="px-4 py-2 bg-crit text-white text-xs font-bold rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:opacity-90 transition-opacity"
+          >
+            {deleting ? <><Loader2 className="size-3 animate-spin" /> Deleting…</> : "Yes, delete account"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

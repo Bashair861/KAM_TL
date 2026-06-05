@@ -70,7 +70,7 @@ export const Route = createFileRoute("/accounts/$accountId")({
 });
 const TABS = [
   "Overview",
-  "Score Marking Matrics",
+  "Score Marking Matrices",
   "Activity to Increase Score",
   "Retention VS Growth",
   "Educate client",
@@ -689,7 +689,7 @@ function AccountDetailPage() {
 
         <div className="py-8 pb-16">
           {tab === "Overview" && <OverviewTab account={account} />}
-          {tab === "Score Marking Matrics" && <ScoreMatricsTab account={account} />}
+          {tab === "Score Marking Matrices" && <ScoreMatricsTab account={account} />}
           {tab === "Activity to Increase Score" && (
             <ActivityTab account={account} opportunities={accountOpportunities} />
           )}
@@ -1112,29 +1112,26 @@ function OverviewTab({ account }) {
               </p>
             ) : salesforceLookup.status === "error" ? (
               <p className="text-xs text-crit">{salesforceLookup.error}</p>
-            ) : (
-              <>
-                {salesforceLookup.status === "found" && salesforceMappingRows.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSalesforceRows((current) =>
-                        Object.keys(current).length > 0
-                          ? current
-                          : defaultSalesforceSelection(salesforceMappingRows),
-                      );
-                      setSalesforceMappingOpen(true);
-                    }}
-                    className="mb-3 px-3 py-1.5 border text-[11px] font-bold rounded-md hover:bg-muted transition-colors"
-                  >
-                    Review field mapping
-                  </button>
-                )}
-                <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-foreground font-mono">
-                  {salesforceLookup.text}
-                </pre>
-              </>
-            )}
+            ) : salesforceLookup.status === "not-found" ? (
+              <p className="text-xs text-warn">
+                Account or company <span className="font-semibold">"{account.name}"</span> was not found in Salesforce.
+              </p>
+            ) : salesforceLookup.status === "found" && salesforceMappingRows.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedSalesforceRows((current) =>
+                    Object.keys(current).length > 0
+                      ? current
+                      : defaultSalesforceSelection(salesforceMappingRows),
+                  );
+                  setSalesforceMappingOpen(true);
+                }}
+                className="px-3 py-1.5 border text-[11px] font-bold rounded-md hover:bg-muted transition-colors"
+              >
+                Review field mapping
+              </button>
+            ) : null}
           </div>
         )}
         {ocrStatus === "done" && (
@@ -1853,108 +1850,68 @@ function KycField({ n, label, icon, children, wide, editable, value, onChange, m
     </div>
   );
 }
-/* ============================== TAB 2: Score Marking Matrics ============================== */
+/* ============================== TAB 2: Score Marking Matrices ============================== */
 function ScoreMatricsTab({ account }) {
   const [expanded, setExpanded] = useState(null);
   const open = (title, hint, block, area) => setExpanded({ title, hint, block, area });
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <ScoreCard
-          title="Overall Health"
-          score={account.health / 10}
-          subtitle={`Trend ${account.trend >= 0 ? "+" : ""}${account.trend}%`}
-        />
-        <ScoreCard title="CSAT" score={account.csat.score} subtitle="Customer satisfaction" />
-        <ScoreCard
-          title="Risk"
-          score={account.riskScoring.score}
-          subtitle="Lower = riskier"
-          inverse
-        />
+      {/* All 8 health areas + overall at a glance */}
+      <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2">
+        <ScoreCard title="Overall" score={account.health / 10} subtitle={`${account.trend >= 0 ? "+" : ""}${account.trend}%`} />
+        <ScoreCard title="Relationship" score={account.relationshipHealth.score} />
+        <ScoreCard title="Project" score={account.projectHealth.score} />
+        <ScoreCard title="White Space" score={account.whiteSpace.score} />
+        <ScoreCard title="Contract" score={account.contractScoring.score} />
+        <ScoreCard title="CSAT" score={account.csat.score} />
+        <ScoreCard title="Risk" score={account.riskScoring.score} inverse />
+        <ScoreCard title="Resources" score={account.resourceHealth.score} />
+        <ScoreCard title="Financial" score={account.financialHealth.score} />
       </div>
 
       <ScoreBlock
         title="Relationship Health"
         hint="Meetups, monthly meetings, director meetings, cooperation"
         block={account.relationshipHealth}
-        onExpand={() =>
-          open(
-            "Relationship Health",
-            "Meetups, monthly meetings, director meetings, cooperation",
-            account.relationshipHealth,
-            "relationship",
-          )
-        }
+        onExpand={() => open("Relationship Health", "Meetups, monthly meetings, director meetings, cooperation", account.relationshipHealth, "relationship")}
       />
       <ScoreBlock
         title="Project Health"
         hint="Deliverables, feedback, quality/defects, scope & change"
         block={account.projectHealth}
-        onExpand={() =>
-          open(
-            "Project Health",
-            "Deliverables, feedback, quality/defects, scope & change",
-            account.projectHealth,
-            "project",
-          )
-        }
+        onExpand={() => open("Project Health", "Deliverables, feedback, quality/defects, scope & change", account.projectHealth, "project")}
       />
       <ScoreBlock
         title="White Space Analysis"
         hint="Meeting cadence, upsell capacity, services penetration"
         block={account.whiteSpace}
-        onExpand={() =>
-          open(
-            "White Space Analysis",
-            "Meeting cadence, upsell capacity, services penetration",
-            account.whiteSpace,
-            "white_space",
-          )
-        }
+        onExpand={() => open("White Space Analysis", "Meeting cadence, upsell capacity, services penetration", account.whiteSpace, "white_space")}
       />
-
-      <ContractScoringBlock account={account} />
-
+      <ContractScoringBlock
+        account={account}
+        onExpand={() => open("Contract Scoring", "Type, duration, terms, compliance, SWOT, customer feedback", account.contractScoring, "contract")}
+      />
       <ScoreBlock
         title="Customer Satisfaction Score"
         hint="NPS, surveys, ticket CSAT, exec sentiment"
         block={account.csat}
-        onExpand={() =>
-          open(
-            "Customer Satisfaction Score",
-            "NPS, surveys, ticket CSAT, exec sentiment",
-            account.csat,
-            "csat",
-          )
-        }
+        onExpand={() => open("Customer Satisfaction Score", "NPS, surveys, ticket CSAT, exec sentiment", account.csat, "csat")}
       />
       <ScoreBlock
         title="Risk Scoring"
         hint="Competitors, geopolitical, POC churn, payments, C-level changes"
         block={account.riskScoring}
-        onExpand={() =>
-          open(
-            "Risk Scoring",
-            "Competitors, geopolitical, POC churn, payments, C-level changes",
-            account.riskScoring,
-            "risk",
-          )
-        }
+        onExpand={() => open("Risk Scoring", "Competitors, geopolitical, POC churn, payments, C-level changes", account.riskScoring, "risk")}
       />
-      <ResourceHealthBlock account={account} />
+      <ResourceHealthBlock
+        account={account}
+        onExpand={() => open("Resources Health", "Backup coverage, leaves, critical roles, team size", account.resourceHealth, "resource")}
+      />
       <ScoreBlock
         title="Financial Health"
         hint="Revenue generation & resource allocation efficiency"
         block={account.financialHealth}
-        onExpand={() =>
-          open(
-            "Financial Health",
-            "Revenue generation & resource allocation efficiency",
-            account.financialHealth,
-            "financial",
-          )
-        }
+        onExpand={() => open("Financial Health", "Revenue generation & resource allocation efficiency", account.financialHealth, "financial")}
       />
 
       {expanded && (
@@ -1975,15 +1932,15 @@ function ScoreCard({ title, score, subtitle, inverse }) {
   const ok = inverse ? score >= 5 : score >= 6;
   const color = good ? "text-success" : ok ? "text-warn" : "text-crit";
   return (
-    <div className="bg-card border rounded-xl p-5">
-      <p className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
+    <div className="bg-card border rounded-xl p-3">
+      <p className="text-[9px] uppercase tracking-widest text-muted-foreground font-bold truncate">
         {title}
       </p>
-      <p className={`text-3xl font-bold mt-1 ${color}`}>
+      <p className={`text-xl font-bold mt-0.5 ${color}`}>
         {score.toFixed(1)}
-        <span className="text-base text-muted-foreground">/10</span>
+        <span className="text-[10px] text-muted-foreground">/10</span>
       </p>
-      {subtitle && <p className="text-[11px] text-muted-foreground mt-1">{subtitle}</p>}
+      {subtitle && <p className="text-[10px] text-muted-foreground mt-0.5">{subtitle}</p>}
     </div>
   );
 }
@@ -2020,30 +1977,154 @@ function ScoreBlock({ title, hint, block, onExpand }) {
     </div>
   );
 }
+// Area-specific KPI section templates — minimum 2 meaningful subtasks each, weights sum to 100
+const AREA_KPI_DEFAULTS = {
+  relationship: [
+    { name: "CEO & Executive Engagement", fields: [
+      { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
+      { label: "Director-level meeting completed on schedule", weight: 35 },
+      { label: "Executive sponsor actively engaged", weight: 25 },
+    ]},
+    { name: "Meeting Cadence", fields: [
+      { label: "Monthly cadence meetings held on schedule", weight: 50 },
+      { label: "Action items closed before next cycle", weight: 30 },
+      { label: "Meeting notes shared within 24 hours", weight: 20 },
+    ]},
+    { name: "Cooperation & Trust", fields: [
+      { label: "Client responsive to requests within 48 hours", weight: 60 },
+      { label: "Joint planning or roadmap session completed", weight: 40 },
+    ]},
+  ],
+  project: [
+    { name: "Delivery Performance", fields: [
+      { label: "Sprint or milestone delivered on time", weight: 50 },
+      { label: "Defect rate within agreed threshold", weight: 30 },
+      { label: "No critical production incidents this cycle", weight: 20 },
+    ]},
+    { name: "Quality & Feedback", fields: [
+      { label: "Client feedback positive this cycle", weight: 55 },
+      { label: "Feedback actioned and communicated back to client", weight: 45 },
+    ]},
+    { name: "Scope & Change Control", fields: [
+      { label: "Change requests formally reviewed and documented", weight: 50 },
+      { label: "No unmanaged scope creep this cycle", weight: 50 },
+    ]},
+  ],
+  white_space: [
+    { name: "Service Penetration", fields: [
+      { label: "More than 3 active services currently delivered", weight: 50 },
+      { label: "At least 1 new service proposed this quarter", weight: 50 },
+    ]},
+    { name: "Upsell & Growth Signals", fields: [
+      { label: "Upsell opportunity identified and logged in CRM", weight: 50 },
+      { label: "White-space pitch scheduled with decision maker", weight: 50 },
+    ]},
+    { name: "Account Intelligence", fields: [
+      { label: "Account notes updated this month", weight: 40 },
+      { label: "Competitive landscape reviewed", weight: 30 },
+      { label: "Stakeholder map current and verified", weight: 30 },
+    ]},
+  ],
+  contract: [
+    { name: "Contract Terms", fields: [
+      { label: "Auto-renew clause in place", weight: 35 },
+      { label: "Non-terminator clause signed", weight: 35 },
+      { label: "Minimum one-year lock confirmed", weight: 30 },
+    ]},
+    { name: "Compliance & Renewal", fields: [
+      { label: "Process compliance score above 7 out of 10", weight: 50 },
+      { label: "Renewal conversation initiated 90 days before expiry", weight: 50 },
+    ]},
+    { name: "Commercial Terms", fields: [
+      { label: "Annual price-hike clause agreed and documented", weight: 55 },
+      { label: "Annual contract review meeting scheduled", weight: 45 },
+    ]},
+  ],
+  csat: [
+    { name: "NPS & Surveys", fields: [
+      { label: "NPS score collected and above 7 this quarter", weight: 45 },
+      { label: "Quarterly satisfaction survey completed", weight: 35 },
+      { label: "Low-score responses addressed within 2 weeks", weight: 20 },
+    ]},
+    { name: "Support Quality", fields: [
+      { label: "Support tickets resolved within SLA", weight: 55 },
+      { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
+    ]},
+    { name: "Executive Sentiment", fields: [
+      { label: "Executive sponsor expressed positive sentiment", weight: 55 },
+      { label: "No major complaints or unresolved escalations", weight: 45 },
+    ]},
+  ],
+  risk: [
+    { name: "Competitive Risk", fields: [
+      { label: "Competitor activity monitored and documented", weight: 45 },
+      { label: "Defense strategy or counter-proposal ready", weight: 55 },
+    ]},
+    { name: "Relationship & POC Risk", fields: [
+      { label: "Key POC stable — no resignation or transfer risk", weight: 50 },
+      { label: "C-level sponsor accessible and engaged", weight: 50 },
+    ]},
+    { name: "Financial Risk", fields: [
+      { label: "Invoice paid within agreed payment terms", weight: 55 },
+      { label: "No overdue balance outstanding", weight: 45 },
+    ]},
+    { name: "Operational Risk", fields: [
+      { label: "Compliance and regulatory requirements met", weight: 50 },
+      { label: "No geopolitical disruptions impacting delivery", weight: 50 },
+    ]},
+  ],
+  resource: [
+    { name: "Backup & Continuity", fields: [
+      { label: "Backup engineer assigned for every critical role", weight: 55 },
+      { label: "Knowledge transfer documentation up to date", weight: 45 },
+    ]},
+    { name: "Staffing Stability", fields: [
+      { label: "No unplanned attrition on account this month", weight: 50 },
+      { label: "Planned leaves managed without delivery impact", weight: 50 },
+    ]},
+    { name: "Critical Resource Retention", fields: [
+      { label: "Critical resources engaged and retained", weight: 55 },
+      { label: "Succession plan in place for key technical roles", weight: 45 },
+    ]},
+  ],
+  financial: [
+    { name: "Revenue Performance", fields: [
+      { label: "Monthly billing target met", weight: 50 },
+      { label: "ARR growth on track versus annual plan", weight: 50 },
+    ]},
+    { name: "Margin & Efficiency", fields: [
+      { label: "Resource utilization above 80 percent", weight: 50 },
+      { label: "Cost overruns within 5 percent of budget", weight: 50 },
+    ]},
+    { name: "Commercial Growth", fields: [
+      { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
+      { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
+    ]},
+  ],
+};
+function buildDefaultSections(area, existingMetrics) {
+  const templates = AREA_KPI_DEFAULTS[area] ?? AREA_KPI_DEFAULTS.relationship;
+  return templates.map((tmpl, i) => ({
+    id: `kpi-${area}-${i}`,
+    metricId: existingMetrics[i]?.id ?? null,
+    name: existingMetrics[i]?.label ?? tmpl.name,
+    fields: tmpl.fields.map((f, j) => ({
+      id: `${area}-${i}-${j}`,
+      label: f.label,
+      weight: f.weight,
+      checked: false,
+    })),
+  }));
+}
 function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const { profile } = useAuth();
   const editable = getRolePermissions(profile?.role).write;
   const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
-  // Load from persisted kpiData if available, otherwise seed from metrics.
-  const defaultFields = (prefix) => [
-    { id: `${prefix}-a`, label: "Monthly meeting held on schedule", weight: 50, checked: true },
-    { id: `${prefix}-b`, label: "Director-level participation", weight: 25, checked: false },
-    { id: `${prefix}-c`, label: "Action items closed before next cycle", weight: 25, checked: false },
-  ];
 
   const [sections, setSections] = useState(() => {
     if (block.kpiData) return block.kpiData;
-    if (block.metrics.length > 0) {
-      return block.metrics.map((m, i) => ({
-        id: `kpi-${i}`,
-        metricId: m.id,
-        name: m.label,
-        fields: defaultFields(i),
-      }));
-    }
-    // New account with no metrics — seed one blank section
-    return [{ id: "kpi-0", name: "KPI Section 1", fields: defaultFields(0) }];
+    return buildDefaultSections(area, block.metrics);
   });
 
   function addSection() {
@@ -2051,7 +2132,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
     const idx = Date.now();
     setSections((prev) => [
       ...prev,
-      { id: `kpi-${idx}`, name: `KPI Section ${prev.length + 1}`, fields: defaultFields(idx) },
+      { id: `kpi-${idx}`, name: `KPI Section ${prev.length + 1}`, fields: [] },
     ]);
   }
   function updateSection(id, fn) {
@@ -2078,7 +2159,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       fields: s.fields.map((f) => (f.id === fieldId ? { ...f, ...patch } : f)),
     }));
   }
-  // dynamic scoring per section
+  // dynamic scoring per section — /10 scale, consistent with ScoreBlock display
   const sectionScores = useMemo(
     () =>
       sections.map((s) => {
@@ -2088,23 +2169,35 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
           0,
         );
         const pct = totalWeight > 0 ? (earned / totalWeight) * 100 : 0;
-        const scoreOutOfFive = (pct / 100) * 5;
-        return { id: s.id, totalWeight, earned, pct, scoreOutOfFive };
+        const scoreOutOfTen = (pct / 100) * 10;
+        return { id: s.id, totalWeight, earned, pct, scoreOutOfTen };
       }),
     [sections],
   );
-  const overallOutOfFive =
+  const overallOutOfTen =
     sectionScores.length > 0
-      ? sectionScores.reduce((acc, s) => acc + s.scoreOutOfFive, 0) / sectionScores.length
+      ? sectionScores.reduce((acc, s) => acc + s.scoreOutOfTen, 0) / sectionScores.length
       : 0;
   const [saveError, setSaveError] = useState("");
   const { mutate: saveKpi, isPending: savingKpi } = useMutation({
     mutationFn: async () => {
-      const newScore = overallOutOfFive * 2;
+      // Validate that every section's weights sum to 100 before saving
+      const invalid = sections.filter((s) => {
+        const total = s.fields.reduce((a, f) => a + (Number(f.weight) || 0), 0);
+        return total !== 100;
+      });
+      if (invalid.length > 0) {
+        const names = invalid.map((s) => {
+          const total = s.fields.reduce((a, f) => a + (Number(f.weight) || 0), 0);
+          return `"${s.name}" (Σ ${total}%)`;
+        });
+        throw new Error(`Fix weights before saving — each section must sum to 100%: ${names.join(", ")}`);
+      }
+      const newScore = parseFloat(overallOutOfTen.toFixed(1));
       const metricUpdates = sections
         .map((s, idx) =>
           s.metricId
-            ? { id: s.metricId, label: s.name, value: sectionScores[idx].scoreOutOfFive * 2 }
+            ? { id: s.metricId, label: s.name, value: parseFloat(sectionScores[idx].scoreOutOfTen.toFixed(1)) }
             : null,
         )
         .filter(Boolean);
@@ -2145,15 +2238,16 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                 Avg score
               </p>
               <p
-                className={`text-2xl font-bold ${overallOutOfFive >= 4 ? "text-success" : overallOutOfFive >= 2.5 ? "text-warn" : "text-crit"}`}
+                className={`text-2xl font-bold ${overallOutOfTen >= 8 ? "text-success" : overallOutOfTen >= 5 ? "text-warn" : "text-crit"}`}
               >
-                {overallOutOfFive.toFixed(2)}
-                <span className="text-xs text-muted-foreground">/5</span>
+                {overallOutOfTen.toFixed(1)}
+                <span className="text-xs text-muted-foreground">/10</span>
               </p>
             </div>
             <button
               onClick={onClose}
-              className="size-9 rounded-md border flex items-center justify-center hover:bg-muted transition-colors"
+              disabled={savingKpi}
+              className="size-9 rounded-md border flex items-center justify-center hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Close"
             >
               <X className="size-4" />
@@ -2191,10 +2285,10 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                       Σ {ss.totalWeight}%
                     </span>
                     <span
-                      className={`text-sm font-bold ${ss.scoreOutOfFive >= 4 ? "text-success" : ss.scoreOutOfFive >= 2.5 ? "text-warn" : "text-crit"}`}
+                      className={`text-sm font-bold ${ss.scoreOutOfTen >= 8 ? "text-success" : ss.scoreOutOfTen >= 5 ? "text-warn" : "text-crit"}`}
                     >
-                      {ss.scoreOutOfFive.toFixed(2)}
-                      <span className="text-[10px] text-muted-foreground">/5</span>
+                      {ss.scoreOutOfTen.toFixed(1)}
+                      <span className="text-[10px] text-muted-foreground">/10</span>
                     </span>
                     <button
                       onClick={() => editable && setSections((prev) => prev.filter((s) => s.id !== section.id))}
@@ -2278,7 +2372,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
           <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-4">
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Scoring is dynamic · checked weights ÷ total weight × 5
+              Scoring is dynamic · checked weights ÷ total weight × 10
             </p>
             <button
               onClick={addSection}
@@ -2291,7 +2385,8 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors"
+              disabled={savingKpi}
+              className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Cancel
             </button>
@@ -2336,22 +2431,41 @@ function Metric({ m }) {
     </div>
   );
 }
-function ContractScoringBlock({ account }) {
+function ContractScoringBlock({ account, onExpand }) {
   const c = account.contractScoring;
   return (
     <div className="bg-card border rounded-xl overflow-hidden">
-      <div className="px-6 py-4 border-b flex justify-between items-start">
-        <div>
+      <div className="px-6 py-4 border-b flex justify-between items-start gap-3">
+        <div className="min-w-0">
           <h3 className="text-sm font-bold">Contract Scoring</h3>
           <p className="text-[11px] text-muted-foreground">
             Type, duration, value to us, SWOT, feedback, auto-renew & price hike
           </p>
         </div>
-        <p className="text-2xl font-bold">
-          {c.score.toFixed(1)}
-          <span className="text-xs text-muted-foreground">/10</span>
-        </p>
+        <div className="flex items-center gap-3 shrink-0">
+          <p className="text-2xl font-bold">
+            {c.score.toFixed(1)}
+            <span className="text-xs text-muted-foreground">/10</span>
+          </p>
+          {onExpand && (
+            <button
+              onClick={onExpand}
+              className="size-8 rounded-md border flex items-center justify-center hover:bg-accent hover:text-white transition-colors"
+              aria-label="Edit Contract KPIs"
+              title="Open KPI editor"
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
+          )}
+        </div>
       </div>
+      {c.metrics.length > 0 && (
+        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4 border-b">
+          {c.metrics.map((m) => (
+            <Metric key={m.label} m={m} />
+          ))}
+        </div>
+      )}
       <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
         <Field label="Type" value={c.type} />
         <Field label="Duration" value={c.duration} />
@@ -2392,21 +2506,33 @@ function ContractScoringBlock({ account }) {
     </div>
   );
 }
-function ResourceHealthBlock({ account }) {
+function ResourceHealthBlock({ account, onExpand }) {
   const r = account.resourceHealth;
   return (
     <div className="bg-card border rounded-xl overflow-hidden">
-      <div className="px-6 py-4 border-b flex justify-between items-start">
-        <div>
+      <div className="px-6 py-4 border-b flex justify-between items-start gap-3">
+        <div className="min-w-0">
           <h3 className="text-sm font-bold">Resources Health</h3>
           <p className="text-[11px] text-muted-foreground">
             Backup, leaves, critical roles, team size
           </p>
         </div>
-        <p className="text-2xl font-bold">
-          {r.score.toFixed(1)}
-          <span className="text-xs text-muted-foreground">/10</span>
-        </p>
+        <div className="flex items-center gap-3 shrink-0">
+          <p className="text-2xl font-bold">
+            {r.score.toFixed(1)}
+            <span className="text-xs text-muted-foreground">/10</span>
+          </p>
+          {onExpand && (
+            <button
+              onClick={onExpand}
+              className="size-8 rounded-md border flex items-center justify-center hover:bg-accent hover:text-white transition-colors"
+              aria-label="Edit Resources KPIs"
+              title="Open KPI editor"
+            >
+              <Maximize2 className="size-3.5" />
+            </button>
+          )}
+        </div>
       </div>
       <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs mb-2">
         <Field label="Backup exists" value={r.backupExists ? "Yes" : "No"} ok={r.backupExists} />

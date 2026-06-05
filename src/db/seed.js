@@ -831,10 +831,156 @@ async function seedHealth() {
       ],
     },
   ];
+  // KPI section templates — mirrors AREA_KPI_DEFAULTS in accounts.$accountId.jsx
+  const KPI_TEMPLATES = {
+    relationship: [
+      { name: "CEO & Executive Engagement", fields: [
+        { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
+        { label: "Director-level meeting completed on schedule", weight: 35 },
+        { label: "Executive sponsor actively engaged", weight: 25 },
+      ]},
+      { name: "Meeting Cadence", fields: [
+        { label: "Monthly cadence meetings held on schedule", weight: 50 },
+        { label: "Action items closed before next cycle", weight: 30 },
+        { label: "Meeting notes shared within 24 hours", weight: 20 },
+      ]},
+      { name: "Cooperation & Trust", fields: [
+        { label: "Client responsive to requests within 48 hours", weight: 60 },
+        { label: "Joint planning or roadmap session completed", weight: 40 },
+      ]},
+    ],
+    project: [
+      { name: "Delivery Performance", fields: [
+        { label: "Sprint or milestone delivered on time", weight: 50 },
+        { label: "Defect rate within agreed threshold", weight: 30 },
+        { label: "No critical production incidents this cycle", weight: 20 },
+      ]},
+      { name: "Quality & Feedback", fields: [
+        { label: "Client feedback positive this cycle", weight: 55 },
+        { label: "Feedback actioned and communicated back to client", weight: 45 },
+      ]},
+      { name: "Scope & Change Control", fields: [
+        { label: "Change requests formally reviewed and documented", weight: 50 },
+        { label: "No unmanaged scope creep this cycle", weight: 50 },
+      ]},
+    ],
+    white_space: [
+      { name: "Service Penetration", fields: [
+        { label: "More than 3 active services currently delivered", weight: 50 },
+        { label: "At least 1 new service proposed this quarter", weight: 50 },
+      ]},
+      { name: "Upsell & Growth Signals", fields: [
+        { label: "Upsell opportunity identified and logged in CRM", weight: 50 },
+        { label: "White-space pitch scheduled with decision maker", weight: 50 },
+      ]},
+      { name: "Account Intelligence", fields: [
+        { label: "Account notes updated this month", weight: 40 },
+        { label: "Competitive landscape reviewed", weight: 30 },
+        { label: "Stakeholder map current and verified", weight: 30 },
+      ]},
+    ],
+    contract: [
+      { name: "Contract Terms", fields: [
+        { label: "Auto-renew clause in place", weight: 35 },
+        { label: "Non-terminator clause signed", weight: 35 },
+        { label: "Minimum one-year lock confirmed", weight: 30 },
+      ]},
+      { name: "Compliance & Renewal", fields: [
+        { label: "Process compliance score above 7 out of 10", weight: 50 },
+        { label: "Renewal conversation initiated 90 days before expiry", weight: 50 },
+      ]},
+      { name: "Commercial Terms", fields: [
+        { label: "Annual price-hike clause agreed and documented", weight: 55 },
+        { label: "Annual contract review meeting scheduled", weight: 45 },
+      ]},
+    ],
+    csat: [
+      { name: "NPS & Surveys", fields: [
+        { label: "NPS score collected and above 7 this quarter", weight: 45 },
+        { label: "Quarterly satisfaction survey completed", weight: 35 },
+        { label: "Low-score responses addressed within 2 weeks", weight: 20 },
+      ]},
+      { name: "Support Quality", fields: [
+        { label: "Support tickets resolved within SLA", weight: 55 },
+        { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
+      ]},
+      { name: "Executive Sentiment", fields: [
+        { label: "Executive sponsor expressed positive sentiment", weight: 55 },
+        { label: "No major complaints or unresolved escalations", weight: 45 },
+      ]},
+    ],
+    risk: [
+      { name: "Competitive Risk", fields: [
+        { label: "Competitor activity monitored and documented", weight: 45 },
+        { label: "Defense strategy or counter-proposal ready", weight: 55 },
+      ]},
+      { name: "Relationship & POC Risk", fields: [
+        { label: "Key POC stable — no resignation or transfer risk", weight: 50 },
+        { label: "C-level sponsor accessible and engaged", weight: 50 },
+      ]},
+      { name: "Financial Risk", fields: [
+        { label: "Invoice paid within agreed payment terms", weight: 55 },
+        { label: "No overdue balance outstanding", weight: 45 },
+      ]},
+      { name: "Operational Risk", fields: [
+        { label: "Compliance and regulatory requirements met", weight: 50 },
+        { label: "No geopolitical disruptions impacting delivery", weight: 50 },
+      ]},
+    ],
+    resource: [
+      { name: "Backup & Continuity", fields: [
+        { label: "Backup engineer assigned for every critical role", weight: 55 },
+        { label: "Knowledge transfer documentation up to date", weight: 45 },
+      ]},
+      { name: "Staffing Stability", fields: [
+        { label: "No unplanned attrition on account this month", weight: 50 },
+        { label: "Planned leaves managed without delivery impact", weight: 50 },
+      ]},
+      { name: "Critical Resource Retention", fields: [
+        { label: "Critical resources engaged and retained", weight: 55 },
+        { label: "Succession plan in place for key technical roles", weight: 45 },
+      ]},
+    ],
+    financial: [
+      { name: "Revenue Performance", fields: [
+        { label: "Monthly billing target met", weight: 50 },
+        { label: "ARR growth on track versus annual plan", weight: 50 },
+      ]},
+      { name: "Margin & Efficiency", fields: [
+        { label: "Resource utilization above 80 percent", weight: 50 },
+        { label: "Cost overruns within 5 percent of budget", weight: 50 },
+      ]},
+      { name: "Commercial Growth", fields: [
+        { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
+        { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
+      ]},
+    ],
+  };
+  function buildKpiData(area) {
+    const templates = KPI_TEMPLATES[area] ?? KPI_TEMPLATES.relationship;
+    return templates.map((tmpl, i) => ({
+      id: `kpi-${area}-${i}`,
+      name: tmpl.name,
+      metricId: null,
+      fields: tmpl.fields.map((f, j) => ({
+        id: `${area}-${i}-${j}`,
+        label: f.label,
+        weight: f.weight,
+        checked: false,
+      })),
+    }));
+  }
+
   let metIdx = 0;
   for (const d of areaData) {
     const scoreId = `${d.pfx}000000-0000-0000-0000-000000000000`;
-    scores.push({ id: scoreId, account_id: d.account, area: d.area, score: d.score });
+    scores.push({
+      id: scoreId,
+      account_id: d.account,
+      area: d.area,
+      score: d.score,
+      kpi_data: buildKpiData(d.area),
+    });
     for (let i = 0; i < d.mets.length; i++) {
       const m = d.mets[i];
       metIdx++;
