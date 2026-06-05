@@ -5,7 +5,10 @@
       "PowerShell(Get-Command git -ErrorAction SilentlyContinue; \\(Get-ChildItem \"C:\\\\Program Files\\\\Git\" -Recurse -Filter \"git.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1\\).FullName)",
       "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git show --stat 3b4ada8; Write-Host \"---\"; & $git show --stat a45c819; Write-Host \"---\"; & $git show --stat fea7fc5)",
       "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git diff 3b4ada8 HEAD --stat)",
-      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git status)"
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git status)",
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git log --oneline -20)",
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git show --stat b66f7bb; Write-Host \"===\"; & $git show --stat ad5172b; Write-Host \"===\"; & $git show --stat 341c482; Write-Host \"===\"; & $git show --stat 58b06a4)",
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git show --stat d624616; Write-Host \"===\"; & $git show --stat 4b1518a)"
     ]
   }
 }

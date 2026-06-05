@@ -2629,49 +2629,12 @@ function ContractScoringBlock({ account, onExpand }) {
         </div>
       </div>
       {c.metrics.length > 0 && (
-        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4 border-b">
+        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
           {c.metrics.map((m) => (
             <Metric key={m.label} m={m} />
           ))}
         </div>
       )}
-      <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-        <Field label="Type" value={c.type} />
-        <Field label="Duration" value={c.duration} />
-        <Field label="Price hike" value={c.priceHike} />
-        <Field label="Renewal" value={`${account.renewalDays} days`} />
-        <Field label="Auto-renew" value={c.autoRenew ? "Yes" : "No"} ok={c.autoRenew} />
-        <Field label="Non-terminator" value={c.nonTerminator ? "Yes" : "No"} ok={c.nonTerminator} />
-        <Field label="Min 1-yr lock" value={c.minOneYear ? "Yes" : "No"} ok={c.minOneYear} />
-        <Field label="Value to us" value={formatCurrency(account.contractValue)} />
-      </div>
-      <div className="px-6 pb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="border rounded-lg p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-            SWOT
-          </p>
-          <ul className="text-xs space-y-1.5">
-            <li>
-              <span className="font-bold text-success">S:</span> {c.swot.s}
-            </li>
-            <li>
-              <span className="font-bold text-crit">W:</span> {c.swot.w}
-            </li>
-            <li>
-              <span className="font-bold text-accent">O:</span> {c.swot.o}
-            </li>
-            <li>
-              <span className="font-bold text-warn">T:</span> {c.swot.t}
-            </li>
-          </ul>
-        </div>
-        <div className="border rounded-lg p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-            Customer Feedback
-          </p>
-          <p className="text-xs italic">{c.customerFeedback}</p>
-        </div>
-      </div>
     </div>
   );
 }
@@ -2703,13 +2666,7 @@ function ResourceHealthBlock({ account, onExpand }) {
           )}
         </div>
       </div>
-      <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs mb-2">
-        <Field label="Backup exists" value={r.backupExists ? "Yes" : "No"} ok={r.backupExists} />
-        <Field label="Leaves this month" value={`${r.leavesThisMonth}`} />
-        <Field label="Critical resources" value={`${r.criticalResources}`} />
-        <Field label="Team size" value={`${r.teamSize}`} />
-      </div>
-      <div className="p-6 pt-0 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
+      <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
         {r.metrics.map((m) => (
           <Metric key={m.label} m={m} />
         ))}
