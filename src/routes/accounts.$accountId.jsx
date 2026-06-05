@@ -268,8 +268,6 @@ function AccountDetailPage() {
 function AskAiDrawer({ account, open, onClose, profile }) {
   const askAi = useServerFn(askAccountAi);
   const [question, setQuestion] = useState("Draft a 30-day roadmap for this account.");
-  const [focus, setFocus] = useState("roadmap");
-  const [timeframe, setTimeframe] = useState("30_days");
   const [result, setResult] = useState(null);
   const prompts = [
     "What is the biggest retention risk for this client?",
@@ -289,8 +287,6 @@ function AskAiDrawer({ account, open, onClose, profile }) {
           scope: "account",
           accountId: account.id,
           question,
-          focus,
-          timeframe,
           user: {
             id: profile?.id,
             name: profile?.name,
@@ -338,39 +334,6 @@ function AskAiDrawer({ account, open, onClose, profile }) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          <div className="grid grid-cols-2 gap-3">
-            <label className="space-y-1">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                Focus
-              </span>
-              <select
-                value={focus}
-                onChange={(e) => setFocus(e.target.value)}
-                className="w-full h-9 rounded-md border bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-              >
-                <option value="roadmap">Roadmap</option>
-                <option value="retention">Retention</option>
-                <option value="growth">Growth</option>
-                <option value="leadership_summary">Leadership summary</option>
-              </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                Timeframe
-              </span>
-              <select
-                value={timeframe}
-                onChange={(e) => setTimeframe(e.target.value)}
-                className="w-full h-9 rounded-md border bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-              >
-                <option value="7_days">7 days</option>
-                <option value="30_days">30 days</option>
-                <option value="90_days">90 days</option>
-                <option value="renewal_cycle">Renewal cycle</option>
-              </select>
-            </label>
-          </div>
-
           <div className="space-y-2">
             <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
               Suggested prompts
@@ -454,7 +417,6 @@ function AiAnswer({ result }) {
         </div>
         <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
           <span className="font-mono uppercase">Source: {result.source}</span>
-          <span className="font-mono uppercase">Model: {result.model}</span>
           <span className="font-mono uppercase">
             Confidence: {Math.round((result.confidence ?? 0) * 100)}%
           </span>

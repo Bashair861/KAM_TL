@@ -40,6 +40,10 @@ function mapFlatAccount(r) {
     competitors: r.competitors ?? [],
     mainBusinessFlow: r.main_business_flow,
     assignedKamId: r.assigned_kam_id ?? null,
+    linkedinUrl: r.linkedin_url ?? "",
+    websiteUrl: r.website_url ?? "",
+    newsKeywords: r.news_keywords ?? [],
+    lastNewsSyncAt: r.last_news_sync_at ?? null,
   };
 }
 function mapHealthBlock(score, metrics, kpiData) {
@@ -49,9 +53,36 @@ function mapHealthBlock(score, metrics, kpiData) {
       id: m.id,
       label: m.label,
       value: m.value,
+      complete: Boolean(m.complete ?? m.Complete ?? false),
       ...(m.hint ? { hint: m.hint } : {}),
     })),
     kpiData: kpiData ?? null,
+  };
+}
+function isMissingTableError(error) {
+  return error?.code === "42P01" || /relation .* does not exist/i.test(error?.message ?? "");
+}
+function getRowComplete(row) {
+  return Boolean(row.complete ?? row.completed ?? row.Complete ?? false);
+}
+function mapTask(row, accountLookup = new Map(), healthMetricLookup = new Map()) {
+  const healthMetric = healthMetricLookup.get(row.health_metric_id);
+  const accountId = row.account_id ?? healthMetric?.accountId ?? null;
+  const account = accountLookup.get(accountId);
+  return {
+    id: row.id,
+    accountId,
+    accountName: account?.name ?? accountId ?? "Portfolio",
+    title: row.title ?? row.name ?? row.label ?? "Untitled task",
+    description: row.description ?? "",
+    due: row.due ?? row.due_date ?? "",
+    priority: row.priority ?? "P3",
+    source: row.source ?? row.type ?? healthMetric?.label ?? "Task",
+    complete: getRowComplete(row),
+    completedAt: row.completed_at ?? null,
+    healthMetricId: row.health_metric_id ?? null,
+    healthMetricLabel: healthMetric?.label ?? "",
+    healthArea: healthMetric?.area ?? "",
   };
 }
 // ─── fetch accounts (flat) ────────────────────────────────────────────────────
@@ -64,6 +95,109 @@ export async function fetchAccounts(opts) {
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map(mapFlatAccount);
+}
+export async function fetchKamTasks(opts = {}) {
+  const accountIds = opts.accountIds ?? (opts.accountId ? [opts.accountId] : null);
+  if (accountIds && accountIds.length === 0) return [];
+
+  let q = supabase.from("tasks").select("*").order("created_at", { ascending: false }).limit(100);
+  if (accountIds) q = q.in("account_id", accountIds);
+
+  const { data, error } = await q;
+  if (isMissingTableError(error)) return [];
+  if (error) throw error;
+
+  const tasks = data ?? [];
+  const visibleTasks = opts.includeCompleted
+    ? tasks
+    : tasks.filter((task) => !getRowComplete(task));
+  const taskAccountIds = [
+    ...new Set(visibleTasks.map((task) => task.account_id).filter((id) => Boolean(id))),
+  ];
+  const healthMetricIds = [
+    ...new Set(visibleTasks.map((task) => task.health_metric_id).filter((id) => Boolean(id))),
+  ];
+
+  const [{ data: accounts }, { data: metrics }] = await Promise.all([
+    taskAccountIds.length
+      ? supabase.from("accounts").select("id, name, short_code").in("id", taskAccountIds)
+      : Promise.resolve({ data: [] }),
+    healthMetricIds.length
+      ? supabase
+          .from("health_metrics")
+          .select("id, label, complete, Complete, health_scores(account_id, area)")
+          .in("id", healthMetricIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const accountLookup = new Map((accounts ?? []).map((account) => [account.id, account]));
+  const healthMetricLookup = new Map(
+    (metrics ?? []).map((metric) => {
+      const score = Array.isArray(metric.health_scores)
+        ? metric.health_scores[0]
+        : metric.health_scores;
+      return [
+        metric.id,
+        {
+          label: metric.label,
+          complete: Boolean(metric.complete ?? metric.Complete ?? false),
+          accountId: score?.account_id ?? null,
+          area: score?.area ?? "",
+        },
+      ];
+    }),
+  );
+
+  return visibleTasks.map((task) => mapTask(task, accountLookup, healthMetricLookup));
+}
+export async function fetchDashboardActionItems(opts = {}) {
+  const accounts = await fetchAccounts({ role: opts.role, userId: opts.userId });
+  const accountIds = accounts.map((account) => account.id);
+  if (accountIds.length === 0) return [];
+  const tasks = await fetchKamTasks({ accountIds, includeCompleted: false });
+  if (tasks.length > 0) return tasks;
+
+  const { data, error } = await supabase
+    .from("activities")
+    .select("*, accounts(id, name, short_code)")
+    .in("account_id", accountIds)
+    .neq("status", "Done")
+    .order("created_at", { ascending: false })
+    .limit(20);
+  if (error) throw error;
+  return (data ?? []).map((activity) => ({
+    id: activity.id,
+    accountId: activity.account_id,
+    accountName: activity.accounts?.name ?? activity.account_id,
+    title: activity.title,
+    description: "",
+    due: activity.due ?? "",
+    priority: activity.rag === "R" ? "P1" : activity.rag === "A" ? "P2" : "P3",
+    source: activity.area ?? "Activity",
+    complete: false,
+    completedAt: null,
+    healthMetricId: null,
+    healthMetricLabel: "",
+    healthArea: "",
+    readOnlyFallback: true,
+  }));
+}
+export async function updateDashboardTaskComplete(taskId, complete, healthMetricId) {
+  const completedAt = complete ? new Date().toISOString() : null;
+  const updatedAt = new Date().toISOString();
+  const { error } = await supabase
+    .from("tasks")
+    .update({ Complete: complete, updated_at: updatedAt })
+    .eq("id", taskId);
+  if (error) throw error;
+
+  if (healthMetricId) {
+    const { error: metricError } = await supabase
+      .from("health_metrics")
+      .update({ Complete: complete, complete, completed_at: completedAt })
+      .eq("id", healthMetricId);
+    if (metricError) throw metricError;
+  }
 }
 export async function fetchKamUsers() {
   const { data, error } = await supabase

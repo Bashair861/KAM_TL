@@ -1,17 +1,23 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import {
   formatCurrency,
   portfolioNews,
-  openActionItems,
   getAccount,
   calendarSources,
   globalCalendar,
 } from "@/data/kam-data";
-import { fetchAccounts, fetchEscalations } from "@/services/db";
+import {
+  fetchAccounts,
+  fetchDashboardActionItems,
+  fetchEscalations,
+  updateDashboardTaskComplete,
+} from "@/services/db";
 import { createGoogleCalendarAuthUrl, fetchGoogleCalendarDashboard } from "@/services/calendar";
+import { askPortfolioAi } from "@/services/ai";
+import { fetchPortfolioNewsFeed } from "@/services/news";
 import { StatCard } from "@/components/shared/StatCard";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -29,7 +35,12 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  CheckCircle2,
+  Lightbulb,
+  Loader2,
   Plus,
+  Sparkles,
+  X,
 } from "lucide-react";
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -47,18 +58,58 @@ function DashboardPage() {
   const { session, profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const userId = profile?.id;
+  const queryClient = useQueryClient();
   const [selectedCalendarSource, setSelectedCalendarSource] = useState("all");
   const [calendarView, setCalendarView] = useState("month");
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
+  const [portfolioAiOpen, setPortfolioAiOpen] = useState(false);
   const startCalendarConnect = useServerFn(createGoogleCalendarAuthUrl);
   const loadGoogleCalendar = useServerFn(fetchGoogleCalendarDashboard);
+  const loadPortfolioNews = useServerFn(fetchPortfolioNewsFeed);
   const { data: accounts = [], error: accountsError } = useQuery({
     queryKey: ["accounts", userId, role],
     queryFn: () => fetchAccounts({ role, userId }),
+    enabled: Boolean(userId),
   });
   const { data: escalations = [] } = useQuery({
     queryKey: ["escalations"],
     queryFn: () => fetchEscalations(),
+  });
+  const {
+    data: actionItems = [],
+    error: actionItemsError,
+    isFetching: actionItemsFetching,
+  } = useQuery({
+    queryKey: ["dashboard-action-items", userId, role],
+    queryFn: () => fetchDashboardActionItems({ role, userId }),
+    enabled: Boolean(userId),
+  });
+  const {
+    data: livePortfolioNews,
+    error: portfolioNewsError,
+    isFetching: portfolioNewsFetching,
+  } = useQuery({
+    queryKey: ["portfolio-news", userId, role],
+    queryFn: () =>
+      loadPortfolioNews({
+        data: {
+          user: {
+            id: userId,
+            role,
+          },
+        },
+      }),
+    enabled: Boolean(userId),
+    staleTime: 12 * 60 * 60 * 1000,
+    refetchInterval: 12 * 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const { mutate: completeActionItem, isPending: actionItemUpdating } = useMutation({
+    mutationFn: ({ id, complete, healthMetricId }) =>
+      updateDashboardTaskComplete(id, complete, healthMetricId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard-action-items", userId, role] });
+    },
   });
   const {
     data: liveCalendar,
@@ -129,6 +180,12 @@ function DashboardPage() {
     calendarError?.message ||
     liveCalendar?.message ||
     (!hasLiveCalendar ? "Showing sample calendar data until Google Calendar is connected." : "");
+  const displayedPortfolioNews =
+    livePortfolioNews?.items?.length > 0 ? livePortfolioNews.items : portfolioNews;
+  const portfolioNewsStatus =
+    portfolioNewsError?.message ||
+    livePortfolioNews?.message ||
+    (portfolioNewsFetching ? "Refreshing public client news..." : "");
   const portfolioTotals = {
     totalARR: accounts.reduce((s, a) => s + a.arr, 0),
     atRiskARR: accounts.filter((a) => a.status !== "healthy").reduce((s, a) => s + a.arr, 0),
@@ -153,6 +210,13 @@ function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setPortfolioAiOpen(true)}
+            className="px-3 py-2 bg-accent text-white text-xs font-bold rounded-md hover:opacity-90 transition-opacity flex items-center gap-2"
+          >
+            <Sparkles className="size-3.5" />
+            Ask AI
+          </button>
           <div className="flex items-center gap-2 text-[11px] md:text-xs text-muted-foreground">
             <span className="size-2 rounded-full bg-success" />
             System stable · Last sync 2m ago
@@ -316,12 +380,20 @@ function DashboardPage() {
                 Portfolio News
               </h3>
               <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-                {portfolioNews.length} updates
+                {displayedPortfolioNews.length} updates
               </span>
             </div>
+            {portfolioNewsStatus && (
+              <div className="px-6 py-2 border-b bg-muted/30 text-[11px] text-muted-foreground">
+                {portfolioNewsStatus}
+              </div>
+            )}
             <div className="divide-y max-h-[420px] overflow-y-auto">
-              {portfolioNews.map((n) => {
-                const acc = n.accountId ? getAccount(n.accountId) : undefined;
+              {displayedPortfolioNews.map((n) => {
+                const acc = n.accountId
+                  ? (accounts.find((account) => account.id === n.accountId) ??
+                    getAccount(n.accountId))
+                  : undefined;
                 const Icon =
                   n.type === "new_account"
                     ? UserPlus
@@ -329,11 +401,11 @@ function DashboardPage() {
                       ? UserCog
                       : n.type === "renewal"
                         ? Calendar
-                        : n.type === "milestone"
+                        : n.type === "milestone" || n.type === "acquisition"
                           ? Trophy
                           : n.type === "risk"
                             ? ShieldAlert
-                            : AlertTriangle;
+                            : Newspaper;
                 const tone =
                   n.type === "new_account"
                     ? "text-success bg-success/10"
@@ -341,11 +413,13 @@ function DashboardPage() {
                       ? "text-accent bg-accent/10"
                       : n.type === "renewal"
                         ? "text-warn bg-warn/10"
-                        : n.type === "milestone"
+                        : n.type === "milestone" || n.type === "technology"
                           ? "text-accent bg-accent/10"
-                          : n.type === "risk"
-                            ? "text-crit bg-crit/10"
-                            : "text-muted-foreground bg-muted";
+                          : n.type === "acquisition" || n.type === "partnership"
+                            ? "text-success bg-success/10"
+                            : n.type === "risk"
+                              ? "text-crit bg-crit/10"
+                              : "text-muted-foreground bg-muted";
                 return (
                   <div key={n.id} className="px-6 py-3 flex items-start gap-3">
                     <span
@@ -354,7 +428,18 @@ function DashboardPage() {
                       <Icon className="size-3.5" />
                     </span>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold leading-snug">{n.title}</p>
+                      {n.link ? (
+                        <a
+                          href={n.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-sm font-semibold leading-snug hover:text-accent hover:underline"
+                        >
+                          {n.title}
+                        </a>
+                      ) : (
+                        <p className="text-sm font-semibold leading-snug">{n.title}</p>
+                      )}
                       <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{n.body}</p>
                       <p className="text-[10px] font-mono uppercase text-muted-foreground mt-1">
                         {n.time}
@@ -375,14 +460,46 @@ function DashboardPage() {
                 My Open Action Items
               </h3>
               <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-                {openActionItems.length} open
+                {actionItems.length} open
               </span>
             </div>
+            {(actionItemsError || actionItemsFetching) && (
+              <div className="px-6 py-2 border-b bg-muted/30 text-[11px] text-muted-foreground">
+                {actionItemsError?.message || "Loading action items..."}
+              </div>
+            )}
             <div className="divide-y max-h-[420px] overflow-y-auto">
-              {openActionItems.map((a) => {
-                const acc = a.accountId ? getAccount(a.accountId) : undefined;
+              {actionItems.length === 0 && (
+                <div className="px-6 py-6 text-xs text-muted-foreground">
+                  No open action items found.
+                </div>
+              )}
+              {actionItems.map((a) => {
+                const acc = a.accountId
+                  ? (accounts.find((account) => account.id === a.accountId) ??
+                    getAccount(a.accountId))
+                  : undefined;
                 return (
                   <div key={a.id} className="px-6 py-3 flex items-start gap-3">
+                    <button
+                      type="button"
+                      disabled={actionItemUpdating || a.readOnlyFallback}
+                      onClick={() =>
+                        completeActionItem({
+                          id: a.id,
+                          complete: !a.complete,
+                          healthMetricId: a.healthMetricId,
+                        })
+                      }
+                      className="mt-0.5 size-4 rounded border flex items-center justify-center hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={
+                        a.readOnlyFallback
+                          ? "Run src/db/add-tasks.sql to enable task completion."
+                          : "Mark task complete"
+                      }
+                    >
+                      {a.complete && <CheckCircle2 className="size-3 text-success" />}
+                    </button>
                     <span
                       className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${
                         a.priority === "P1"
@@ -398,6 +515,7 @@ function DashboardPage() {
                       <p className="text-sm font-semibold leading-snug">{a.title}</p>
                       <p className="text-[11px] text-muted-foreground mt-0.5">
                         {acc?.name ?? "Portfolio"} · {a.source}
+                        {a.healthMetricLabel && <span> / {a.healthMetricLabel}</span>}
                       </p>
                     </div>
                     <span className="text-[11px] font-mono text-muted-foreground whitespace-nowrap">
@@ -504,6 +622,251 @@ function DashboardPage() {
           />
         </section>
       </div>
+      <PortfolioAiDrawer
+        open={portfolioAiOpen}
+        onClose={() => setPortfolioAiOpen(false)}
+        profile={profile}
+      />
+    </div>
+  );
+}
+function PortfolioAiDrawer({ open, onClose, profile }) {
+  const askAi = useServerFn(askPortfolioAi);
+  const [question, setQuestion] = useState("Which accounts need my attention this week?");
+  const [result, setResult] = useState(null);
+  const prompts = [
+    "Which accounts need my attention this week?",
+    "Where is the biggest retention risk?",
+    "Which client has the strongest growth opportunity?",
+    "What should I do next as Head of KAM?",
+    "Summarize the portfolio for leadership.",
+  ];
+  const {
+    mutate: runAi,
+    isPending,
+    error,
+  } = useMutation({
+    mutationFn: async () =>
+      askAi({
+        data: {
+          question,
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
+        },
+      }),
+    onSuccess: setResult,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    setResult(null);
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <>
+      <button
+        aria-label="Close Portfolio AI"
+        className="fixed inset-0 z-40 bg-black/45"
+        onClick={onClose}
+      />
+      <aside className="fixed right-0 top-0 z-50 h-screen w-full max-w-xl bg-card border-l shadow-2xl flex flex-col">
+        <div className="px-5 py-4 border-b flex items-start justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <span className="size-8 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+              <Sparkles className="size-4" />
+            </span>
+            <div>
+              <h2 className="text-sm font-bold">Portfolio Ask AI</h2>
+              <p className="text-[11px] text-muted-foreground">
+                Business improvement analyst for all visible accounts
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="size-8 rounded-md border flex items-center justify-center hover:bg-muted transition-colors"
+            aria-label="Close"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <div className="space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Suggested prompts
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {prompts.map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => setQuestion(prompt)}
+                  className="px-2.5 py-1.5 text-[11px] border rounded-md hover:bg-muted transition-colors text-left"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="space-y-2 block">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Question
+            </span>
+            <textarea
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              rows={4}
+              className="w-full rounded-lg border bg-background p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder="Ask about portfolio risk, account priority, growth, escalations, or next actions..."
+            />
+          </label>
+
+          <button
+            onClick={() => runAi()}
+            disabled={isPending || !question.trim()}
+            className="w-full h-10 rounded-md bg-primary text-primary-foreground text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Sparkles className="size-4" />
+            )}
+            {isPending ? "Analyzing portfolio" : "Generate analyst view"}
+          </button>
+
+          {error && (
+            <div className="border border-crit/30 bg-crit/10 text-crit rounded-lg p-3 text-xs">
+              {error.message}
+            </div>
+          )}
+
+          {result && <PortfolioAiAnswer result={result} />}
+        </div>
+      </aside>
+    </>
+  );
+}
+function PortfolioAiAnswer({ result }) {
+  const riskColor =
+    result.riskLevel === "critical" || result.riskLevel === "high"
+      ? "text-crit bg-crit/10 border-crit/20"
+      : result.riskLevel === "medium"
+        ? "text-warn bg-warn/10 border-warn/20"
+        : "text-success bg-success/10 border-success/20";
+
+  return (
+    <div className="space-y-4">
+      <div className="border rounded-xl p-4 bg-background">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              Analyst answer
+            </p>
+            <p className="text-sm mt-1 leading-relaxed">{result.summary}</p>
+          </div>
+          <span
+            className={`px-2 py-1 rounded border text-[10px] uppercase font-bold shrink-0 ${riskColor}`}
+          >
+            {result.riskLevel}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground mt-3">
+          <span className="font-mono uppercase">Source: {result.source}</span>
+          <span className="font-mono uppercase">
+            Confidence: {Math.round((result.confidence ?? 0) * 100)}%
+          </span>
+        </div>
+      </div>
+
+      <PortfolioAiList title="Key Risks" items={result.risks} empty="No major risks returned." />
+      <PortfolioAiList
+        title="Growth / Upside"
+        items={result.opportunities}
+        empty="No growth opportunities returned."
+      />
+      <PortfolioAiList
+        title="Recommended Actions"
+        items={result.recommendations}
+        empty="No recommendations returned."
+      />
+
+      {result.roadmap?.length > 0 && (
+        <div className="border rounded-xl p-4 bg-background">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">
+            Action roadmap
+          </h3>
+          <div className="space-y-3">
+            {result.roadmap.map((phase) => (
+              <div key={phase.phase} className="border rounded-lg p-3">
+                <p className="text-sm font-bold">{phase.phase}</p>
+                <ul className="mt-2 space-y-1.5">
+                  {(phase.actions ?? []).map((action) => (
+                    <li key={action} className="text-xs flex gap-2">
+                      <CheckCircle2 className="size-3.5 text-success shrink-0 mt-0.5" />
+                      <span>{action}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {result.followUpQuestions?.length > 0 && (
+        <div className="border rounded-xl p-4 bg-background">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">
+            Data gaps / follow-ups
+          </h3>
+          <ul className="space-y-1.5">
+            {result.followUpQuestions.map((question) => (
+              <li key={question} className="text-xs flex gap-2">
+                <Lightbulb className="size-3.5 text-accent shrink-0 mt-0.5" />
+                <span>{question}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+function PortfolioAiList({ title, items, empty }) {
+  return (
+    <div className="border rounded-xl p-4 bg-background">
+      <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">
+        {title}
+      </h3>
+      {items?.length ? (
+        <div className="space-y-3">
+          {items.map((item) => (
+            <div
+              key={`${item.title}-${item.evidence}`}
+              className="border-l-2 border-accent/40 pl-3"
+            >
+              <p className="text-sm font-semibold">{item.title}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {item.evidence ?? item.potential ?? item.timeframe ?? ""}
+              </p>
+              {(item.owner || item.timeframe || item.severity || item.potential) && (
+                <p className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mt-1">
+                  {[item.severity, item.potential, item.owner, item.timeframe]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{empty}</p>
+      )}
     </div>
   );
 }
