@@ -305,6 +305,13 @@ add-account-history.sql
   Run:      Once. Enables Client History tab to show change log.
   NOTE:     account_id is TEXT (not uuid) to match accounts.id type.
 
+add-account-work-history.sql
+  Purpose:  Adds triggers that write account work changes into account_history.
+            Tracks activities, escalations, escalation action items,
+            retention/growth services, education log, and opportunities.
+  Run:      Once after add-account-history.sql. Safe to rerun.
+  NOTE:     This tracks future inserts/updates/deletes after the trigger is installed.
+
 add-account-insert-policy.sql
   Purpose:  Adds INSERT RLS policy on accounts table.
   Run:      Once. Required for Head of KAM to create new accounts via UI.

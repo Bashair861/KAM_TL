@@ -205,6 +205,8 @@ PHASE 3 — Write Operations (partial — in progress)
       - fetchAccountHistory() fetches ordered by edited_at DESC
       - Logging wired to: KYC save, KAM assignment, KPI score save
       - add-account-history.sql creates the table + RLS policies
+      - add-account-work-history.sql adds DB triggers for activities, escalations,
+        escalation action items, retention/growth services, education log, and opportunities
   ✓ Contracts page fully dynamic
       - fetchContracts() joins accounts + contract_details in one Supabase query
       - Shows: Account, Type, Duration, Value, Renewal, Process Compliance
