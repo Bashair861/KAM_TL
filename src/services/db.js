@@ -4,6 +4,7 @@ import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-ad
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
+import { applySowFieldsServer } from "@/services/sow-upload";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -462,43 +463,19 @@ export async function updateAccountKyc(accountId, updates) {
   const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
   if (error) throw error;
 }
-const VALID_CONTRACT_TYPES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
-
 export async function applySowFields(accountId, fields) {
-  const accountUpdates = {};
-  const contractUpdates = { account_id: accountId };
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before applying SOW fields.");
 
-  if (fields.accountName) accountUpdates.name = fields.accountName;
-  if (Number.isFinite(fields.arr)) accountUpdates.arr = Math.round(fields.arr);
-  if (Number.isFinite(fields.contractValue)) {
-    accountUpdates.contract_value = Math.round(fields.contractValue);
-  }
-  if (Number.isFinite(fields.renewalDays)) {
-    accountUpdates.renewal_days = Math.max(0, Math.round(fields.renewalDays));
-  }
-  if (fields.contractType && VALID_CONTRACT_TYPES.has(fields.contractType)) {
-    accountUpdates.contract_type = fields.contractType;
-    contractUpdates.type = fields.contractType;
-  }
-  if (fields.contractDuration) contractUpdates.duration = fields.contractDuration;
-
-  if (Object.keys(accountUpdates).length === 0 && Object.keys(contractUpdates).length === 1) {
-    throw new Error("No supported account fields were found in this SOW.");
-  }
-
-  if (Object.keys(accountUpdates).length > 0) {
-    const { error } = await supabase.from("accounts").update(accountUpdates).eq("id", accountId);
-    if (error) throw error;
-  }
-
-  if (Object.keys(contractUpdates).length > 1) {
-    const { error } = await supabase
-      .from("contract_details")
-      .upsert(contractUpdates, { onConflict: "account_id" });
-    if (error) throw error;
-  }
-
-  return { accountUpdates, contractUpdates };
+  return applySowFieldsServer({
+    data: {
+      accountId,
+      fields,
+      accessToken: session.access_token,
+    },
+  });
 }
 export async function syncSalesforceMappedFields(accountId, payload) {
   const {
