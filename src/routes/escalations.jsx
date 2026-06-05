@@ -28,6 +28,7 @@ function EscalationsPage() {
   const [checkedItems, setCheckedItems] = useState([]);
   const [customItems, setCustomItems] = useState([]);
   const [newItemText, setNewItemText] = useState("");
+  const [priority, setPriority] = useState("P1");
 
   const { data: accounts = [] } = useQuery({
     queryKey: ["accounts"],
@@ -58,6 +59,7 @@ function EscalationsPage() {
       setCheckedItems(data.suggestedActionItems.slice());
       setCustomItems([]);
       setNewItemText("");
+      setPriority(data.issue.priority);
       if (data.detectedAccount && !selectedAccountId) {
         setSelectedAccountId(data.detectedAccount.id);
       }
@@ -74,7 +76,7 @@ function EscalationsPage() {
       const actionItems = allItems.length ? allItems : result.issue.subtaskActionItems;
       return saveJiraEscalations({
         data: {
-          issues: [{ ...result.issue, actionItems }],
+          issues: [{ ...result.issue, priority, actionItems }],
           accountId,
         },
       });
@@ -85,12 +87,12 @@ function EscalationsPage() {
     },
   });
 
-  const priorityColor =
-    result?.issue.priority === "P1"
-      ? "bg-red-100 text-red-600"
-      : result?.issue.priority === "P2"
-        ? "bg-orange-100 text-orange-600"
-        : "bg-gray-100 text-gray-500";
+  const priorityColor = (p) =>
+    p === "P1"
+      ? "bg-red-100 text-red-600 border-red-200"
+      : p === "P2"
+        ? "bg-orange-100 text-orange-600 border-orange-200"
+        : "bg-gray-100 text-gray-500 border-gray-200";
 
   return (
     <div className="flex flex-col min-h-screen bg-background">
@@ -196,18 +198,40 @@ function EscalationsPage() {
               </a>
             </div>
 
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-1.5 items-center">
               <span className="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground font-medium">
                 {result.issue.status}
-              </span>
-              <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${priorityColor}`}>
-                {result.issue.priorityLabel}
               </span>
               {(result.detectedAccount ?? selectedAccount) && (
                 <span className="text-[10px] px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
                   {result.detectedAccount?.name ?? selectedAccount?.name}
                 </span>
               )}
+            </div>
+
+            {/* Priority picker */}
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Priority
+              </p>
+              <div className="flex gap-1.5">
+                {["P1", "P2", "P3"].map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setPriority(p)}
+                    className={`px-3 py-1 text-[11px] font-bold rounded border transition-all ${
+                      priority === p
+                        ? priorityColor(p) + " ring-1 ring-offset-1 ring-current"
+                        : "bg-muted text-muted-foreground border-muted hover:bg-muted/80"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+                <span className="text-[10px] text-muted-foreground self-center ml-1">
+                  (Jira: {result.issue.priorityLabel})
+                </span>
+              </div>
             </div>
 
             {result.detectedAccount && (
@@ -253,9 +277,21 @@ function EscalationsPage() {
             )}
             <div className="space-y-3">
               {result.educationSuggestions.map((s, i) => (
-                <div key={i} className="border rounded-lg p-3 space-y-1">
+                <div key={i} className="border rounded-lg p-3 space-y-1.5">
                   <p className="text-xs font-semibold">{s.title}</p>
                   <p className="text-[11px] text-muted-foreground">{s.description}</p>
+                  {s.matchedKeywords?.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {s.matchedKeywords.map((kw) => (
+                        <span
+                          key={kw}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium"
+                        >
+                          {kw}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {s.context && (
                     <p className="text-[11px] text-primary cursor-default">{s.context}</p>
                   )}

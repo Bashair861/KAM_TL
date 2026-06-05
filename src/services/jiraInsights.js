@@ -99,7 +99,7 @@ const TOPIC_RULES = [
     description: "Client expects a root-cause analysis and prevention plan.",
   },
   {
-    match: ["p1", "critical", "urgent", "highest", "escalation", "escalate", "sla breach"],
+    match: ["p1", "critical", "urgent", "highest", "escalation", "escalate", "sla breach", "client escalation", "escalation management", "escalated", "kam escalation"],
     title: "P1 escalation communication",
     description: "Ticket has escalation language or highest priority.",
   },
@@ -197,6 +197,7 @@ function buildInsights(issueKey, title, description, accountName) {
     title: t.title,
     description: t.description,
     context: `Use before the ${accountName} escalation/RCA conversation.`,
+    matchedKeywords: t.match.filter((kw) => text.includes(kw)).slice(0, 4),
   }));
 
   const baseActions = ACTION_TEMPLATES.map((fn) => fn(issueKey, accountName));
