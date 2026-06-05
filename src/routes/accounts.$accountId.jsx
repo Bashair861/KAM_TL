@@ -743,7 +743,7 @@ function AccountDetailPage() {
                 type="button"
                 onClick={() => sowInputRef.current?.click()}
                 disabled={!editable || uploadingSow}
-                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                className="hidden px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed items-center gap-2"
               >
                 {uploadingSow ? (
                   <Loader2 className="size-3 animate-spin" />
