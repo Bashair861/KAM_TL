@@ -7,7 +7,12 @@ import {
   ACTIVITY_TAB_AREAS,
   isRetentionGrowthActivityArea,
 } from "@/services/activity-tab";
+import {
+  removeDuplicateAiSuggestions,
+  isDuplicateAiActivity,
+} from "@/services/activity-ai-suggestions";
 import { fetchFirefliesRequiredActionItems } from "@/services/fireflies-action-items.server";
+import { fetchKamAiSuggestions } from "@/services/kam-ai-suggestions.server";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import {
   fetchAccount,
@@ -2905,6 +2910,13 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const [firefliesStatus, setFirefliesStatus] = useState("");
   const [activityAreaFilter, setActivityAreaFilter] = useState("All");
   const [expectedLiftSort, setExpectedLiftSort] = useState("desc");
+  const [aiSuggestions, setAiSuggestions] = useState([]);
+  const [aiSuggestionRequested, setAiSuggestionRequested] = useState(false);
+  const [addingAiSuggestionId, setAddingAiSuggestionId] = useState("");
+  const [aiSuggestionStatus, setAiSuggestionStatus] = useState("");
+  const [aiSuggestionWarning, setAiSuggestionWarning] = useState("");
+  const [aiSuggestionError, setAiSuggestionError] = useState("");
+  const [aiRecommendationSheetOpen, setAiRecommendationSheetOpen] = useState(false);
 
   const { mutate: rerunFirefliesExtraction, isPending: extractingFireflies } = useMutation({
     mutationFn: () =>
@@ -2924,6 +2936,41 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     },
     onError: (error) => {
       setFirefliesStatus(error?.message ?? "Fireflies extraction failed.");
+    },
+  });
+
+  const { mutate: requestAiSuggestions, isPending: generatingAiSuggestions } = useMutation({
+    mutationFn: () => fetchKamAiSuggestions({ data: { accountId: account.id } }),
+    onMutate: () => {
+      setAiSuggestionRequested(true);
+      setAiSuggestionError("");
+      setAiSuggestionWarning("");
+      setAiSuggestionStatus("");
+    },
+    onSuccess: (result) => {
+      const uniqueSuggestions = removeDuplicateAiSuggestions(
+        result?.suggestions ?? [],
+        activityRows,
+      ).slice(0, 6);
+      setAiSuggestions(uniqueSuggestions);
+
+      if (result?.fallback) {
+        setAiSuggestionWarning(
+          result.status || "OpenAI was unavailable; showing local fallback suggestions.",
+        );
+        return;
+      }
+
+      setAiSuggestionStatus(
+        result?.status ??
+          (uniqueSuggestions.length
+            ? `${uniqueSuggestions.length} best AI recommendation${uniqueSuggestions.length === 1 ? "" : "s"} generated for ${account.name}.`
+            : "No strong AI recommendations found for this account."),
+      );
+    },
+    onError: (error) => {
+      setAiSuggestions([]);
+      setAiSuggestionError(error?.message ?? "AI suggestions could not be generated.");
     },
   });
 
@@ -3009,6 +3056,36 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     },
   });
 
+  const { mutate: addAiSuggestionActivity } = useMutation({
+    mutationFn: (suggestion) =>
+      createActivityRuleActivity(
+        buildActivityRuleActivityInput({
+          accountId: account.id,
+          target: { kind: "ai_suggestion", item: suggestion },
+          form: createAiSuggestionActivityForm(suggestion, profile?.name),
+        }),
+      ),
+    onMutate: (suggestion) => {
+      setAddingAiSuggestionId(suggestion.id);
+      setAiSuggestionError("");
+      setAiSuggestionStatus("");
+    },
+    onSuccess: (_, suggestion) => {
+      setAiSuggestions((current) => current.filter((item) => item.id !== suggestion.id));
+      setAiSuggestionStatus(`Added "${suggestion.title}" to Activities Across Health Areas.`);
+      setAiSuggestionWarning("");
+      setAiSuggestionError("");
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setAiSuggestionError(error?.message ?? "AI suggestion could not be added.");
+    },
+    onSettled: () => {
+      setAddingAiSuggestionId("");
+    },
+  });
+
   useEffect(() => {
     setResolvedItems({});
     setReviewTarget(null);
@@ -3022,6 +3099,12 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     setFirefliesStatus("");
     setActivityAreaFilter("All");
     setExpectedLiftSort("desc");
+    setAiSuggestions([]);
+    setAiSuggestionRequested(false);
+    setAddingAiSuggestionId("");
+    setAiSuggestionStatus("");
+    setAiSuggestionWarning("");
+    setAiSuggestionError("");
   }, [account.id, profile?.name]);
 
   const activeScoreMetricRefs = useMemo(
@@ -3109,6 +3192,24 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         : activityRows.filter((row) => row.area === activityAreaFilter);
     return sortActivityRowsByExpectedLift(filteredRows, expectedLiftSort);
   }, [activityAreaFilter, activityRows, expectedLiftSort]);
+
+  function generateAiSuggestions() {
+    setAiRecommendationSheetOpen(true);
+    requestAiSuggestions();
+  }
+
+  function acceptAiSuggestion(suggestion) {
+    if (!canAct) return;
+
+    if (isDuplicateAiActivity(suggestion, activityRows)) {
+      setAiSuggestionError("This activity already exists.");
+      setAiSuggestionWarning("");
+      setAiSuggestions((current) => current.filter((item) => item.id !== suggestion.id));
+      return;
+    }
+
+    addAiSuggestionActivity(suggestion);
+  }
 
   function openReview(kind, item) {
     setReviewTarget({ kind, item });
@@ -3422,6 +3523,44 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         )}
       </div>
 
+      <div className="rounded-xl border bg-card overflow-hidden">
+        <div className="px-6 py-5 bg-gradient-to-r from-accent/10 via-card to-card">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="size-10 rounded-lg bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                <Sparkles className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-bold">AI Suggestions to Increase Score</h4>
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                    AI-generated
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1 max-w-3xl">
+                  Generate AI-powered strategic recommendations for this account.
+                </p>
+                {aiSuggestions.length ? (
+                  <p className="mt-2 text-[11px] font-medium text-muted-foreground">
+                    {aiSuggestions.length} recommendation{aiSuggestions.length === 1 ? "" : "s"} ready
+                    to review.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              disabled={generatingAiSuggestions}
+              onClick={generateAiSuggestions}
+              className="shadow-sm"
+            >
+              {generatingAiSuggestions && <Loader2 className="size-3.5 animate-spin mr-1" />}
+              Ask AI for Suggestions
+            </Button>
+          </div>
+        </div>
+      </div>
+
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div>
@@ -3524,6 +3663,22 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         isSaving={savingRuleActivity}
       />
 
+      <AiRecommendationsSheet
+        open={aiRecommendationSheetOpen}
+        onClose={() => setAiRecommendationSheetOpen(false)}
+        suggestions={aiSuggestions}
+        requested={aiSuggestionRequested}
+        isLoading={generatingAiSuggestions}
+        status={aiSuggestionStatus}
+        warning={aiSuggestionWarning}
+        error={aiSuggestionError}
+        canAct={canAct}
+        addingId={addingAiSuggestionId}
+        activityRows={activityRows}
+        onAccept={acceptAiSuggestion}
+        onRefresh={generateAiSuggestions}
+      />
+
       <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
 
       <EvidenceSubmissionDialog
@@ -3549,6 +3704,227 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         onConfirm={confirmReject}
         isSaving={rejectingRuleActivity}
       />
+    </div>
+  );
+}
+
+function AiRecommendationsSheet({
+  open,
+  onClose,
+  suggestions,
+  requested,
+  isLoading,
+  status,
+  warning,
+  error,
+  canAct,
+  addingId,
+  activityRows,
+  onAccept,
+  onRefresh,
+}) {
+  return (
+    <Sheet open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-2xl overflow-y-auto p-0">
+        <div className="min-h-full bg-background">
+          <div className="border-b bg-gradient-to-r from-accent/15 via-background to-background px-6 py-5">
+            <SheetHeader className="text-left space-y-3">
+              <div className="flex items-start gap-3 pr-8">
+                <span className="size-11 rounded-lg bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                  <Sparkles className="size-5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SheetTitle>AI Recommendations to Increase Score</SheetTitle>
+                    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                      AI-generated
+                    </span>
+                  </div>
+                  <SheetDescription className="mt-1">
+                    Generated from account context, tasks, opportunities, risks, existing
+                    activities, and score logic.
+                  </SheetDescription>
+                </div>
+              </div>
+            </SheetHeader>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-[11px] text-muted-foreground">
+                Select only the recommendations you want to add to Activities Across Health Areas.
+                {!canAct ? " You can review recommendations, but adding requires activity permissions." : ""}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={onClose}>
+                  <X className="size-3.5 mr-1" />
+                  Close
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={isLoading}
+                  onClick={onRefresh}
+                >
+                  {isLoading && <Loader2 className="size-3.5 animate-spin mr-1" />}
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <div className="px-6 py-5 space-y-4">
+            {status && (
+              <p
+                className={`rounded-lg border px-3 py-2 text-[11px] font-medium ${
+                  status.startsWith("Added")
+                    ? "border-success/20 bg-success/5 text-success"
+                    : "border-border bg-muted/20 text-muted-foreground"
+                }`}
+              >
+                {status}
+              </p>
+            )}
+            {warning && (
+              <p className="rounded-lg border border-warn/20 bg-warn/5 px-3 py-2 text-[11px] font-medium text-warn">
+                {warning}
+              </p>
+            )}
+            {error && (
+              <p className="rounded-lg border border-crit/20 bg-crit/5 px-3 py-2 text-[11px] font-medium text-crit">
+                {error}
+              </p>
+            )}
+
+            {isLoading ? <AiRecommendationSkeleton /> : null}
+
+            {!isLoading && requested && !error && !suggestions.length ? (
+              <div className="rounded-xl border bg-muted/20 px-5 py-8 text-center">
+                <Sparkles className="mx-auto size-5 text-muted-foreground" />
+                <p className="mt-3 text-sm font-semibold">No strong AI recommendations found</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The agent did not find useful, account-specific recommendations that are not
+                  already covered by current activities.
+                </p>
+              </div>
+            ) : null}
+
+            {!isLoading && suggestions.length ? (
+              <div className="space-y-3">
+                {suggestions.map((suggestion) => (
+                  <AiRecommendationCard
+                    key={suggestion.id}
+                    suggestion={suggestion}
+                    duplicate={isDuplicateAiActivity(suggestion, activityRows)}
+                    isAdding={addingId === suggestion.id}
+                    canAct={canAct}
+                    onAccept={onAccept}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function AiRecommendationSkeleton() {
+  return (
+    <div className="space-y-3">
+      {[0, 1, 2].map((item) => (
+        <div key={item} className="rounded-xl border bg-card p-4 animate-pulse">
+          <div className="flex gap-3">
+            <div className="mt-1 size-4 rounded border bg-muted" />
+            <div className="flex-1 space-y-3">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-2 flex-1">
+                  <div className="h-4 w-2/3 rounded bg-muted" />
+                  <div className="h-3 w-full rounded bg-muted" />
+                  <div className="h-3 w-4/5 rounded bg-muted" />
+                </div>
+                <div className="h-6 w-24 rounded-full bg-muted" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="h-16 rounded-lg bg-muted" />
+                <div className="h-16 rounded-lg bg-muted" />
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AiRecommendationCard({ suggestion, duplicate, isAdding, canAct, onAccept }) {
+  return (
+    <div className="rounded-xl border bg-card p-4 shadow-sm">
+      <div className="flex gap-3">
+        <input
+          type="checkbox"
+          className="mt-1 size-4 shrink-0 accent-[hsl(var(--accent))]"
+          checked={isAdding}
+          disabled={!canAct || isAdding || duplicate}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => {
+            event.stopPropagation();
+            if (event.target.checked) onAccept(suggestion);
+          }}
+          aria-label={`Add ${suggestion.title} to Activities Across Health Areas`}
+        />
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                  AI-generated
+                </span>
+                {duplicate && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-crit/10 text-crit px-2 py-1">
+                    Duplicate
+                  </span>
+                )}
+                {isAdding && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-success/10 text-success px-2 py-1">
+                    Adding
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-semibold leading-snug">{suggestion.title}</p>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                {suggestion.description}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <AreaBadge area={suggestion.healthArea} />
+              <span className="text-[10px] font-bold uppercase rounded-full bg-accent/10 text-accent px-2 py-1">
+                {suggestion.expectedLift}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg border bg-muted/10 p-3">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                Why this may increase score
+              </p>
+              <p className="mt-1 text-xs text-foreground leading-relaxed">{suggestion.reason}</p>
+            </div>
+            <div className="rounded-lg border bg-muted/10 p-3">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                Source
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                {suggestion.sourceSummary}
+              </p>
+            </div>
+          </div>
+
+          {duplicate && (
+            <p className="text-[11px] font-semibold text-crit">This activity already exists.</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -4560,6 +4936,15 @@ function sortActivityRows(rows) {
 
     return (ragOrder[left.rag] ?? 99) - (ragOrder[right.rag] ?? 99);
   });
+}
+
+function createAiSuggestionActivityForm(suggestion, ownerName) {
+  return {
+    title: suggestion.title ?? "",
+    owner: ownerName ?? "KAM Person",
+    dueDate: getFutureDateInput(getSuggestedReviewDays(suggestion)),
+    nextStep: suggestion.nextStep ?? suggestion.description ?? suggestion.reason ?? "",
+  };
 }
 /* ============================== TAB 4: Retention VS Growth ============================== */
 function RetentionGrowthTab({ account, opportunities, escalations }) {

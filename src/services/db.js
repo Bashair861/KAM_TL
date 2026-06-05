@@ -116,6 +116,21 @@ function mapActivityRuleActivity(row, evidenceRows = []) {
   };
 }
 
+function mapAccountTaskForAiSuggestion(row, index, fallbackAccountId) {
+  return {
+    id: row.id ?? row.task_id ?? `task-${fallbackAccountId}-${index}`,
+    accountId: row.account_id ?? row.accountId ?? fallbackAccountId,
+    title: row.title ?? row.name ?? row.task_name ?? row.subject ?? "Untitled task",
+    description: row.description ?? row.details ?? row.notes ?? row.summary ?? "",
+    area: row.area ?? row.health_area ?? row.parameter ?? row.category ?? "",
+    status: row.status ?? row.state ?? "",
+    priority: row.priority ?? row.urgency ?? "",
+    owner: row.owner ?? row.assigned_to ?? row.assignee ?? "",
+    dueDate: row.due_date ?? row.due ?? row.deadline ?? "",
+    source: "tasks",
+  };
+}
+
 function mapActivityScoreHistory(row) {
   return {
     id: row.id,
@@ -128,6 +143,28 @@ function mapActivityScoreHistory(row) {
     notes: row.notes ?? "",
     createdAt: row.created_at,
   };
+}
+
+function normalizeActivityDuplicateText(value = "") {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSimilarActivityText(left, right) {
+  const a = normalizeActivityDuplicateText(left);
+  const b = normalizeActivityDuplicateText(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function isDuplicateRuleActivityInput(input, row) {
+  const sameArea = isSimilarActivityText(input.parameter, row.parameter);
+  const titleMatch = isSimilarActivityText(input.title, row.title);
+  const detailMatch = isSimilarActivityText(input.nextStep, row.next_step);
+  return sameArea && (titleMatch || detailMatch);
 }
 
 function mapActivityRuleThresholdOverride(row) {
@@ -433,6 +470,25 @@ export async function logAccountChanges(accountId, changes, editedBy) {
   if (error) throw error;
 }
 
+export async function fetchAccountTasksForAiSuggestions(accountId) {
+  if (!accountId) return [];
+
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("*")
+    .eq("account_id", accountId)
+    .limit(100);
+
+  if (error) {
+    if (error.code === "42P01" || error.code === "42703") return [];
+    throw error;
+  }
+
+  return (data ?? []).map((row, index) =>
+    mapAccountTaskForAiSuggestion(row, index, accountId),
+  );
+}
+
 export async function fetchActivityScoreHistory(accountId) {
   const { data, error } = await supabase
     .from("activity_score_history")
@@ -564,6 +620,43 @@ export async function fetchActivityRuleActivities(accountId) {
 
 export async function createActivityRuleActivity(input) {
   const now = new Date().toISOString();
+
+  if (input.sourceType === "ai_suggestion") {
+    const [
+      { data: existingRows, error: existingError },
+      { data: legacyRows, error: legacyError },
+    ] = await Promise.all([
+      supabase
+        .from("activity_rule_activities")
+        .select("id,title,next_step,parameter")
+        .eq("account_id", input.accountId)
+        .limit(200),
+      supabase
+        .from("activities")
+        .select("id,title,area")
+        .eq("account_id", input.accountId)
+        .limit(200),
+    ]);
+
+    if (existingError) throw existingError;
+    if (legacyError) throw legacyError;
+
+    const legacyActivityRows = (legacyRows ?? []).map((row) => ({
+      id: row.id,
+      title: row.title,
+      next_step: row.title,
+      parameter: row.area,
+    }));
+
+    if (
+      [...(existingRows ?? []), ...legacyActivityRows].some((row) =>
+        isDuplicateRuleActivityInput(input, row),
+      )
+    ) {
+      throw new Error("This activity already exists.");
+    }
+  }
+
   const { data, error } = await supabase
     .from("activity_rule_activities")
     .insert({
