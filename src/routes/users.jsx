@@ -7,12 +7,19 @@ import {
   Lock,
   Power,
   Shield,
+  Trash2,
   UserPlus,
   Users,
   X,
 } from "lucide-react";
 import { ROLE_PERMISSIONS } from "@/data/kam-data";
-import { createUserProfile, fetchUsers, updateUserRole, updateUserStatus } from "@/services/db";
+import {
+  createUserProfile,
+  deleteUserProfile,
+  fetchUsers,
+  updateUserRole,
+  updateUserStatus,
+} from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
 
 export const Route = createFileRoute("/users")({
@@ -34,6 +41,7 @@ function UsersPage() {
   const [form, setForm] = useState(emptyForm);
   const [showCreate, setShowCreate] = useState(false);
   const [createdInvite, setCreatedInvite] = useState(null);
+  const [deletingUserId, setDeletingUserId] = useState(null);
   const canManage = profile?.role === "Head of KAM";
 
   const {
@@ -85,10 +93,31 @@ function UsersPage() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: deleteUserProfile,
+    onMutate: (userId) => setDeletingUserId(userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      queryClient.invalidateQueries({ queryKey: ["kamUsers"] });
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+    },
+    onSettled: () => setDeletingUserId(null),
+  });
+
   function handleSubmit(event) {
     event.preventDefault();
     if (!form.name.trim() || !form.email.trim()) return;
     createMutation.mutate(form);
+  }
+
+  function handleDeleteUser(user) {
+    const isSelf = user.id === profile?.id || user.email === profile?.email;
+    if (isSelf) return;
+    const confirmed = window.confirm(
+      `Delete ${user.name}? This will remove their profile and sign-in user. Accounts assigned to this user will become unassigned.`,
+    );
+    if (!confirmed) return;
+    deleteMutation.mutate(user.id);
   }
 
   if (loading) {
@@ -221,8 +250,14 @@ function UsersPage() {
         </section>
       )}
 
+      {deleteMutation.error && (
+        <div className="border border-crit/20 bg-crit/5 rounded-lg px-4 py-3 text-sm text-crit">
+          {deleteMutation.error.message}
+        </div>
+      )}
+
       <section className="border rounded-xl bg-card overflow-hidden">
-        <div className="hidden md:grid md:grid-cols-[1.4fr_1fr_180px_120px_150px] gap-4 px-5 py-3 border-b text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+        <div className="hidden md:grid md:grid-cols-[1.4fr_1fr_180px_120px_250px] gap-4 px-5 py-3 border-b text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
           <span>User</span>
           <span>Email</span>
           <span>Role</span>
@@ -248,8 +283,10 @@ function UsersPage() {
               onStatusChange={() =>
                 statusMutation.mutate({ userId: user.id, isActive: !user.isActive })
               }
+              onDelete={() => handleDeleteUser(user)}
               rolePending={roleMutation.isPending}
               statusPending={statusMutation.isPending}
+              deletePending={deleteMutation.isPending && deletingUserId === user.id}
             />
           ))
         )}
@@ -279,14 +316,16 @@ function UserRow({
   currentUser,
   onRoleChange,
   onStatusChange,
+  onDelete,
   rolePending,
   statusPending,
+  deletePending,
 }) {
   const perms = ROLE_PERMISSIONS[user.role] ?? ROLE_PERMISSIONS.KAM;
   const isSelf = user.id === currentUser?.id || user.email === currentUser?.email;
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr_180px_120px_150px] gap-4 px-5 py-4 border-b last:border-b-0 items-center">
+    <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr_180px_120px_250px] gap-4 px-5 py-4 border-b last:border-b-0 items-center">
       <div className="flex items-center gap-3 min-w-0">
         <div className="size-10 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center text-xs font-bold text-accent shrink-0">
           {user.initials}
@@ -318,19 +357,30 @@ function UserRow({
       >
         {user.isActive ? "Active" : "Inactive"}
       </span>
-      <button
-        type="button"
-        onClick={onStatusChange}
-        disabled={isSelf || statusPending}
-        className={`inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-          user.isActive
-            ? "border text-muted-foreground hover:bg-muted"
-            : "bg-success text-white hover:bg-success/90"
-        }`}
-      >
-        {statusPending ? <Loader2 className="size-4 animate-spin" /> : <Power className="size-4" />}
-        {user.isActive ? "Deactivate" : "Activate"}
-      </button>
+      <div className="flex flex-col sm:flex-row md:justify-end gap-2">
+        <button
+          type="button"
+          onClick={onStatusChange}
+          disabled={isSelf || statusPending || deletePending}
+          className={`inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+            user.isActive
+              ? "border text-muted-foreground hover:bg-muted"
+              : "bg-success text-white hover:bg-success/90"
+          }`}
+        >
+          {statusPending ? <Loader2 className="size-4 animate-spin" /> : <Power className="size-4" />}
+          {user.isActive ? "Deactivate" : "Activate"}
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={isSelf || deletePending}
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-crit/30 px-3 py-2 text-sm font-semibold text-crit hover:bg-crit/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {deletePending ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+          Delete
+        </button>
+      </div>
     </div>
   );
 }
