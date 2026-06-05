@@ -1,6 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { normalizeRole } from "@/data/kam-data";
-import { createManagedAuthUser } from "@/services/user-admin";
+import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-admin";
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
@@ -208,6 +208,20 @@ export async function updateUserStatus(userId, isActive) {
   if (error) throw error;
 }
 // ─── delete account ───────────────────────────────────────────────────────────
+export async function deleteUserProfile(userId) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before deleting users.");
+
+  return deleteManagedAuthUser({
+    data: {
+      userId,
+      accessToken: session.access_token,
+    },
+  });
+}
+
 export async function deleteAccount(accountId) {
   const { error } = await supabase.from("accounts").delete().eq("id", accountId);
   if (error) throw error;
