@@ -17,35 +17,35 @@ export const fetchEducationArticles = createServerFn({ method: "POST" })
     const serviceList = activeServices.length ? activeServices : allServices;
     const hasServices = serviceList.length > 0;
 
-    const serviceContext = hasServices
-      ? `Their active services include: ${serviceList.join(", ")}.`
-      : `They operate in the ${industry} industry.`;
+    const { type = "account" } = data;
 
-    const articleFocus = hasServices
-      ? `Help them get more value from these services. Aim for one article per service where possible.`
-      : `Find articles on industry trends, best practices, and digital transformation relevant to a ${industry} company.`;
+    let prompt = "";
 
-    const serviceField = hasServices
-      ? `"service": "Which service from the list this article relates to",`
-      : `"service": "Relevant topic or area",`;
-
-    const prompt = `You are helping a Key Account Manager educate their client "${accountName}" in the ${industry} industry.
-
+    if (type === "account") {
+      const serviceContext = hasServices
+        ? `Their active services include: ${serviceList.join(", ")}.`
+        : `They operate in the ${industry} industry.`;
+      const articleFocus = hasServices
+        ? `Help them get more value from these services. Aim for one article per service where possible.`
+        : `Find articles on trends, digital transformation, and innovation relevant to a ${industry} company.`;
+      prompt = `You are helping a KAM educate their client "${accountName}" (${industry} industry).
 ${serviceContext}
-
-Search the web and find 6 high-quality, recent articles (2024–2025) that a KAM could share with this client. ${articleFocus}
-
-Return ONLY a valid JSON array — no markdown, no code fences:
-[
-  {
-    "title": "Exact article title from the web",
-    "source": "Publication or website name",
-    "url": "https://actual-article-url",
-    "summary": "2 sentences explaining what this article covers and why it matters to a ${industry} business",
-    ${serviceField}
-    "tags": ["2 to 3 short relevant tags"]
-  }
-]`;
+Search the web for 6 recent articles (2024–2025) a KAM could share with this client. ${articleFocus}
+Return ONLY a valid JSON array — no markdown:
+[{"title":"exact title","source":"publication","url":"https://url","summary":"2 sentences","service":"related service or topic","tags":["tag1","tag2"]}]`;
+    } else if (type === "modern-services") {
+      prompt = `Search the web for 6 recent articles (2024–2025) about modern enterprise services and emerging technologies that businesses are adopting today. Cover areas like: AI-powered services, cloud-native platforms, edge computing, managed security, observability, developer platforms.
+Return ONLY a valid JSON array — no markdown:
+[{"title":"exact title","source":"publication","url":"https://url","summary":"2 sentences on what this service/tech does and why enterprises are adopting it","service":"technology area","tags":["tag1","tag2"]}]`;
+    } else if (type === "approaches") {
+      prompt = `Search the web for 6 recent articles (2024–2025) about modern Key Account Management approaches, customer success strategies, and enterprise relationship management. Cover: digital KAM, data-driven account planning, health scoring, executive engagement, QBR best practices, renewal playbooks.
+Return ONLY a valid JSON array — no markdown:
+[{"title":"exact title","source":"publication","url":"https://url","summary":"2 sentences on the approach and its impact on client retention and growth","service":"KAM area","tags":["tag1","tag2"]}]`;
+    } else if (type === "best-practices") {
+      prompt = `Search the web for 6 recent articles (2024–2025) about best practices in enterprise tech delivery, client communication, SLA management, escalation handling, and account health. Cover: incident communication, SLA frameworks, RCA templates, client success playbooks, service delivery excellence.
+Return ONLY a valid JSON array — no markdown:
+[{"title":"exact title","source":"publication","url":"https://url","summary":"2 sentences on the best practice and what problem it solves","service":"practice area","tags":["tag1","tag2"]}]`;
+    }
 
     // Try Responses API (supports web_search_preview tool with gpt-4o)
     const res = await fetch("https://api.openai.com/v1/responses", {

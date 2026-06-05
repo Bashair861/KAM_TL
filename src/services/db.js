@@ -500,3 +500,34 @@ export async function fetchNotifications() {
     read: n.read,
   }));
 }
+
+// ─── education log ────────────────────────────────────────────────────────────
+export async function fetchEducationLog(accountId) {
+  let q = supabase
+    .from("education_log")
+    .select("*")
+    .order("created_at", { ascending: false });
+  if (accountId) q = q.eq("account_id", accountId);
+  const { data, error } = await q;
+  if (error) throw error;
+  return (data ?? []).map((e) => ({
+    id: e.id,
+    accountId: e.account_id,
+    date: e.date,
+    topic: e.topic,
+    approach: e.approach ?? "",
+    outcome: e.outcome ?? "",
+    createdAt: e.created_at,
+  }));
+}
+
+export async function saveEducationSession(session) {
+  const { error } = await supabase.from("education_log").insert({
+    account_id: session.accountId,
+    date: session.date,
+    topic: session.topic,
+    approach: session.approach ?? null,
+    outcome: session.outcome ?? null,
+  });
+  if (error) throw error;
+}
