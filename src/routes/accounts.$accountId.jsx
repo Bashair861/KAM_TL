@@ -3523,44 +3523,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         )}
       </div>
 
-      <div className="rounded-xl border bg-card overflow-hidden">
-        <div className="px-6 py-5 bg-gradient-to-r from-accent/10 via-card to-card">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div className="flex items-start gap-3">
-              <span className="size-10 rounded-lg bg-accent/10 text-accent flex items-center justify-center shrink-0">
-                <Sparkles className="size-5" />
-              </span>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="text-sm font-bold">AI Suggestions to Increase Score</h4>
-                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
-                    AI-generated
-                  </span>
-                </div>
-                <p className="text-[11px] text-muted-foreground mt-1 max-w-3xl">
-                  Generate AI-powered strategic recommendations for this account.
-                </p>
-                {aiSuggestions.length ? (
-                  <p className="mt-2 text-[11px] font-medium text-muted-foreground">
-                    {aiSuggestions.length} recommendation{aiSuggestions.length === 1 ? "" : "s"} ready
-                    to review.
-                  </p>
-                ) : null}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              disabled={generatingAiSuggestions}
-              onClick={generateAiSuggestions}
-              className="shadow-sm"
-            >
-              {generatingAiSuggestions && <Loader2 className="size-3.5 animate-spin mr-1" />}
-              Ask AI for Suggestions
-            </Button>
-          </div>
-        </div>
-      </div>
-
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div>
@@ -3651,6 +3613,44 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
               No activities are active for this health area.
             </p>
           )}
+        </div>
+      </div>
+
+      <div className="rounded-xl border bg-card overflow-hidden">
+        <div className="px-6 py-5 bg-gradient-to-r from-accent/10 via-card to-card">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="size-10 rounded-lg bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                <Sparkles className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-bold">AI Suggestions to Increase Score</h4>
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                    AI-generated
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1 max-w-3xl">
+                  Generate AI-powered strategic recommendations for this account.
+                </p>
+                {aiSuggestions.length ? (
+                  <p className="mt-2 text-[11px] font-medium text-muted-foreground">
+                    {aiSuggestions.length} recommendation{aiSuggestions.length === 1 ? "" : "s"} ready
+                    to review.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              disabled={generatingAiSuggestions}
+              onClick={generateAiSuggestions}
+              className="shadow-sm"
+            >
+              {generatingAiSuggestions && <Loader2 className="size-3.5 animate-spin mr-1" />}
+              Ask AI for Suggestions
+            </Button>
+          </div>
         </div>
       </div>
 
