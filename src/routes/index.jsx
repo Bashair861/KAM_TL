@@ -13,7 +13,7 @@ import {
   fetchAccounts,
   fetchDashboardActionItems,
   fetchEscalations,
-  updateDashboardTaskComplete,
+  updateDashboardActionItemComplete,
 } from "@/services/db";
 import { createGoogleCalendarAuthUrl, fetchGoogleCalendarDashboard } from "@/services/calendar";
 import { askPortfolioAi } from "@/services/ai";
@@ -105,10 +105,10 @@ function DashboardPage() {
     refetchOnWindowFocus: false,
   });
   const { mutate: completeActionItem, isPending: actionItemUpdating } = useMutation({
-    mutationFn: ({ id, complete, healthMetricId }) =>
-      updateDashboardTaskComplete(id, complete, healthMetricId),
+    mutationFn: (action) => updateDashboardActionItemComplete(action),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items", userId, role] });
+      queryClient.invalidateQueries({ queryKey: ["accounts", userId, role] });
     },
   });
   const {
@@ -186,6 +186,19 @@ function DashboardPage() {
     portfolioNewsError?.message ||
     livePortfolioNews?.message ||
     (portfolioNewsFetching ? "Refreshing public client news..." : "");
+  const actionItemSummary = useMemo(
+    () => ({
+      total: actionItems.length,
+      escalations: actionItems.filter((item) => item.isEscalation).length,
+      kpiGaps: actionItems.filter((item) => item.sourceType === "kpi_data").length,
+      tasks: actionItems.filter((item) => item.sourceType === "task").length,
+    }),
+    [actionItems],
+  );
+  function requestActionItemCompletion(item) {
+    if (item.readOnlyFallback) return;
+    completeActionItem({ ...item, complete: !item.complete });
+  }
   const portfolioTotals = {
     totalARR: accounts.reduce((s, a) => s + a.arr, 0),
     atRiskARR: accounts.filter((a) => a.status !== "healthy").reduce((s, a) => s + a.arr, 0),
@@ -454,14 +467,33 @@ function DashboardPage() {
 
           {/* My open action items */}
           <div className="bg-card rounded-xl border shadow-sm">
-            <div className="px-6 py-4 border-b flex items-center justify-between">
-              <h3 className="text-sm font-bold flex items-center gap-2">
-                <ListChecks className="size-4 text-accent" />
-                My Open Action Items
-              </h3>
-              <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-                {actionItems.length} open
-              </span>
+            <div className="px-6 py-4 border-b space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <ListChecks className="size-4 text-accent" />
+                  My Open Action Items
+                </h3>
+                <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                  {actionItemSummary.total} open
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <span
+                  className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border ${
+                    actionItemSummary.escalations
+                      ? "bg-crit/10 text-crit border-crit/20"
+                      : "bg-muted/30 text-muted-foreground"
+                  }`}
+                >
+                  {actionItemSummary.escalations} escalation critical
+                </span>
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border bg-accent/10 text-accent border-accent/20">
+                  {actionItemSummary.kpiGaps} KPI gaps
+                </span>
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border bg-muted/30 text-muted-foreground">
+                  {actionItemSummary.tasks} tasks
+                </span>
+              </div>
             </div>
             {(actionItemsError || actionItemsFetching) && (
               <div className="px-6 py-2 border-b bg-muted/30 text-[11px] text-muted-foreground">
@@ -480,36 +512,41 @@ function DashboardPage() {
                     getAccount(a.accountId))
                   : undefined;
                 return (
-                  <div key={a.id} className="px-6 py-3 flex items-start gap-3">
+                  <div
+                    key={a.id}
+                    className={`px-6 py-3 flex items-start gap-3 border-l-4 ${
+                      a.isEscalation
+                        ? "border-crit bg-crit/5"
+                        : a.sourceType === "kpi_data"
+                          ? "border-accent/60 bg-accent/5"
+                          : "border-transparent"
+                    }`}
+                  >
                     <button
                       type="button"
                       disabled={actionItemUpdating || a.readOnlyFallback}
-                      onClick={() =>
-                        completeActionItem({
-                          id: a.id,
-                          complete: !a.complete,
-                          healthMetricId: a.healthMetricId,
-                        })
-                      }
+                      onClick={() => requestActionItemCompletion(a)}
                       className="mt-0.5 size-4 rounded border flex items-center justify-center hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed"
                       title={
                         a.readOnlyFallback
                           ? "Run src/db/add-tasks.sql to enable task completion."
-                          : "Mark task complete"
+                          : a.sourceType === "kpi_data"
+                            ? "Mark KPI action checked"
+                            : "Mark task complete"
                       }
                     >
                       {a.complete && <CheckCircle2 className="size-3 text-success" />}
                     </button>
                     <span
                       className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${
-                        a.priority === "P1"
+                        a.isEscalation || a.priority === "P1"
                           ? "bg-crit/10 text-crit"
                           : a.priority === "P2"
                             ? "bg-warn/10 text-warn"
                             : "bg-muted text-muted-foreground"
                       }`}
                     >
-                      {a.priority}
+                      {a.isEscalation ? "ESC" : a.priority}
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold leading-snug">{a.title}</p>
@@ -517,6 +554,11 @@ function DashboardPage() {
                         {acc?.name ?? "Portfolio"} - {a.source}
                         {a.healthMetricLabel && <span> / {a.healthMetricLabel}</span>}
                       </p>
+                      {a.description && (
+                        <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2">
+                          {a.description}
+                        </p>
+                      )}
                     </div>
                     <span className="text-[11px] font-mono text-muted-foreground whitespace-nowrap">
                       {a.due}
