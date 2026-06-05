@@ -127,6 +127,20 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
           })),
         );
         if (aiErr) throw aiErr;
+
+        // Save each action item as a task
+        await supabase.from("tasks").delete().eq("escalation_id", escalId);
+        const { error: taskErr } = await supabase.from("tasks").insert(
+          issue.actionItems.map((a) => ({
+            id: crypto.randomUUID(),
+            name: a.label,
+            type: "Action Item",
+            account_id: accountId,
+            escalation_id: escalId,
+            Complete: a.done,
+          })),
+        );
+        if (taskErr) throw taskErr;
       }
     }
 
