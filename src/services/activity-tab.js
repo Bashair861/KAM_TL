@@ -211,6 +211,17 @@ function formatScoreMetricExpectedLift(field) {
   return `${weight}%`;
 }
 
+function getSectionScore(section) {
+  const fields = section?.fields ?? [];
+  const totalWeight = fields.reduce((sum, field) => sum + Number(field.weight ?? 0), 0);
+  if (!totalWeight) return 0;
+  const earned = fields.reduce(
+    (sum, field) => sum + (field.checked ? Number(field.weight ?? 0) : 0),
+    0,
+  );
+  return Number(((earned / totalWeight) * 10).toFixed(1));
+}
+
 function getScoreMetricActivities(account) {
   return SCORE_BLOCKS.flatMap((config) => {
     const block = account[config.blockKey];
@@ -231,6 +242,14 @@ function getScoreMetricActivities(account) {
           status: "Suggested",
           rag: block?.score <= 7 ? "R" : block?.score < 8.5 ? "A" : "G",
           expectedLift: formatScoreMetricExpectedLift(field),
+          scoreAreaKey: config.key,
+          scoreAreaTitle: config.title,
+          scoreSectionId: section.id,
+          scoreSection: section.name,
+          scoreCriterionId: field.id,
+          scoreCriterion: field.label,
+          scoreSortValue: getSectionScore(section),
+          relatedScoreGaps: [`${config.title} > ${section.name}`],
           confidence: "High",
           ruleId: config.ruleId,
           parameter: config.area,

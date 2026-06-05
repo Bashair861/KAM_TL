@@ -6,6 +6,7 @@ const GOOGLE_SCOPES = [
   "email",
   "profile",
   "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/tasks.readonly",
 ];
 
@@ -37,6 +38,30 @@ function validateCallbackInput(data) {
     ...validateAuthInput(input),
     code: cleanString(input.code),
     state: cleanString(input.state),
+  };
+}
+
+function validateCreateEventInput(data) {
+  const input = data && typeof data === "object" ? data : {};
+  const event = input.event && typeof input.event === "object" ? input.event : {};
+  return {
+    ...validateAuthInput(input),
+    accountId: cleanString(input.accountId),
+    activityId: cleanString(input.activityId),
+    event: {
+      summary: cleanString(event.summary),
+      description: cleanString(event.description),
+      startDateTime: cleanString(event.startDateTime),
+      durationMinutes: Number(event.durationMinutes ?? 45),
+      attendees: Array.isArray(event.attendees)
+        ? event.attendees
+            .map((attendee) => ({
+              email: cleanString(attendee?.email),
+              displayName: cleanString(attendee?.displayName),
+            }))
+            .filter((attendee) => attendee.email)
+        : [],
+    },
   };
 }
 
@@ -269,6 +294,46 @@ async function fetchTasks(accessToken, taskListId, horizonDays) {
   if (!response.ok) throw new Error(`Google tasks lookup failed: ${await response.text()}`);
   const payload = await response.json();
   return (payload.items ?? []).filter((task) => task.due);
+}
+
+async function createGoogleEvent(accessToken, calendarId, event) {
+  const start = new Date(event.startDateTime);
+  if (Number.isNaN(start.getTime())) throw new Error("Choose a valid meeting date and time");
+
+  const durationMinutes = Number.isFinite(event.durationMinutes)
+    ? Math.max(15, event.durationMinutes)
+    : 45;
+  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
+      calendarId,
+    )}/events?sendUpdates=all`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        summary: event.summary,
+        description: event.description,
+        start: {
+          dateTime: start.toISOString(),
+        },
+        end: {
+          dateTime: end.toISOString(),
+        },
+        attendees: event.attendees,
+        reminders: {
+          useDefault: true,
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) throw new Error(`Google event creation failed: ${await response.text()}`);
+  return response.json();
 }
 
 async function ensureFreshAccessToken({ admin, connection, redirectOrigin }) {
@@ -651,5 +716,69 @@ export const fetchGoogleCalendarDashboard = createServerFn({ method: "POST" })
       setupRequired: false,
       message: notices[0] ?? "",
       syncedAt: new Date().toISOString(),
+    };
+  });
+
+export const createGoogleCalendarEvent = createServerFn({ method: "POST" })
+  .inputValidator(validateCreateEventInput)
+  .handler(async ({ data }) => {
+    if (!data.authAccessToken) throw new Error("Please sign in before scheduling a meeting");
+    if (!data.event.summary) throw new Error("Meeting subject is required");
+    if (!data.event.startDateTime) throw new Error("Meeting date and time are required");
+
+    const admin = getSupabaseAdmin(true);
+    if (!admin) {
+      return {
+        ok: false,
+        setupRequired: true,
+        message: "Calendar scheduling needs SUPABASE_SERVICE_ROLE_KEY on the server.",
+      };
+    }
+
+    const { profileId } = await resolveProfile({
+      admin,
+      authAccessToken: data.authAccessToken,
+      profileId: data.profileId,
+    });
+
+    const { data: connection, error } = await admin
+      .from("calendar_connections")
+      .select("*")
+      .eq("profile_id", profileId)
+      .eq("provider", "google")
+      .eq("connected", true)
+      .eq("calendar_id", "primary")
+      .maybeSingle();
+
+    if (error) {
+      return {
+        ok: false,
+        setupRequired: true,
+        message: `Run the calendar SQL migration. ${error.message}`,
+      };
+    }
+
+    if (!connection) {
+      return {
+        ok: false,
+        setupRequired: false,
+        message: "Connect Google Calendar before scheduling meetings.",
+      };
+    }
+
+    const accessToken = await ensureFreshAccessToken({
+      admin,
+      connection,
+      redirectOrigin: data.redirectOrigin || "http://localhost:8080",
+    });
+    const event = await createGoogleEvent(accessToken, connection.calendar_id || "primary", data.event);
+
+    return {
+      ok: true,
+      eventId: event.id,
+      htmlLink: event.htmlLink,
+      message: "Meeting scheduled and invitations sent.",
+      accountId: data.accountId,
+      activityId: data.activityId,
     };
   });

@@ -35,6 +35,8 @@ import {
   rejectActivityRuleSuggestion,
   submitActivityRuleEvidence,
   reviewActivityRuleEvidence,
+  markActivityRuleActivityDone,
+  markLegacyActivityDone,
   fetchFirefliesMeetingSummaries,
   generateAccountLinkedinSummary,
   generateAccountWebsiteSummary,
@@ -42,6 +44,7 @@ import {
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { extractSowFields } from "@/services/sow-upload";
 import { fetchEducationArticles } from "@/services/education";
+import { createGoogleCalendarEvent } from "@/services/calendar";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import {
@@ -4311,7 +4314,7 @@ function ActivityTab({ account, opportunities, escalations }) {
         <div className="px-6 py-4 border-b flex items-center justify-between">
           <div>
             <h3 className="text-sm font-bold">
-              Extract Action Items from Meeting Notes to Increase Score
+              Meeting Insights to Improve Account Score
             </h3>
             <p className="text-[11px] text-muted-foreground">
               Auto-extracted from the last 5 meeting transcripts - accept to push into the
@@ -4503,7 +4506,11 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
   );
   const isResolved = useCallback(
     (item) =>
-      Boolean(resolvedItems[item.id] || persistedOpportunityRefs.has(getSuggestionSourceRef(item))),
+      Boolean(
+        resolvedItems[item.id] ||
+          resolvedItems[getSuggestionSourceRef(item)] ||
+          persistedOpportunityRefs.has(getSuggestionSourceRef(item)),
+      ),
     [persistedOpportunityRefs, resolvedItems],
   );
   const activeOpportunities = model.opportunities.filter((item) => !isResolved(item));
@@ -4694,6 +4701,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
 }
 
 function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
+  const { session } = useAuth();
   const role = profile?.role ?? "KAM";
   const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
   const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
@@ -4739,6 +4747,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const [firefliesStatus, setFirefliesStatus] = useState("");
   const [activityAreaFilter, setActivityAreaFilter] = useState("All");
   const [expectedLiftSort, setExpectedLiftSort] = useState("desc");
+  const [activitySortMode, setActivitySortMode] = useState("score");
+  const [activityPage, setActivityPage] = useState(1);
+  const [activityPageSize, setActivityPageSize] = useState(10);
+  const [activityStatus, setActivityStatus] = useState("");
   const [aiSuggestions, setAiSuggestions] = useState([]);
   const [aiSuggestionRequested, setAiSuggestionRequested] = useState(false);
   const [addingAiSuggestionId, setAddingAiSuggestionId] = useState("");
@@ -4746,6 +4758,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   const [aiSuggestionWarning, setAiSuggestionWarning] = useState("");
   const [aiSuggestionError, setAiSuggestionError] = useState("");
   const [aiRecommendationSheetOpen, setAiRecommendationSheetOpen] = useState(false);
+  const [scheduleTarget, setScheduleTarget] = useState(null);
+  const [scheduleForm, setScheduleForm] = useState(null);
+  const scheduleGoogleEvent = useServerFn(createGoogleCalendarEvent);
 
   const { mutate: rerunFirefliesExtraction, isPending: extractingFireflies } = useMutation({
     mutationFn: () =>
@@ -4885,6 +4900,48 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     },
   });
 
+  const { mutate: markActivityDone, isPending: completingActivity } = useMutation({
+    mutationFn: (payload) => completeActivityRow(payload),
+    onSuccess: (result) => {
+      setActivityStatus(result?.message ?? "Activity marked done.");
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setActivityStatus(error?.message ?? "Could not mark this activity done.");
+    },
+  });
+
+  const { mutate: scheduleMeeting, isPending: schedulingMeeting } = useMutation({
+    mutationFn: ({ row, form }) =>
+      scheduleGoogleEvent({
+        data: {
+          authAccessToken: session?.access_token ?? "",
+          profileId: profile?.id,
+          redirectOrigin: window.location.origin,
+          accountId: account.id,
+          activityId: row.id,
+          event: {
+            summary: form.subject,
+            description: form.description,
+            startDateTime: combineDateAndTime(form.date, form.time),
+            durationMinutes: Number(form.durationMinutes),
+            attendees: form.contactEmail
+              ? [{ email: form.contactEmail, displayName: form.contactName }]
+              : [],
+          },
+        },
+      }),
+    onSuccess: (result) => {
+      setActivityStatus(result?.message ?? "Meeting scheduled.");
+      if (result?.ok) setScheduleTarget(null);
+    },
+    onError: (error) => {
+      setActivityStatus(error?.message ?? "Could not schedule this meeting.");
+    },
+  });
+
   const { mutate: addAiSuggestionActivity } = useMutation({
     mutationFn: (suggestion) =>
       createActivityRuleActivity(
@@ -4928,12 +4985,18 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     setFirefliesStatus("");
     setActivityAreaFilter("All");
     setExpectedLiftSort("desc");
+    setActivitySortMode("score");
+    setActivityPage(1);
+    setActivityPageSize(10);
+    setActivityStatus("");
     setAiSuggestions([]);
     setAiSuggestionRequested(false);
     setAddingAiSuggestionId("");
     setAiSuggestionStatus("");
     setAiSuggestionWarning("");
     setAiSuggestionError("");
+    setScheduleTarget(null);
+    setScheduleForm(null);
   }, [account.id, profile?.name]);
 
   const activeScoreMetricRefs = useMemo(
@@ -4964,7 +5027,11 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   );
   const isResolved = useCallback(
     (item) =>
-      Boolean(resolvedItems[item.id] || persistedSourceRefs.has(getSuggestionSourceRef(item))),
+      Boolean(
+        resolvedItems[item.id] ||
+          resolvedItems[getSuggestionSourceRef(item)] ||
+          persistedSourceRefs.has(getSuggestionSourceRef(item)),
+      ),
     [persistedSourceRefs, resolvedItems],
   );
   const activeOpportunities = [];
@@ -4992,7 +5059,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
     (item) => item.persisted || !isResolved(item),
   );
 
-  const activityRows = useMemo(() => {
+  const rawActivityRows = useMemo(() => {
     const savedRows = activeSavedRuleActivities.map(mapPersistedRuleActivityToRow);
     const visibleRows = model.activityRows.filter(
       (row) => row.rowType === "existing" || !isResolved(row),
@@ -5002,6 +5069,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       .map((item) => mapMeetingActionToActivityRow(item, "meeting"));
     return sortActivityRows([...savedRows, ...visibleRows, ...firefliesRows]);
   }, [activeSavedRuleActivities, isResolved, model.activityRows, scoreFirefliesActions]);
+  const activityRows = useMemo(
+    () => groupDuplicateActivityRows(rawActivityRows),
+    [rawActivityRows],
+  );
   const activityAreaOptions = useMemo(
     () =>
       ACTIVITY_TAB_AREAS.map((area) => {
@@ -5009,7 +5080,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         return {
           area,
           count: rows.length,
-          expectedLift: summarizeExpectedLift(rows),
         };
       }),
     [activityRows],
@@ -5019,8 +5089,26 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
       activityAreaFilter === "All"
         ? activityRows
         : activityRows.filter((row) => row.area === activityAreaFilter);
-    return sortActivityRowsByExpectedLift(filteredRows, expectedLiftSort);
-  }, [activityAreaFilter, activityRows, expectedLiftSort]);
+    if (activitySortMode === "expectedLift") {
+      return sortActivityRowsByExpectedLift(filteredRows, expectedLiftSort);
+    }
+    return sortActivityRowsByLowestScore(filteredRows, account);
+  }, [account, activityAreaFilter, activityRows, activitySortMode, expectedLiftSort]);
+  const activityPageCount = Math.max(1, Math.ceil(visibleActivityRows.length / activityPageSize));
+  const safeActivityPage = Math.min(activityPage, activityPageCount);
+  const activityPageStart = visibleActivityRows.length
+    ? (safeActivityPage - 1) * activityPageSize
+    : 0;
+  const pagedActivityRows = visibleActivityRows.slice(
+    activityPageStart,
+    activityPageStart + activityPageSize,
+  );
+  const activityShowingStart = visibleActivityRows.length ? activityPageStart + 1 : 0;
+  const activityShowingEnd = Math.min(activityPageStart + activityPageSize, visibleActivityRows.length);
+
+  useEffect(() => {
+    setActivityPage(1);
+  }, [activityAreaFilter, activitySortMode, expectedLiftSort, activityPageSize, account.id]);
 
   function generateAiSuggestions() {
     setAiRecommendationSheetOpen(true);
@@ -5066,7 +5154,85 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
   }
 
   function toggleExpectedLiftSort() {
+    setActivitySortMode("expectedLift");
     setExpectedLiftSort((current) => (current === "asc" ? "desc" : "asc"));
+  }
+
+  function openScheduleMeeting(row) {
+    const form = createMeetingScheduleForm(account, row, profile);
+    setScheduleTarget(row);
+    setScheduleForm(form);
+    setActivityStatus("");
+  }
+
+  function confirmScheduleMeeting() {
+    if (!scheduleTarget || !scheduleForm) return;
+    if (!scheduleForm.contactEmail.trim()) {
+      setActivityStatus("Contact email is required before scheduling.");
+      return;
+    }
+    scheduleMeeting({ row: scheduleTarget, form: scheduleForm });
+  }
+
+  async function completeActivityRow(row) {
+    const rowsToComplete = row.selectedRows ?? row.groupedRows ?? [row];
+    const scoreRows = rowsToComplete.filter((entry) => entry.sourceKind === "score_metric");
+
+    if (scoreRows.length) {
+      await completeScoreMetricRows({
+        account,
+        rows: scoreRows,
+        profile,
+        queryClient,
+        router,
+      });
+      setResolvedItems((current) => ({
+        ...current,
+        ...Object.fromEntries(scoreRows.map((entry) => [getSuggestionSourceRef(entry), true])),
+      }));
+    }
+
+    const savedRows = rowsToComplete.filter((entry) => entry.dbId);
+    await Promise.all(savedRows.map((entry) => markActivityRuleActivityDone(entry.dbId)));
+
+    const existingRows = rowsToComplete.filter(
+      (entry) => entry.sourceKind === "existing" && entry.sourceId,
+    );
+    await Promise.all(existingRows.map((entry) => markLegacyActivityDone(entry.sourceId)));
+
+    const transientRows = rowsToComplete.filter(
+      (entry) => !entry.dbId && entry.sourceKind !== "score_metric" && entry.sourceKind !== "existing",
+    );
+    await Promise.all(
+      transientRows.map(async (entry) => {
+        const created = await createActivityRuleActivity(
+          buildActivityRuleActivityInput({
+            accountId: account.id,
+            target: { kind: entry.sourceKind ?? "activity", item: entry },
+            form: {
+              title: entry.title,
+              owner: profile?.name ?? "KAM Person",
+              dueDate: getFutureDateInput(0),
+              nextStep: entry.nextStep ?? entry.reason ?? entry.title,
+            },
+          }),
+        );
+        await markActivityRuleActivityDone(created.id);
+      }),
+    );
+
+    setResolvedItems((current) => ({
+      ...current,
+      ...Object.fromEntries(rowsToComplete.map((entry) => [entry.id, true])),
+      ...Object.fromEntries(rowsToComplete.map((entry) => [getSuggestionSourceRef(entry), true])),
+    }));
+
+    return {
+      message:
+        scoreRows.length > 1
+          ? `Marked ${scoreRows.length} related Score Marking Matrics items checked.`
+          : "Activity marked done.",
+    };
   }
 
   return (
@@ -5241,10 +5407,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
 
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold">
-              Extract Action Items from Meeting Notes to Increase Score
-            </h3>
+            <div>
+              <h3 className="text-sm font-bold">
+                Meeting Insights to Improve Account Score
+              </h3>
             <p className="text-[11px] text-muted-foreground mt-1">
               Meeting summaries are saved to Meeting History, and guarded action items are saved to
               the activity queue.
@@ -5375,27 +5541,51 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                 onChange={(event) => setActivityAreaFilter(event.target.value)}
                 className="h-9 min-w-[240px] rounded-md border bg-background px-3 text-xs font-medium"
               >
-                <option value="All">
-                  All Health Areas ({activityRows.length}) - {summarizeExpectedLift(activityRows)}
-                </option>
+                <option value="All">All Health Areas ({activityRows.length})</option>
                 {activityAreaOptions.map((option) => (
                   <option key={option.area} value={option.area}>
-                    {option.area} ({option.count}) - {option.expectedLift}
+                    {option.area} ({option.count})
                   </option>
                 ))}
               </select>
             </div>
-            <Button size="sm" variant="outline" onClick={toggleExpectedLiftSort}>
-              Expected Lift {expectedLiftSort === "asc" ? "ASC" : "DESC"}
-            </Button>
+            <div className="grid gap-1">
+              <Label
+                htmlFor="activity-page-size"
+                className="text-[10px] uppercase tracking-widest text-muted-foreground"
+              >
+                Rows
+              </Label>
+              <select
+                id="activity-page-size"
+                value={activityPageSize}
+                onChange={(event) => setActivityPageSize(Number(event.target.value))}
+                className="h-9 rounded-md border bg-background px-3 text-xs font-medium"
+              >
+                <option value={10}>10 per page</option>
+                <option value={20}>20 per page</option>
+                <option value={50}>50 per page</option>
+              </select>
+            </div>
           </div>
         </div>
-        <div className="px-6 py-2 border-b bg-muted/20 text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-          Showing {visibleActivityRows.length} of {activityRows.length} items
+        <div className="px-6 py-2 border-b bg-muted/20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            Showing {activityShowingStart}-{activityShowingEnd} of {visibleActivityRows.length} items
+          </p>
+          {activityStatus && (
+            <p
+              className={`text-[11px] font-medium ${
+                /failed|could not|required/i.test(activityStatus) ? "text-crit" : "text-success"
+              }`}
+            >
+              {activityStatus}
+            </p>
+          )}
         </div>
-        <div className="max-h-[560px] overflow-auto">
+        <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-sm">
-            <thead className="sticky top-0 z-10 bg-card">
+            <thead className="bg-card">
               <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
                 <th className="px-6 py-3">Area</th>
                 <th className="px-6 py-3">Activity</th>
@@ -5405,15 +5595,23 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                     onClick={toggleExpectedLiftSort}
                     className="inline-flex items-center gap-1 hover:text-foreground"
                   >
-                    Expected Lift {expectedLiftSort === "asc" ? "ASC" : "DESC"}
+                    Expected Lift
+                    <ChevronDown
+                      className={`size-3 transition-transform ${
+                        activitySortMode === "expectedLift" && expectedLiftSort === "asc"
+                          ? "rotate-180"
+                          : ""
+                      }`}
+                    />
                   </button>
                 </th>
                 <th className="px-6 py-3">Owner</th>
                 <th className="px-6 py-3">RAG</th>
+                <th className="px-6 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y">
-              {visibleActivityRows.map((row) => (
+              {pagedActivityRows.map((row) => (
                 <tr key={row.id} className="align-top hover:bg-muted/20">
                   <td className="px-6 py-4 text-xs font-semibold whitespace-nowrap">
                     <AreaBadge area={row.area} />
@@ -5422,6 +5620,18 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                     <div className="space-y-1">
                       <p className="font-semibold text-foreground">{row.title}</p>
                       <p className="text-muted-foreground leading-relaxed">{row.reason}</p>
+                      {row.relatedScoreGaps?.length ? (
+                        <div className="mt-2 rounded-md border bg-muted/20 px-3 py-2">
+                          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                            Related score gaps
+                          </p>
+                          <ul className="mt-1 space-y-1 text-[11px] text-muted-foreground">
+                            {row.relatedScoreGaps.map((gap) => (
+                              <li key={gap}>{gap}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
                     </div>
                   </td>
                   <td className="px-6 py-4 text-xs font-semibold whitespace-nowrap">
@@ -5433,6 +5643,28 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
                   <td className="px-6 py-4">
                     <RagBadge code={row.rag} />
                   </td>
+                  <td className="px-6 py-4">
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {isMeetingRelatedActivity(row) && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!canAct}
+                          onClick={() => openScheduleMeeting(row)}
+                        >
+                          <Calendar className="size-3.5 mr-1" />
+                          Schedule Meeting
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        disabled={!canAct || completingActivity}
+                        onClick={() => markActivityDone(row)}
+                      >
+                        Done
+                      </Button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -5443,6 +5675,44 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
             </p>
           )}
         </div>
+        {visibleActivityRows.length > activityPageSize && (
+          <div className="px-6 py-3 border-t flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <p className="text-[11px] text-muted-foreground">
+              Page {safeActivityPage} of {activityPageCount}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={safeActivityPage <= 1}
+                onClick={() => setActivityPage((page) => Math.max(1, page - 1))}
+              >
+                Previous
+              </Button>
+              {Array.from({ length: Math.min(activityPageCount, 5) }, (_, index) => {
+                const page = index + 1;
+                return (
+                  <Button
+                    key={page}
+                    size="sm"
+                    variant={page === safeActivityPage ? "default" : "outline"}
+                    onClick={() => setActivityPage(page)}
+                  >
+                    {page}
+                  </Button>
+                );
+              })}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={safeActivityPage >= activityPageCount}
+                onClick={() => setActivityPage((page) => Math.min(activityPageCount, page + 1))}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="rounded-xl border bg-card overflow-hidden">
@@ -5520,6 +5790,18 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
         }}
         onConfirm={() => submitEvidence({ row: evidenceSubmitTarget, form: evidenceForm })}
         isSaving={submittingEvidence}
+      />
+
+      <ScheduleMeetingDialog
+        target={scheduleTarget}
+        form={scheduleForm}
+        onChange={setScheduleForm}
+        onClose={() => {
+          setScheduleTarget(null);
+          setScheduleForm(null);
+        }}
+        onConfirm={confirmScheduleMeeting}
+        isSaving={schedulingMeeting}
       />
 
       <RejectRecommendationDialog
@@ -6010,6 +6292,151 @@ function EvidenceSubmissionDialog({ target, form, onChange, onClose, onConfirm, 
             onClick={onConfirm}
           >
             {isSaving ? "Submitting..." : "Submit evidence"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ScheduleMeetingDialog({ target, form, onChange, onClose, onConfirm, isSaving }) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Schedule meeting</DialogTitle>
+          <DialogDescription>
+            Create a Google Calendar invite from this activity using account context.
+          </DialogDescription>
+        </DialogHeader>
+
+        {target && form && (
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Activity
+              </p>
+              <p className="mt-1 text-sm font-semibold">{target.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{target.reason}</p>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-account">Account</Label>
+                <Input id="meeting-account" value={form.accountName} readOnly />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-contact">Contact/person</Label>
+                <Input
+                  id="meeting-contact"
+                  value={form.contactName}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, contactName: event.target.value }))
+                  }
+                  placeholder="Client contact"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="meeting-contact-email">
+                Contact email <span className="text-crit">*</span>
+              </Label>
+              <Input
+                id="meeting-contact-email"
+                type="email"
+                value={form.contactEmail}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, contactEmail: event.target.value }))
+                }
+                placeholder="client@example.com"
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="meeting-subject">Meeting subject</Label>
+              <Input
+                id="meeting-subject"
+                value={form.subject}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, subject: event.target.value }))
+                }
+              />
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-date">Date</Label>
+                <Input
+                  id="meeting-date"
+                  type="date"
+                  value={form.date}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, date: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-time">Time</Label>
+                <Input
+                  id="meeting-time"
+                  type="time"
+                  value={form.time}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, time: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-duration">Duration</Label>
+                <select
+                  id="meeting-duration"
+                  value={form.durationMinutes}
+                  onChange={(event) =>
+                    onChange((current) => ({
+                      ...current,
+                      durationMinutes: Number(event.target.value),
+                    }))
+                  }
+                  className="h-10 rounded-md border bg-background px-3 text-sm"
+                >
+                  <option value={30}>30 minutes</option>
+                  <option value={45}>45 minutes</option>
+                  <option value={60}>60 minutes</option>
+                  <option value={90}>90 minutes</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="meeting-description">Agenda and notes</Label>
+              <Textarea
+                id="meeting-description"
+                rows={7}
+                value={form.description}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, description: event.target.value }))
+                }
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            disabled={
+              isSaving ||
+              !form?.subject?.trim() ||
+              !form?.contactEmail?.trim() ||
+              !form?.date ||
+              !form?.time
+            }
+            onClick={onConfirm}
+          >
+            {isSaving ? "Scheduling..." : "Schedule meeting"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -6774,6 +7201,296 @@ function createAiSuggestionActivityForm(suggestion, ownerName) {
     dueDate: getFutureDateInput(getSuggestedReviewDays(suggestion)),
     nextStep: suggestion.nextStep ?? suggestion.description ?? suggestion.reason ?? "",
   };
+}
+
+const SCORE_AREA_CONFIG = {
+  Relationship: {
+    key: "relationship",
+    blockKey: "relationshipHealth",
+    title: "Relationship Health",
+  },
+  Project: {
+    key: "project",
+    blockKey: "projectHealth",
+    title: "Project Health",
+  },
+  Resource: {
+    key: "resource",
+    blockKey: "resourceHealth",
+    title: "Resources Health",
+  },
+  Financial: {
+    key: "financial",
+    blockKey: "financialHealth",
+    title: "Financial Health",
+  },
+  Risk: {
+    key: "risk",
+    blockKey: "riskScoring",
+    title: "Risk Scoring",
+  },
+  CSAT: {
+    key: "csat",
+    blockKey: "csat",
+    title: "Customer Satisfaction Score",
+  },
+};
+
+function normalizeActivityText(value = "") {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getRelatedScoreGap(row) {
+  if (row.scoreAreaTitle && row.scoreSection) {
+    return `${row.scoreAreaTitle} > ${row.scoreSection}`;
+  }
+  if (row.impactedMetric && row.sourceKind === "score_metric") {
+    const areaTitle = SCORE_AREA_CONFIG[row.area]?.title ?? `${row.area} Health`;
+    return `${areaTitle} > ${row.impactedMetric}`;
+  }
+  return null;
+}
+
+function groupDuplicateActivityRows(rows) {
+  const grouped = new Map();
+
+  rows.forEach((row) => {
+    const key = [
+      normalizeActivityText(row.area),
+      normalizeActivityText(row.title),
+      normalizeActivityText(row.nextStep || row.description || ""),
+    ].join("|");
+    const existing = grouped.get(key);
+    const relatedScoreGap = getRelatedScoreGap(row);
+
+    if (!existing) {
+      grouped.set(key, {
+        ...row,
+        groupedRows: [row],
+        relatedScoreGaps: relatedScoreGap ? [relatedScoreGap] : [],
+      });
+      return;
+    }
+
+    const relatedScoreGaps = Array.from(
+      new Set([...existing.relatedScoreGaps, relatedScoreGap].filter(Boolean)),
+    );
+    const groupedRows = [...existing.groupedRows, row];
+    grouped.set(key, {
+      ...existing,
+      id: `group-${key}`,
+      groupedRows,
+      relatedScoreGaps,
+      expectedLift: summarizeExpectedLift(groupedRows),
+      reason:
+        relatedScoreGaps.length > 1
+          ? `Same activity is linked to ${relatedScoreGaps.length} score gaps.`
+          : existing.reason,
+    });
+  });
+
+  return [...grouped.values()];
+}
+
+function getAreaScoreValue(account, area) {
+  if (area === "Health") return Number(account.health ?? 100) / 10;
+  const config = SCORE_AREA_CONFIG[area];
+  if (!config) return 10;
+  return Number(account[config.blockKey]?.score ?? 10);
+}
+
+function getRowScoreValue(row, account) {
+  const rows = row.groupedRows ?? [row];
+  const values = rows.map((entry) => {
+    const explicit = Number(entry.scoreSortValue);
+    return Number.isFinite(explicit) ? explicit : getAreaScoreValue(account, entry.area);
+  });
+  return Math.min(...values);
+}
+
+function sortActivityRowsByLowestScore(rows, account) {
+  return [...rows].sort((left, right) => {
+    const leftScore = getRowScoreValue(left, account);
+    const rightScore = getRowScoreValue(right, account);
+    if (leftScore !== rightScore) return leftScore - rightScore;
+
+    const leftLift = getExpectedLiftSortValue(left.expectedLift);
+    const rightLift = getExpectedLiftSortValue(right.expectedLift);
+    if (leftLift !== null || rightLift !== null) return (rightLift ?? -1) - (leftLift ?? -1);
+
+    return sortActivityRows([left, right])[0] === left ? -1 : 1;
+  });
+}
+
+function findScoreMetricRef(account, row) {
+  if (row.scoreAreaKey && row.scoreSectionId && row.scoreCriterionId) {
+    return {
+      areaKey: row.scoreAreaKey,
+      sectionId: row.scoreSectionId,
+      fieldId: row.scoreCriterionId,
+    };
+  }
+
+  const sourceRef = getSuggestionSourceRef(row);
+  for (const config of Object.values(SCORE_AREA_CONFIG)) {
+    const block = account[config.blockKey];
+    for (const section of block?.kpiData ?? []) {
+      for (const field of section.fields ?? []) {
+        if (`score-metric-${config.key}-${section.id}-${field.id}` === sourceRef) {
+          return { areaKey: config.key, sectionId: section.id, fieldId: field.id };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function calculateKpiScore(sections) {
+  const sectionScores = sections.map((section) => {
+    const totalWeight = (section.fields ?? []).reduce(
+      (sum, field) => sum + (Number(field.weight) || 0),
+      0,
+    );
+    const earned = (section.fields ?? []).reduce(
+      (sum, field) => sum + (field.checked ? Number(field.weight) || 0 : 0),
+      0,
+    );
+    return totalWeight > 0 ? (earned / totalWeight) * 10 : 0;
+  });
+
+  if (!sectionScores.length) return 0;
+  return parseFloat(
+    (sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length).toFixed(1),
+  );
+}
+
+async function completeScoreMetricRows({ account, rows, profile }) {
+  const rowsByArea = new Map();
+
+  rows.forEach((row) => {
+    const ref = findScoreMetricRef(account, row);
+    if (!ref) return;
+    const current = rowsByArea.get(ref.areaKey) ?? [];
+    current.push(ref);
+    rowsByArea.set(ref.areaKey, current);
+  });
+
+  if (!rowsByArea.size) {
+    throw new Error("This activity is not linked to a Score Marking Matrics criterion.");
+  }
+
+  for (const [areaKey, refs] of rowsByArea.entries()) {
+    const areaEntry = Object.values(SCORE_AREA_CONFIG).find((entry) => entry.key === areaKey);
+    if (!areaEntry) continue;
+    const block = account[areaEntry.blockKey];
+    const refKeys = new Set(refs.map((ref) => `${ref.sectionId}|${ref.fieldId}`));
+    const sections = (block?.kpiData ?? []).map((section) => ({
+      ...section,
+      fields: (section.fields ?? []).map((field) => ({
+        ...field,
+        checked: refKeys.has(`${section.id}|${field.id}`) ? true : field.checked,
+      })),
+    }));
+    const newScore = calculateKpiScore(sections);
+    const metricUpdates = sections
+      .map((section) => {
+        if (!section.metricId) return null;
+        const sectionScore = calculateKpiScore([section]);
+        return {
+          id: section.metricId,
+          label: section.name,
+          value: parseFloat(sectionScore.toFixed(1)),
+        };
+      })
+      .filter(Boolean);
+
+    await updateHealthBlock(account.id, areaKey, newScore, metricUpdates, sections);
+    await upsertActivityScoreSnapshot({
+      accountId: account.id,
+      parameter: scoreAreaToParameter(areaKey),
+      metric: areaEntry.title,
+      score: newScore,
+      source: "activity_done",
+      notes: `Activity marked done by ${profile?.name ?? "Unknown"}.`,
+    });
+    await logAccountChanges(
+      account.id,
+      [
+        {
+          field: `Score: ${areaEntry.title}`,
+          oldValue: String(block?.score ?? ""),
+          newValue: newScore.toFixed(1),
+        },
+      ],
+      profile?.name ?? "Unknown",
+    );
+  }
+}
+
+function isMeetingRelatedActivity(row) {
+  const text = [row.title, row.reason, row.nextStep, row.area, row.impactedMetric]
+    .filter(Boolean)
+    .join(" ");
+  return /meeting|meetup|sync|workshop|call|session|discussion|review|follow[-\s]?up|qbr/i.test(
+    text,
+  );
+}
+
+function findPrimaryMeetingContact(account) {
+  const stakeholder =
+    (account.stakeholders ?? []).find((person) => person.email) ?? account.stakeholders?.[0];
+  return {
+    name: stakeholder?.name ?? account.primaryContact?.name ?? "",
+    role: stakeholder?.role ?? account.primaryContact?.role ?? "",
+    email: stakeholder?.email ?? account.primaryContact?.email ?? "",
+  };
+}
+
+function createMeetingSubject(account, row) {
+  if (/director/i.test(row.title + row.reason)) {
+    return `Director-Level Relationship Review - ${account.name}`;
+  }
+  if (/ceo|executive/i.test(row.title + row.reason)) {
+    return `Executive Relationship Review - ${account.name}`;
+  }
+  if (/architecture|technical|delivery|project/i.test(row.title + row.reason)) {
+    return `Project Health Review - ${account.name}`;
+  }
+  return `${row.title} - ${account.name}`;
+}
+
+function createMeetingScheduleForm(account, row, profile) {
+  const contact = findPrimaryMeetingContact(account);
+  const agenda = [
+    `Account: ${account.name}`,
+    `Activity: ${row.title}`,
+    "",
+    "Agenda:",
+    "- Review current score gap and account context",
+    "- Identify missing stakeholders, blockers, or owners",
+    "- Align on next steps and due dates",
+    "- Confirm follow-up actions",
+  ].join("\n");
+
+  return {
+    accountName: account.name,
+    contactName: [contact.name, contact.role].filter(Boolean).join(" - "),
+    contactEmail: contact.email,
+    subject: createMeetingSubject(account, row),
+    date: getFutureDateInput(2),
+    time: "10:00",
+    durationMinutes: 45,
+    description: `${agenda}\n\nScheduled by ${profile?.name ?? "KAM"}.`,
+  };
+}
+
+function combineDateAndTime(date, time) {
+  return new Date(`${date}T${time || "10:00"}`).toISOString();
 }
 /* ============================== TAB 4: Retention VS Growth ============================== */
 function RetentionGrowthTab({ account, opportunities, escalations }) {

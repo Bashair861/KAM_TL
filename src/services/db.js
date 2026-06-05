@@ -1402,7 +1402,7 @@ export async function fetchActivityRuleActivities(accountId) {
 export async function createActivityRuleActivity(input) {
   const now = new Date().toISOString();
 
-  if (input.sourceType === "ai_suggestion") {
+  if (input.sourceType !== "manual") {
     const [
       { data: existingRows, error: existingError },
       { data: legacyRows, error: legacyError },
@@ -1669,6 +1669,39 @@ export async function reviewActivityRuleEvidence({
   return mapActivityRuleEvidence(data);
 }
 // ─── fetch notifications ──────────────────────────────────────────────────────
+export async function markActivityRuleActivityDone(activityId) {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("activity_rule_activities")
+    .update({
+      status: "Closed",
+      activity_score_pct: 100,
+      completed_at: now,
+      validated_at: now,
+      closed_at: now,
+      updated_at: now,
+    })
+    .eq("id", activityId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapActivityRuleActivity(data);
+}
+
+export async function markLegacyActivityDone(activityId) {
+  const { data, error } = await supabase
+    .from("activities")
+    .update({
+      status: "Done",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", activityId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 // --- fetch notifications ------------------------------------------------------
 export async function fetchNotifications() {
   const { data, error } = await supabase
