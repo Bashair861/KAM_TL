@@ -15,14 +15,25 @@ export const fetchEducationArticles = createServerFn({ method: "POST" })
     const activeServices = services.filter((s) => s.delivered).map((s) => s.service);
     const allServices = services.map((s) => s.service);
     const serviceList = activeServices.length ? activeServices : allServices;
+    const hasServices = serviceList.length > 0;
 
-    if (!serviceList.length) throw new Error("No services found for this account.");
+    const serviceContext = hasServices
+      ? `Their active services include: ${serviceList.join(", ")}.`
+      : `They operate in the ${industry} industry.`;
+
+    const articleFocus = hasServices
+      ? `Help them get more value from these services. Aim for one article per service where possible.`
+      : `Find articles on industry trends, best practices, and digital transformation relevant to a ${industry} company.`;
+
+    const serviceField = hasServices
+      ? `"service": "Which service from the list this article relates to",`
+      : `"service": "Relevant topic or area",`;
 
     const prompt = `You are helping a Key Account Manager educate their client "${accountName}" in the ${industry} industry.
 
-Their active services include: ${serviceList.join(", ")}.
+${serviceContext}
 
-Search the web and find 6 high-quality, recent articles (2024–2025) that a KAM could share with this client to help them get more value from these services. Aim for one article per service where possible.
+Search the web and find 6 high-quality, recent articles (2024–2025) that a KAM could share with this client. ${articleFocus}
 
 Return ONLY a valid JSON array — no markdown, no code fences:
 [
@@ -30,8 +41,8 @@ Return ONLY a valid JSON array — no markdown, no code fences:
     "title": "Exact article title from the web",
     "source": "Publication or website name",
     "url": "https://actual-article-url",
-    "summary": "2 sentences explaining what this article covers and why it matters to a ${industry} business using ${serviceList[0] ?? "this service"}",
-    "service": "Which service from the list this article relates to",
+    "summary": "2 sentences explaining what this article covers and why it matters to a ${industry} business",
+    ${serviceField}
     "tags": ["2 to 3 short relevant tags"]
   }
 ]`;

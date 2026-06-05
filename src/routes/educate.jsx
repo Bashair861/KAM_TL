@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { advisoryHistory, getAccount } from "@/data/kam-data";
-import { fetchAccounts } from "@/services/db";
+import { fetchAccounts, fetchAccount } from "@/services/db";
 import { fetchEducationArticles } from "@/services/education";
 import { ExternalLink, BookOpen, Sparkles, Loader2, RefreshCw } from "lucide-react";
 
@@ -31,7 +31,16 @@ function EducatePage() {
     if (!selectedAccountId && accounts.length) setSelectedAccountId(accounts[0].id);
   }, [accounts.length]);
 
-  const selectedAccount = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
+  const flatAccount = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
+
+  // Load full account (includes retentionGrowth) when selection changes
+  const { data: fullAccount } = useQuery({
+    queryKey: ["account", selectedAccountId],
+    queryFn: () => fetchAccount(selectedAccountId),
+    enabled: !!selectedAccountId,
+  });
+
+  const selectedAccount = fullAccount ?? flatAccount;
 
   const articlesMutation = useMutation({
     mutationFn: () =>
@@ -44,10 +53,12 @@ function EducatePage() {
       }),
   });
 
-  // Auto-fetch when account changes and we haven't fetched yet
+  // Auto-fetch when full account data is ready
   useEffect(() => {
-    if (selectedAccount) articlesMutation.mutate();
-  }, [selectedAccountId]);
+    if (selectedAccountId && (fullAccount || flatAccount)) {
+      articlesMutation.mutate();
+    }
+  }, [selectedAccountId, !!fullAccount]);
 
   const articles = articlesMutation.data ?? [];
 
