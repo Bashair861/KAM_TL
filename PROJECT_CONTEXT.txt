@@ -88,6 +88,7 @@ src/
     add-linkedin-summary.sql       <- Migration: adds linkedin_summary to accounts
     add-linkedin-summary-updated-at.sql <- Migration: tracks LinkedIn summary timestamp
     add-account-website-summary.sql <- Migration: adds website URL + AI website summary fields
+    add-account-contract-fields.sql <- Migration: adds contract renewal date + duration fields
 
   styles.css                ← Global Tailwind CSS styles + custom design tokens
 
@@ -105,6 +106,7 @@ Recent JS additions:
   src/db/add-linkedin-summary.sql   <- accounts.linkedin_summary for AI-generated LinkedIn brief
   src/db/add-linkedin-summary-updated-at.sql <- accounts.linkedin_summary_updated_at timestamp
   src/db/add-account-website-summary.sql <- accounts.website_url + website_summary fields
+  src/db/add-account-contract-fields.sql <- accounts.renewal_date + contract_duration
   src/services/linkedin-summary.js  <- Server fn: generates/saves Account's Linkedin Summary
   src/services/website-summary.js   <- Server fn: generates/saves Account's Website Summary
 
@@ -215,7 +217,7 @@ PHASE 3 — Write Operations (partial — in progress)
   ✓ New Account creation (Head of KAM only)
       - "+ New Account" button visible only to Head of KAM role
       - NewAccountModal: name, short code (auto-derived), industry, region, tier,
-        contract type, contract value, ARR, renewal days, primary contact, assign KAM
+        contract type, contract value, ARR, renewal date, primary contact, assign KAM
       - Account ID auto-generated as slug from name (e.g. "Helios Robotics" → "helios-robotics")
       - createAccount() inserts into accounts table with sensible defaults
         (health: 50, status: healthy, trend: 0, retention_risk: Low)
@@ -346,8 +348,9 @@ IMPORTANT DECISIONS & PATTERNS
 9. NEW ACCOUNT DEFAULTS
    - health: 50, trend: 0, status: 'healthy', retention_risk: 'Low'
    - growth_upside: 0, white_space_count: 0, is_startup: false
-   - No health_scores, health_metrics, or contract_details rows created on insert
-   - KPI editor handles missing rows by inserting on first save
+   - health_scores rows are pre-populated for all 8 areas on insert
+   - contract_details reference row is created on insert for type/duration/renewal date
+   - KPI editor still handles missing legacy rows by inserting on first save
    - Score bars derived from kpi_data jsonb when health_metrics rows are absent
 
 10. DERIVED METRIC BARS PATTERN
@@ -454,6 +457,7 @@ To set up a FRESH Supabase project from scratch:
   14. Run add-linkedin-summary.sql in SQL Editor
   15. Run add-linkedin-summary-updated-at.sql in SQL Editor
   16. Run add-account-website-summary.sql in SQL Editor
+  17. Run add-account-contract-fields.sql in SQL Editor
 
 
 ────────────────────────────────────────────────────────────────────────────────

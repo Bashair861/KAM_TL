@@ -10,6 +10,24 @@ const ACCOUNT_FIELDS = [
   "Industry",
   "AnnualRevenue",
   "NumberOfEmployees",
+  "Contract_Value__c",
+  "ARR__c",
+  "Contract_Renewal_Date__c",
+  "Contract_Duration__c",
+  "Contract_Type__c",
+  "Last_Touch__c",
+  "Primary_Contact_Name__c",
+  "Primary_Contact_Role__c",
+  "Auto_Renew__c",
+  "Non_Terminator__c",
+  "Min_One_Year__c",
+  "Price_Hike__c",
+  "Backup_Exists__c",
+  "Critical_Resources__c",
+  "Customer_Feedback__c",
+  "Retention_Service__c",
+  "Retention_Service_Offered__c",
+  "Retention_Service_Delivered__c",
   "BillingCity",
   "BillingStateCode",
   "BillingCountryCode",
@@ -79,6 +97,24 @@ const ACCOUNT_LABELS = {
   Industry: "Industry",
   AnnualRevenue: "Annual Revenue",
   NumberOfEmployees: "Number of Employees",
+  Contract_Value__c: "Contract Value",
+  ARR__c: "ARR",
+  Contract_Renewal_Date__c: "Contract Renewal Date",
+  Contract_Duration__c: "Contract Duration",
+  Contract_Type__c: "Contract Type",
+  Last_Touch__c: "Last Touch",
+  Primary_Contact_Name__c: "Primary Contact Name",
+  Primary_Contact_Role__c: "Primary Contact Role",
+  Auto_Renew__c: "Auto Renew",
+  Non_Terminator__c: "Non Terminator",
+  Min_One_Year__c: "Minimum One Year",
+  Price_Hike__c: "Price Hike",
+  Backup_Exists__c: "Backup Exists",
+  Critical_Resources__c: "Critical Resources",
+  Customer_Feedback__c: "Customer Feedback",
+  Retention_Service__c: "Retention/Growth Service",
+  Retention_Service_Offered__c: "Retention/Growth Offered",
+  Retention_Service_Delivered__c: "Retention/Growth Delivered",
   BillingCity: "Billing City",
   BillingStateCode: "Billing State Code",
   BillingCountryCode: "Billing Country Code",
@@ -294,8 +330,14 @@ async function runSoql(auth, soql) {
   return salesforceRequest(auth, `query?${query}`);
 }
 
-async function findSalesforceAccount(auth, accountName) {
-  const fields = ACCOUNT_FIELDS.join(", ");
+async function getAvailableSalesforceFields(auth, objectName, requestedFields) {
+  const describe = await salesforceRequest(auth, `sobjects/${objectName}/describe`);
+  const availableFields = new Set((describe.fields ?? []).map((field) => field.name));
+  return requestedFields.filter((field) => availableFields.has(field));
+}
+
+async function findSalesforceAccount(auth, accountName, accountFields) {
+  const fields = accountFields.join(", ");
   const escapedName = escapeSoqlString(accountName);
   const exact = await runSoql(
     auth,
@@ -306,12 +348,15 @@ async function findSalesforceAccount(auth, accountName) {
   return { account: null, matchType: "No match" };
 }
 
-async function fetchContactsForAccount(auth, accountId) {
-  const fields = CONTACT_FIELDS.join(", ");
+async function fetchContactsForAccount(auth, accountId, contactFields) {
+  const fields = contactFields.join(", ");
   const escapedAccountId = escapeSoqlString(accountId);
+  const orderFields = [];
+  if (contactFields.includes("Primary_KYC_Contact__c")) orderFields.push("Primary_KYC_Contact__c DESC");
+  orderFields.push(contactFields.includes("LastName") ? "LastName ASC" : "Name ASC");
   const result = await runSoql(
     auth,
-    `SELECT ${fields} FROM Contact WHERE AccountId = '${escapedAccountId}' ORDER BY Primary_KYC_Contact__c DESC, LastName ASC LIMIT 20`,
+    `SELECT ${fields} FROM Contact WHERE AccountId = '${escapedAccountId}' ORDER BY ${orderFields.join(", ")} LIMIT 20`,
   );
   return result.records ?? [];
 }
@@ -332,7 +377,15 @@ function formatRecordLines(record, fields, labels) {
   return fields.map((field) => `${labels[field] ?? field}: ${formatValue(record?.[field])}`);
 }
 
-function formatSalesforceResult({ searchedName, matchType, account, contacts, authSource }) {
+function formatSalesforceResult({
+  searchedName,
+  matchType,
+  account,
+  contacts,
+  authSource,
+  accountFields,
+  contactFields,
+}) {
   const lines = [
     "Salesforce Account Lookup Result",
     "================================",
@@ -342,7 +395,7 @@ function formatSalesforceResult({ searchedName, matchType, account, contacts, au
     "",
     "Account",
     "-------",
-    ...formatRecordLines(account, ACCOUNT_FIELDS, ACCOUNT_LABELS),
+    ...formatRecordLines(account, accountFields, ACCOUNT_LABELS),
     "",
     `Related Contacts (${contacts.length})`,
     "-------------------",
@@ -353,7 +406,7 @@ function formatSalesforceResult({ searchedName, matchType, account, contacts, au
   } else {
     contacts.forEach((contact, index) => {
       lines.push("", `Contact ${index + 1}`, "---------");
-      lines.push(...formatRecordLines(contact, CONTACT_FIELDS, CONTACT_LABELS));
+      lines.push(...formatRecordLines(contact, contactFields, CONTACT_LABELS));
     });
   }
 
@@ -365,7 +418,9 @@ export const lookupSalesforceAccountBundle = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     await assertSignedIn(data.accessToken);
     const auth = await getSalesforceAuth();
-    const { account, matchType } = await findSalesforceAccount(auth, data.accountName);
+    const accountFields = await getAvailableSalesforceFields(auth, "Account", ACCOUNT_FIELDS);
+    const contactFields = await getAvailableSalesforceFields(auth, "Contact", CONTACT_FIELDS);
+    const { account, matchType } = await findSalesforceAccount(auth, data.accountName, accountFields);
 
     if (!account) {
       return {
@@ -375,7 +430,7 @@ export const lookupSalesforceAccountBundle = createServerFn({ method: "POST" })
       };
     }
 
-    const contacts = await fetchContactsForAccount(auth, account.Id);
+    const contacts = await fetchContactsForAccount(auth, account.Id, contactFields);
     const cleanedAccount = stripAttributes(account);
     const cleanedContacts = contacts.map(stripAttributes);
 
@@ -390,6 +445,8 @@ export const lookupSalesforceAccountBundle = createServerFn({ method: "POST" })
         account: cleanedAccount,
         contacts: cleanedContacts,
         authSource: auth.source,
+        accountFields,
+        contactFields,
       }),
     };
   });

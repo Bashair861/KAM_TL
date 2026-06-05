@@ -38,6 +38,16 @@ export const Route = createFileRoute("/")({
   }),
   component: DashboardPage,
 });
+function formatRenewalDate(value) {
+  if (!value) return "No renewal date";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
 function DashboardPage() {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
@@ -168,7 +178,9 @@ function DashboardPage() {
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-semibold">{formatCurrency(a.arr)}</p>
-                    <p className="text-[11px] text-muted-foreground">{a.renewalDays}d to renewal</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Renewal {formatRenewalDate(a.contractRenewalDate)}
+                    </p>
                   </div>
                   <ArrowUpRight className="size-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                 </Link>

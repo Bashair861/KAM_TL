@@ -26,6 +26,17 @@ function initials(name) {
   return name.split(" ").map((w) => w[0] ?? "").join("").slice(0, 3).toUpperCase();
 }
 
+function formatRenewalDate(value) {
+  if (!value) return "—";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
+
 // ── page ─────────────────────────────────────────────────────────────────────
 
 function AccountsListPage() {
@@ -160,8 +171,8 @@ function AccountsListPage() {
                   </td>
                   <td className="px-6 py-4 text-right font-semibold">{formatCurrency(a.arr)}</td>
                   <td className="px-6 py-4 text-right text-xs">
-                    <span className={a.renewalDays < 30 ? "text-warn font-semibold" : "text-muted-foreground"}>
-                      {a.renewalDays}d
+                    <span className={a.contractRenewalDate ? "text-muted-foreground" : "text-warn font-semibold"}>
+                      {formatRenewalDate(a.contractRenewalDate)}
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right text-xs text-muted-foreground">{a.lastTouch}</td>
@@ -190,6 +201,7 @@ function AccountsListPage() {
           onCreated={() => {
             setShowNewModal(false);
             queryClient.invalidateQueries({ queryKey: ["accounts"] });
+            queryClient.invalidateQueries({ queryKey: ["contracts"] });
           }}
         />
       )}
@@ -270,7 +282,8 @@ const EMPTY_FORM = {
   contractType: "Staff Augmented",
   contractValue: "",
   arr: "",
-  renewalDays: "",
+  contractRenewalDate: "",
+  contractDuration: "",
   primaryContactName: "",
   assignedKamId: "",
 };
@@ -302,7 +315,8 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
         contractType: form.contractType,
         contractValue: parseInt(form.contractValue) || 0,
         arr: parseInt(form.arr) || 0,
-        renewalDays: parseInt(form.renewalDays) || 365,
+        contractRenewalDate: form.contractRenewalDate || null,
+        contractDuration: form.contractDuration,
         primaryContactName: form.primaryContactName,
         assignedKamId: form.assignedKamId || null,
       }),
@@ -316,6 +330,7 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
     if (!form.name.trim()) return setError("Account name is required.");
     if (!form.industry.trim()) return setError("Industry is required.");
     if (!form.region.trim()) return setError("Region is required.");
+    if (!form.contractRenewalDate) return setError("Contract renewal date is required.");
     submit();
   }
 
@@ -438,18 +453,28 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
             </Field>
           </div>
 
-          {/* Renewal days + primary contact */}
+          {/* Renewal date + contract duration */}
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Renewal (days)" required>
+            <Field label="Contract Renewal Date" required>
               <input
-                type="number"
-                min={1}
-                value={form.renewalDays}
-                onChange={(e) => set("renewalDays", e.target.value)}
-                placeholder="e.g. 365"
+                type="date"
+                value={form.contractRenewalDate}
+                onChange={(e) => set("contractRenewalDate", e.target.value)}
                 className={inputCls}
               />
             </Field>
+            <Field label="Contract Duration">
+              <input
+                value={form.contractDuration}
+                onChange={(e) => set("contractDuration", e.target.value)}
+                placeholder="e.g. 24 months"
+                className={inputCls}
+              />
+            </Field>
+          </div>
+
+          {/* Primary contact */}
+          <div className="grid grid-cols-2 gap-4">
             <Field label="Primary Contact Name">
               <input
                 value={form.primaryContactName}
