@@ -53,7 +53,7 @@ import {
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
     meta: [
-      { title: `Account ${params.accountId} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Aether KAM` },
+      { title: `Account ${params.accountId} - Aether KAM` },
       { name: "description", content: "Client 360 detail view." },
     ],
   }),
@@ -710,8 +710,7 @@ function AccountDetailPage() {
               </span>
             </div>
             <p className="text-[11px] md:text-xs text-muted-foreground truncate">
-              {account.industry} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {account.region} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·{" "}
-              {account.engagementTenure} tenure
+              {account.industry} - {account.region} - {account.engagementTenure} tenure
             </p>
           </div>
         </div>
@@ -761,7 +760,7 @@ function AccountDetailPage() {
               </button>
             </div>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Last sync with Jira ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 4m ago
+              Last sync with Jira - 4m ago
             </p>
             {(sowMessage || sowError) && (
               <p
@@ -1445,12 +1444,12 @@ function OverviewTab({ account }) {
   function runOcrSimulation() {
     if (!ocrFile) return;
     setOcrStatus("processing");
-    // Front-end simulation only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â real OCR will be wired later
+    // Front-end simulation only - real OCR will be wired later
     setTimeout(() => {
       setFields((f) => ({
         ...f,
-        industry: `${account.industry} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· ${account.region} (auto-filled from "${ocrFile.name}")`,
-        business: `${account.businessInfo} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â extracted from uploaded document.`,
+        industry: `${account.industry} - ${account.region} (auto-filled from "${ocrFile.name}")`,
+        business: `${account.businessInfo} - extracted from uploaded document.`,
       }));
       setOcrStatus("done");
     }, 1200);
@@ -1469,7 +1468,7 @@ function OverviewTab({ account }) {
           </p>
         </div>
         <span className="px-3 py-1.5 rounded-md bg-success/10 text-success text-[11px] font-bold uppercase tracking-wider border border-success/20 w-fit">
-          ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ Key Account
+          Key Account
         </span>
       </div>
 
@@ -1484,7 +1483,7 @@ function OverviewTab({ account }) {
             <p className="text-[11px] text-muted-foreground">
               Upload a brief, RFP, NDA, deck or scanned card. We'll extract industry, business,
               stakeholders, revenue and auto-populate any KYC field that's empty or unverified.
-              (Front-end preview ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â OCR engine wires up later.)
+              (Front-end preview - OCR engine wires up later.)
             </p>
           </div>
         </div>
@@ -1492,9 +1491,7 @@ function OverviewTab({ account }) {
           <label className="flex-1 flex items-center gap-2 border-2 border-dashed rounded-md px-3 py-2.5 cursor-pointer hover:bg-muted/40 transition-colors">
             <Upload className="size-4 text-muted-foreground" />
             <span className="text-xs truncate">
-              {ocrFile
-                ? ocrFile.name
-                : "Choose a file (PDF, PNG, JPG, DOCX)ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦"}
+              {ocrFile ? ocrFile.name : "Choose a file (PDF, PNG, JPG, DOCX)..."}
             </span>
             <input
               type="file"
@@ -1513,7 +1510,7 @@ function OverviewTab({ account }) {
           >
             <Sparkles className="size-3.5" />
             {ocrStatus === "processing"
-              ? "ExtractingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦"
+              ? "Extracting..."
               : ocrStatus === "done"
                 ? "Re-extract"
                 : "Extract & Auto-fill"}
@@ -1586,8 +1583,7 @@ function OverviewTab({ account }) {
         {ocrStatus === "done" && (
           <p className="text-[11px] text-success mt-2 flex items-center gap-1">
             <CheckCircle2 className="size-3" />
-            Extraction complete ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â 2 KYC fields updated. Review
-            highlighted fields below.
+            Extraction complete - 2 KYC fields updated. Review highlighted fields below.
           </p>
         )}
       </div>
@@ -1609,8 +1605,7 @@ function OverviewTab({ account }) {
                 className="mt-1 text-sm font-semibold bg-transparent border-b border-muted focus:outline-none focus:border-accent cursor-pointer"
               >
                 <option value="" disabled>
-                  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â unassigned
-                  ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
+                  Unassigned KAM
                 </option>
                 {kamUsers.map((u) => (
                   <option key={u.id} value={u.id}>
@@ -1620,9 +1615,7 @@ function OverviewTab({ account }) {
               </select>
             ) : (
               <p className="text-sm font-semibold mt-0.5">
-                {kamUsers.find((u) => u.id === assignedKamId)?.name ??
-                  profile?.name ??
-                  "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
+                {kamUsers.find((u) => u.id === assignedKamId)?.name ?? profile?.name ?? "-"}
               </p>
             )}
           </div>
@@ -1645,7 +1638,7 @@ function OverviewTab({ account }) {
           <span className="text-success font-semibold">Key Account</span>
           <span className="text-muted-foreground">
             {" "}
-            ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· all accounts in our system are key accounts
+            - all accounts in our system are key accounts
           </span>
         </KycField>
 
@@ -1688,8 +1681,7 @@ function OverviewTab({ account }) {
           <ul className="text-[11px] text-muted-foreground mt-1 space-y-0.5">
             {account.stakeholders.slice(0, 3).map((s) => (
               <li key={s.name}>
-                ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {s.name} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â {s.role}{" "}
-                <span className="text-accent">({s.influence})</span>
+                - {s.name} - {s.role} <span className="text-accent">({s.influence})</span>
               </li>
             ))}
           </ul>
@@ -1968,14 +1960,14 @@ function OverviewTab({ account }) {
         </div>
       </Card>
 
-      {/* Fixed save bar ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â visible while dirty or briefly after save */}
+      {/* Fixed save bar - visible while dirty or briefly after save */}
       {editable && (isDirty || showSaved) && (
         <div className="fixed bottom-0 left-0 md:left-64 right-0 z-50 border-t bg-card px-6 py-3 flex items-center justify-between shadow-lg">
           <p
             className={`text-xs font-medium ${showSaved && !isDirty ? "text-success" : "text-muted-foreground"}`}
           >
             {showSaved && !isDirty
-              ? "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ KYC fields saved successfully"
+              ? "KYC fields saved successfully"
               : "You have unsaved changes in KYC fields"}
           </p>
           <div className="flex gap-2">
@@ -1998,8 +1990,7 @@ function OverviewTab({ account }) {
               >
                 {savingKyc ? (
                   <>
-                    <Loader2 className="size-3 animate-spin" />{" "}
-                    SavingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦
+                    <Loader2 className="size-3 animate-spin" /> Saving...
                   </>
                 ) : (
                   <>
@@ -2013,7 +2004,7 @@ function OverviewTab({ account }) {
       )}
 
       {/* Full stakeholders detail */}
-      <Card title="Stakeholders ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â full detail">
+      <Card title="Stakeholders - full detail">
         <div className="overflow-x-auto -mx-6 px-6">
           <table className="w-full text-sm min-w-[520px]">
             <thead>
@@ -2054,7 +2045,7 @@ function OverviewTab({ account }) {
                     </span>
                   </td>
                   <td className="py-3 text-right text-[11px] text-muted-foreground">
-                    {s.lastContact ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
+                    {s.lastContact ?? "-"}
                   </td>
                 </tr>
               ))}
@@ -2489,7 +2480,7 @@ function ScoreBlock({ title, hint, block, onExpand }) {
     </div>
   );
 }
-// Area-specific KPI section templates ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â minimum 2 meaningful subtasks each, weights sum to 100
+// Area-specific KPI section templates - minimum 2 meaningful subtasks each, weights sum to 100
 const AREA_KPI_DEFAULTS = {
   relationship: [
     {
@@ -2624,8 +2615,7 @@ const AREA_KPI_DEFAULTS = {
       name: "Relationship & POC Risk",
       fields: [
         {
-          label:
-            "Key POC stable ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no resignation or transfer risk",
+          label: "Key POC stable - no resignation or transfer risk",
           weight: 50,
         },
         { label: "C-level sponsor accessible and engaged", weight: 50 },
@@ -2751,7 +2741,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       fields: s.fields.map((f) => (f.id === fieldId ? { ...f, ...patch } : f)),
     }));
   }
-  // dynamic scoring per section ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â /10 scale, consistent with ScoreBlock display
+  // dynamic scoring per section - /10 scale, consistent with ScoreBlock display
   const sectionScores = useMemo(
     () =>
       sections.map((s) => {
@@ -2781,10 +2771,10 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       if (invalid.length > 0) {
         const names = invalid.map((s) => {
           const total = s.fields.reduce((a, f) => a + (Number(f.weight) || 0), 0);
-          return `"${s.name}" (ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â£ ${total}%)`;
+          return `"${s.name}" (Sum ${total}%)`;
         });
         throw new Error(
-          `Fix weights before saving ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â each section must sum to 100%: ${names.join(", ")}`,
+          `Fix weights before saving - each section must sum to 100%: ${names.join(", ")}`,
         );
       }
       const newScore = parseFloat(overallOutOfTen.toFixed(1));
@@ -2832,7 +2822,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         <div className="px-4 md:px-6 py-4 border-b flex items-start justify-between gap-3 sticky top-0 bg-background z-10">
           <div className="min-w-0">
             <p className="text-[10px] font-bold uppercase tracking-widest text-accent">
-              KPI Editor ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Dynamic Scoring
+              KPI Editor - Dynamic Scoring
             </p>
             <h2 className="text-base md:text-lg font-bold truncate">{title}</h2>
             <p className="text-[11px] text-muted-foreground">{hint}</p>
@@ -2887,7 +2877,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
                       className={`text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded ${weightOk ? "bg-success/10 text-success" : "bg-warn/10 text-warn"}`}
                       title={weightOk ? "Weights sum to 100" : "Weights should sum to 100"}
                     >
-                      ÃƒÆ’Ã…Â½Ãƒâ€šÃ‚Â£ {ss.totalWeight}%
+                      Sum {ss.totalWeight}%
                     </span>
                     <span
                       className={`text-sm font-bold ${ss.scoreOutOfTen >= 8 ? "text-success" : ss.scoreOutOfTen >= 5 ? "text-warn" : "text-crit"}`}
@@ -2981,8 +2971,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-4">
               <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                Scoring is dynamic ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· checked weights ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â· total
-                weight ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â 10
+                Scoring is dynamic - checked weights / total weight x 10
               </p>
               <button
                 onClick={addSection}
@@ -3007,8 +2996,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
               >
                 {savingKpi ? (
                   <>
-                    <Loader2 className="size-3 animate-spin" />{" "}
-                    SavingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦
+                    <Loader2 className="size-3 animate-spin" /> Saving...
                   </>
                 ) : (
                   <>
@@ -3168,7 +3156,7 @@ function ActivityTab({ account, opportunities }) {
   const accountOpportunities = opportunities;
   return (
     <div className="space-y-6">
-      {/* Opportunities ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â new signals KAM can crack */}
+      {/* Opportunities - new signals KAM can crack */}
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <div className="flex items-start gap-3">
@@ -3178,8 +3166,7 @@ function ActivityTab({ account, opportunities }) {
             <div>
               <h3 className="text-sm font-bold">Opportunities for {account.name}</h3>
               <p className="text-[11px] text-muted-foreground">
-                New signals surfaced from calls, filings and procurement events
-                ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â pick one to crack.
+                New signals surfaced from calls, filings and procurement events - pick one to crack.
               </p>
             </div>
           </div>
@@ -3197,7 +3184,7 @@ function ActivityTab({ account, opportunities }) {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold leading-snug">{o.title}</p>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    {o.source} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· signal {o.signalDate} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â·{" "}
+                    {o.source} - signal {o.signalDate} -{" "}
                     <span className="text-accent font-semibold">Next: {o.nextStep}</span>
                   </p>
                 </div>
@@ -3246,11 +3233,7 @@ function ActivityTab({ account, opportunities }) {
                 <div
                   className={`px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white ${ragColor[rag]}`}
                 >
-                  {rag === "R"
-                    ? "Red ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Act now"
-                    : rag === "A"
-                      ? "Amber ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Plan"
-                      : "Green ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Monitor"}
+                  {rag === "R" ? "Red - Act now" : rag === "A" ? "Amber - Plan" : "Green - Monitor"}
                   <span className="ml-2 opacity-80">({items.length})</span>
                 </div>
                 <ul className="p-3 space-y-2 text-xs">
@@ -3259,7 +3242,7 @@ function ActivityTab({ account, opportunities }) {
                       <li key={a.id} className="border-b last:border-0 pb-2 last:pb-0">
                         <p className="font-semibold">{a.title}</p>
                         <p className="text-[10px] text-muted-foreground">
-                          {a.area} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {a.owner} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {a.due}
+                          {a.area} - {a.owner} - {a.due}
                         </p>
                       </li>
                     ))
@@ -3281,8 +3264,8 @@ function ActivityTab({ account, opportunities }) {
               Extract Action Items from Meeting Notes to Increase Score
             </h3>
             <p className="text-[11px] text-muted-foreground">
-              Auto-extracted from the last 5 meeting transcripts
-              ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â accept to push into the activities backlog.
+              Auto-extracted from the last 5 meeting transcripts - accept to push into the
+              activities backlog.
             </p>
           </div>
           <button
@@ -3295,23 +3278,23 @@ function ActivityTab({ account, opportunities }) {
         <ul className="divide-y">
           {[
             {
-              src: "QBR ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 18 May",
+              src: "QBR - 18 May",
               text: "Share 2026 product roadmap deck with sponsor by Friday.",
               lift: "+2 Relationship",
             },
             {
-              src: "Weekly Sync ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 15 May",
+              src: "Weekly Sync - 15 May",
               text: "Schedule architecture review with their new CTO.",
               lift: "+3 Project",
             },
             {
-              src: "Escalation Call ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 13 May",
+              src: "Escalation Call - 13 May",
               text: "Send written RCA + service-credit memo within 48h.",
               lift: "+4 CSAT",
             },
             {
-              src: "Discovery ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 09 May",
-              text: "Pitch EMEA fulfillment node ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â confirmed budget exists.",
+              src: "Discovery - 09 May",
+              text: "Pitch EMEA fulfillment node - confirmed budget exists.",
               lift: "+$120k Growth",
             },
           ].map((it, i) => (
@@ -3352,7 +3335,7 @@ function ActivityTab({ account, opportunities }) {
               + Add Activity
             </button>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Last sync with Jira ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 4m ago
+              Last sync with Jira - 4m ago
             </p>
           </div>
         </div>
@@ -3451,7 +3434,7 @@ function RetentionGrowthTab({ account }) {
           </ul>
         </Card>
 
-        <Card title="Growth ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â applicable but not offered">
+        <Card title="Growth - applicable but not offered">
           <p className="text-[11px] text-muted-foreground mb-3">
             White-space services we could expand into.
           </p>
@@ -3637,16 +3620,14 @@ function EscalationsTab({ list }) {
                 </span>
                 <h3 className="text-sm font-bold">{e.title}</h3>
               </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                Opened {e.openedAt} ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 48h SLA
-              </p>
+              <p className="text-xs text-muted-foreground mt-1">Opened {e.openedAt} - 48h SLA</p>
             </div>
             <div className="flex flex-col items-end gap-1">
               <div className="bg-primary text-primary-foreground px-3 py-1.5 rounded text-[11px] font-mono flex items-center gap-1">
                 <Clock className="size-3" /> {e.slaRemainingHours.toFixed(1)}h left
               </div>
               <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                Last synced with Jira ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 3m ago
+                Last synced with Jira - 3m ago
               </p>
             </div>
           </div>
@@ -3679,25 +3660,20 @@ function EscalationsTab({ list }) {
               <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
                 Our Recommendation
               </p>
-              <p className="text-xs">
-                {e.recommendation ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
-              </p>
+              <p className="text-xs">{e.recommendation ?? "-"}</p>
             </div>
             <div className="bg-card p-3 rounded border">
               <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
                 Realistic / Achievable?
               </p>
-              <p className="text-xs">
-                {e.realisticCheck ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}
-              </p>
+              <p className="text-xs">{e.realisticCheck ?? "-"}</p>
             </div>
             <div className="bg-card p-3 rounded border md:col-span-2">
               <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
                 Client Feedback
               </p>
               <p className="text-xs italic">
-                {e.clientFeedback ??
-                  "Pending ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â schedule meeting within 48h."}
+                {e.clientFeedback ?? "Pending - schedule meeting within 48h."}
               </p>
             </div>
             <div className="bg-card p-3 rounded border md:col-span-2">
@@ -3707,7 +3683,7 @@ function EscalationsTab({ list }) {
                   Jira Conversation Summary
                 </p>
                 <span className="text-[10px] font-mono text-muted-foreground">
-                  3 tickets ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· 12 comments
+                  3 tickets - 12 comments
                 </span>
               </div>
               <ul className="space-y-2 text-xs">
@@ -3732,8 +3708,7 @@ function EscalationsTab({ list }) {
                     [ESC-{e.id.toUpperCase()}-3] RCA draft uploaded by SRE lead
                   </p>
                   <p className="text-muted-foreground text-[11px]">
-                    Pending KAM review before sharing externally
-                    ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â flagged for 48h SLA.
+                    Pending KAM review before sharing externally - flagged for 48h SLA.
                   </p>
                 </li>
               </ul>
@@ -3924,9 +3899,7 @@ function ClientHistoryLegacyTab({ accountId }) {
   });
   if (isLoading) {
     return (
-      <div className="py-16 text-center text-xs text-muted-foreground">
-        Loading historyÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦
-      </div>
+      <div className="py-16 text-center text-xs text-muted-foreground">Loading history...</div>
     );
   }
   if (history.length === 0) {
@@ -3945,7 +3918,7 @@ function ClientHistoryLegacyTab({ accountId }) {
       <div className="px-6 py-4 border-b">
         <h3 className="text-sm font-bold">Change Log</h3>
         <p className="text-[11px] text-muted-foreground mt-0.5">
-          All edits to this account ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â most recent first.
+          All edits to this account - most recent first.
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -3975,12 +3948,12 @@ function HistoryRow({ entry }) {
       <td className="px-6 py-3 text-xs font-semibold whitespace-nowrap">{entry.fieldName}</td>
       <td className="px-6 py-3 text-xs text-muted-foreground max-w-[200px]">
         <span className="line-clamp-2 block">
-          {entry.oldValue ?? <span className="italic">ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â</span>}
+          {entry.oldValue ?? <span className="italic">-</span>}
         </span>
       </td>
       <td className="px-6 py-3 text-xs text-foreground max-w-[200px]">
         <span className="line-clamp-2 block">
-          {entry.newValue ?? <span className="italic">ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â</span>}
+          {entry.newValue ?? <span className="italic">-</span>}
         </span>
       </td>
       <td className="px-6 py-3 text-xs font-medium whitespace-nowrap">

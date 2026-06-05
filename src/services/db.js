@@ -4,7 +4,7 @@ import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-ad
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
-// â”€â”€â”€ mappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- mappers -----------------------------------------------------------------
 function mapFlatAccount(r) {
   return {
     id: r.id,
@@ -95,7 +95,7 @@ function mapTask(row, accountLookup = new Map(), healthMetricLookup = new Map())
     healthArea: healthMetric?.area ?? "",
   };
 }
-// â”€â”€â”€ fetch accounts (flat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- fetch accounts (flat) ----------------------------------------------------
 export async function fetchAccounts(opts) {
   let q = supabase.from("accounts").select("*");
   // KAMs only see accounts assigned to them
@@ -345,7 +345,7 @@ export async function updateUserStatus(userId, isActive) {
     .eq("id", userId);
   if (error) throw error;
 }
-// â”€â”€â”€ delete account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- delete account -----------------------------------------------------------
 export async function deleteUserProfile(userId) {
   const {
     data: { session },
@@ -364,7 +364,7 @@ export async function deleteAccount(accountId) {
   const { error } = await supabase.from("accounts").delete().eq("id", accountId);
   if (error) throw error;
 }
-// â”€â”€â”€ update account KAM assignment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- update account KAM assignment -------------------------------------------
 export async function updateAccountKam(accountId, kamId) {
   const { error } = await supabase
     .from("accounts")
@@ -372,7 +372,7 @@ export async function updateAccountKam(accountId, kamId) {
     .eq("id", accountId);
   if (error) throw error;
 }
-// â”€â”€â”€ update health block (score + metrics + kpi checkbox state) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- update health block (score + metrics + kpi checkbox state) --------------
 export async function updateHealthBlock(accountId, area, score, metricUpdates, kpiData) {
   // Use maybeSingle so missing rows don't throw
   const { data: hs } = await supabase
@@ -383,14 +383,14 @@ export async function updateHealthBlock(accountId, area, score, metricUpdates, k
     .maybeSingle();
 
   if (hs) {
-    // Row exists â€” update score + kpi_data
+    // Row exists - update score + kpi_data
     const { error } = await supabase
       .from("health_scores")
       .update({ score, kpi_data: kpiData })
       .eq("id", hs.id);
     if (error) throw error;
   } else {
-    // No row yet (new account) â€” insert one
+    // No row yet (new account) - insert one
     const { error } = await supabase
       .from("health_scores")
       .insert({ account_id: accountId, area, score, kpi_data: kpiData });
@@ -409,7 +409,7 @@ export async function updateHealthBlock(accountId, area, score, metricUpdates, k
     );
   }
 }
-// â”€â”€â”€ KPI section templates used when creating new accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- KPI section templates used when creating new accounts -------------------
 const NEW_ACCOUNT_KPI_TEMPLATES = {
   relationship: [
     {
@@ -543,7 +543,7 @@ const NEW_ACCOUNT_KPI_TEMPLATES = {
     {
       name: "Relationship & POC Risk",
       fields: [
-        { label: "Key POC stable â€” no resignation or transfer risk", weight: 50 },
+        { label: "Key POC stable - no resignation or transfer risk", weight: 50 },
         { label: "C-level sponsor accessible and engaged", weight: 50 },
       ],
     },
@@ -634,7 +634,7 @@ const HEALTH_AREAS = [
   "financial",
 ];
 
-// â”€â”€â”€ create new account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- create new account -------------------------------------------------------
 export async function createAccount(data) {
   const { error } = await supabase.from("accounts").insert([
     {
@@ -684,7 +684,7 @@ export async function createAccount(data) {
   if (hsError) throw hsError;
 }
 
-// â”€â”€â”€ update account KYC fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- update account KYC fields -----------------------------------------------
 export async function updateAccountKyc(accountId, updates) {
   const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
   if (error) throw error;
@@ -757,7 +757,7 @@ export async function generateAccountLinkedinSummary(accountId) {
     },
   });
 }
-// â”€â”€â”€ fetch single account (full shape) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- fetch single account (full shape) ---------------------------------------
 export async function generateAccountWebsiteSummary(accountId) {
   const {
     data: { session },
@@ -798,7 +798,7 @@ export async function fetchAccount(id) {
     if (!s) return { score: 0, metrics: [], kpiData: null, updatedAt: null };
 
     // When kpi_data exists, derive progress bars from it so ScoreBlock always
-    // mirrors what the KPI editor shows â€” section name + weighted checkbox score.
+    // mirrors what the KPI editor shows - section name + weighted checkbox score.
     if (Array.isArray(s.kpi_data) && s.kpi_data.length > 0) {
       const derived = s.kpi_data.map((sec, i) => {
         const fields = sec.fields ?? [];
@@ -881,7 +881,7 @@ export async function fetchAccount(id) {
     })),
   };
 }
-// â”€â”€â”€ fetch escalations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- fetch escalations --------------------------------------------------------
 export async function fetchEscalations(accountId) {
   let q = supabase.from("escalations").select("*, escalation_action_items(*)");
   if (accountId) q = q.eq("account_id", accountId);
@@ -903,7 +903,7 @@ export async function fetchEscalations(accountId) {
     actionItems: (e.escalation_action_items ?? []).map((a) => ({ label: a.label, done: a.done })),
   }));
 }
-// â”€â”€â”€ fetch opportunities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- fetch opportunities ------------------------------------------------------
 export async function fetchOpportunities(accountId) {
   let q = supabase.from("opportunities").select("*");
   if (accountId) q = q.eq("account_id", accountId);
@@ -939,10 +939,10 @@ export async function fetchContracts(opts) {
     const cd = firstRelatedRow(row.contract_details);
     return {
       ...mapFlatAccount(row),
-      duration: cd?.duration ?? "â€”",
+      duration: cd?.duration ?? "-",
       autoRenew: Boolean(cd?.auto_renew),
       nonTerminator: Boolean(cd?.non_terminator),
-      priceHike: cd?.price_hike ?? "â€”",
+      priceHike: cd?.price_hike ?? "-",
     };
   });
 }
@@ -975,7 +975,7 @@ export async function logAccountChanges(accountId, changes, editedBy) {
   );
   if (error) throw error;
 }
-// â”€â”€â”€ fetch notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- fetch notifications ------------------------------------------------------
 export async function fetchNotifications() {
   const { data, error } = await supabase
     .from("notifications")

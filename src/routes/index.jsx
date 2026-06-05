@@ -45,7 +45,7 @@ import {
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Dashboard â€” Aether KAM" },
+      { title: "Dashboard - Aether KAM" },
       {
         name: "description",
         content: "Portfolio overview, account health, and active escalations.",
@@ -219,7 +219,7 @@ function DashboardPage() {
           </button>
           <div className="flex items-center gap-2 text-[11px] md:text-xs text-muted-foreground">
             <span className="size-2 rounded-full bg-success" />
-            System stable Â· Last sync 2m ago
+            System stable - Last sync 2m ago
           </div>
         </div>
       </header>
@@ -232,21 +232,21 @@ function DashboardPage() {
             hint="Across 5 active accounts"
             accent="success"
             bar={portfolioTotals.avgHealth}
-            info="Weighted average of each account's composite Health Score (0â€“100). Composed of 8 sub-scores: Relationship, Project, White-space, Contract, CSAT, Risk, Resources, and Financial health â€” each on a 0â€“10 scale and scaled to 100."
+            info="Weighted average of each account's composite Health Score (0-100). Composed of 8 sub-scores: Relationship, Project, White-space, Contract, CSAT, Risk, Resources, and Financial health - each on a 0-10 scale and scaled to 100."
           />
           <StatCard
             label="Portfolio ARR"
             value={formatCurrency(portfolioTotals.totalARR)}
             hint="+8.4% vs last quarter"
             accent="accent"
-            info="Sum of Annual Recurring Revenue across every active key account. Calculated as Î£ (account.arr) â€” billed contract value normalised to a 12-month run-rate, excluding one-off services."
+            info="Sum of Annual Recurring Revenue across every active key account. Calculated as Sum (account.arr) - billed contract value normalised to a 12-month run-rate, excluding one-off services."
           />
           <StatCard
             label="At-Risk ARR"
             value={formatCurrency(portfolioTotals.atRiskARR)}
             hint="2 accounts in watch"
             accent="warn"
-            info="ARR of accounts whose Health Score is below 60 OR whose Retention Risk is rated Medium/High. Formula: Î£ (arr where health < 60 OR retentionRisk âˆˆ {Medium, High})."
+            info="ARR of accounts whose Health Score is below 60 OR whose Retention Risk is rated Medium/High. Formula: Sum (arr where health < 60 OR retentionRisk in {Medium, High})."
           />
           <StatCard
             label="Growth Upside"
@@ -265,7 +265,7 @@ function DashboardPage() {
                 to="/accounts"
                 className="text-[11px] font-semibold text-accent hover:underline"
               >
-                View all â†’
+                View all -&gt;
               </Link>
             </div>
             <div className="divide-y">
@@ -330,7 +330,7 @@ function DashboardPage() {
                   to="/escalations"
                   className="text-[11px] font-semibold text-accent hover:underline"
                 >
-                  Open console â†’
+                  Open console -&gt;
                 </Link>
               </div>
               <div className="divide-y">
@@ -362,7 +362,7 @@ function DashboardPage() {
             <div className="bg-primary text-primary-foreground rounded-xl p-6">
               <p className="text-[10px] uppercase tracking-widest text-slate-400 mb-2">This week</p>
               <p className="text-2xl font-bold leading-tight">
-                4 QBRs scheduled <span className="text-slate-400">Â·</span> 12 touchpoints logged
+                4 QBRs scheduled <span className="text-slate-400">-</span> 12 touchpoints logged
               </p>
               <p className="text-xs text-slate-400 mt-3">
                 Cooperation index up 1.4 points across the portfolio.
@@ -443,7 +443,7 @@ function DashboardPage() {
                       <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{n.body}</p>
                       <p className="text-[10px] font-mono uppercase text-muted-foreground mt-1">
                         {n.time}
-                        {acc ? ` Â· ${acc.name}` : ""}
+                        {acc ? ` - ${acc.name}` : ""}
                       </p>
                     </div>
                   </div>
@@ -514,7 +514,7 @@ function DashboardPage() {
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold leading-snug">{a.title}</p>
                       <p className="text-[11px] text-muted-foreground mt-0.5">
-                        {acc?.name ?? "Portfolio"} Â· {a.source}
+                        {acc?.name ?? "Portfolio"} - {a.source}
                         {a.healthMetricLabel && <span> / {a.healthMetricLabel}</span>}
                       </p>
                     </div>
@@ -528,7 +528,7 @@ function DashboardPage() {
           </div>
         </section>
 
-        {/* Global Calendar â€” aggregated company + multi-mailbox calendars */}
+        {/* Global Calendar - aggregated company + multi-mailbox calendars */}
         <section className="bg-card rounded-xl border shadow-sm">
           <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div>
@@ -604,7 +604,7 @@ function DashboardPage() {
               >
                 <span className={`size-2 rounded-full ${s.color}`} />
                 <span className="font-semibold">{s.label}</span>
-                <span className="text-muted-foreground hidden sm:inline">Â· {s.provider}</span>
+                <span className="text-muted-foreground hidden sm:inline">- {s.provider}</span>
                 {!s.connected && (
                   <span className="text-[9px] uppercase font-bold text-muted-foreground">Off</span>
                 )}
