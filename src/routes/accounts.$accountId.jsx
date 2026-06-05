@@ -10,6 +10,7 @@ import {
   updateAccountKam,
   updateAccountKyc,
   syncSalesforceMappedFields,
+  applySowFields,
   updateHealthBlock,
   fetchAccountHistory,
   logAccountChanges,
@@ -17,6 +18,7 @@ import {
   generateAccountWebsiteSummary,
 } from "@/services/db";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
+import { extractSowFields } from "@/services/sow-upload";
 import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft,
@@ -44,6 +46,7 @@ import {
   Lightbulb,
   Loader2,
   ExternalLink,
+  History,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -525,10 +528,90 @@ function buildSalesforceHistoryRows(rows) {
     newValue: displaySyncValue(row.nextValue),
   }));
 }
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      resolve(result.includes(",") ? result.split(",").pop() : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read SOW file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function moneyLabel(value) {
+  return Number.isFinite(value) ? formatCurrency(value) : "";
+}
+
+function buildSowChanges(account, fields) {
+  const changes = [];
+  if (fields.accountName && fields.accountName !== account.name) {
+    changes.push({
+      field: "SOW Account Name",
+      oldValue: account.name,
+      newValue: fields.accountName,
+    });
+  }
+  if (Number.isFinite(fields.arr) && fields.arr !== account.arr) {
+    changes.push({
+      field: "SOW ARR",
+      oldValue: moneyLabel(account.arr),
+      newValue: moneyLabel(fields.arr),
+    });
+  }
+  if (Number.isFinite(fields.contractValue) && fields.contractValue !== account.contractValue) {
+    changes.push({
+      field: "SOW Contract Value",
+      oldValue: moneyLabel(account.contractValue),
+      newValue: moneyLabel(fields.contractValue),
+    });
+  }
+  if (Number.isFinite(fields.renewalDays) && fields.renewalDays !== account.renewalDays) {
+    changes.push({
+      field: "SOW Renewal Days",
+      oldValue: String(account.renewalDays),
+      newValue: String(fields.renewalDays),
+    });
+  }
+  if (fields.contractType && fields.contractType !== account.contractType) {
+    changes.push({
+      field: "SOW Contract Type",
+      oldValue: account.contractType,
+      newValue: fields.contractType,
+    });
+  }
+  if (fields.contractDuration && fields.contractDuration !== account.contractScoring?.duration) {
+    changes.push({
+      field: "SOW Contract Duration",
+      oldValue: account.contractScoring?.duration ?? "",
+      newValue: fields.contractDuration,
+    });
+  }
+  return changes;
+}
+
+function sowSummary(fields) {
+  const labels = [];
+  if (fields.accountName) labels.push("Account name");
+  if (Number.isFinite(fields.arr)) labels.push("ARR");
+  if (Number.isFinite(fields.contractValue)) labels.push("Contract value");
+  if (Number.isFinite(fields.renewalDays)) labels.push("Renewal");
+  if (fields.contractType) labels.push("Contract type");
+  if (fields.contractDuration) labels.push("Duration");
+  return labels.length ? labels.join(", ") : "No supported fields";
+}
+
 function AccountDetailPage() {
   const { account } = Route.useLoaderData();
   const { profile } = useAuth();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const sowInputRef = useRef(null);
   const [tab, setTab] = useState("Overview");
+  const [sowMessage, setSowMessage] = useState("");
+  const [sowError, setSowError] = useState("");
   const { data: accountEscalations = [] } = useQuery({
     queryKey: ["escalations", account.id],
     queryFn: () => fetchEscalations(account.id),
@@ -540,6 +623,49 @@ function AccountDetailPage() {
   const role = profile?.role ?? "KAM";
   const perms = getRolePermissions(role);
   const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
+  const { mutate: uploadSow, isPending: uploadingSow } = useMutation({
+    mutationFn: async (file) => {
+      const contentBase64 = await fileToBase64(file);
+      const extracted = await extractSowFields({
+        data: {
+          fileName: file.name,
+          mimeType: file.type,
+          contentBase64,
+        },
+      });
+      await applySowFields(account.id, extracted);
+      const changes = buildSowChanges(account, extracted);
+      if (changes.length > 0) {
+        await logAccountChanges(account.id, changes, profile?.name ?? "Unknown");
+      }
+      return extracted;
+    },
+    onMutate: () => {
+      setSowMessage("");
+      setSowError("");
+    },
+    onSuccess: async (fields) => {
+      setSowMessage(`SOW uploaded. Updated: ${sowSummary(fields)}.`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["contracts"] }),
+        queryClient.invalidateQueries({ queryKey: ["account-history", account.id] }),
+      ]);
+      await router.invalidate();
+    },
+    onError: (error) => {
+      setSowError(error?.message ?? "Could not upload SOW.");
+    },
+  });
+  function handleSowFile(file) {
+    if (!file) return;
+    if (file.size > 12 * 1024 * 1024) {
+      setSowMessage("");
+      setSowError("SOW file must be 12 MB or smaller.");
+      return;
+    }
+    uploadSow(file);
+  }
   return (
     <div className="flex flex-col">
       <header className="bg-card border-b flex flex-col md:flex-row md:items-center md:justify-between px-4 md:px-8 py-3 gap-3 sticky top-14 md:top-0 z-10">
@@ -572,15 +698,49 @@ function AccountDetailPage() {
             </span>
           )}
           <div className="flex flex-col items-end gap-1">
-            <button
-              disabled={!editable}
-              className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              Log Activity
-            </button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <input
+                ref={sowInputRef}
+                type="file"
+                className="hidden"
+                accept=".pdf,.docx,.txt,.md,.rtf"
+                onChange={(event) => {
+                  handleSowFile(event.target.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => sowInputRef.current?.click()}
+                disabled={!editable || uploadingSow}
+                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {uploadingSow ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Upload className="size-3" />
+                )}
+                {uploadingSow ? "Uploading SOW" : "Upload SOW"}
+              </button>
+              <button
+                disabled={!editable}
+                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Log Activity
+              </button>
+            </div>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
               Last sync with Jira · 4m ago
             </p>
+            {(sowMessage || sowError) && (
+              <p
+                className={`text-[11px] max-w-[28rem] text-right ${
+                  sowError ? "text-crit" : "text-success"
+                }`}
+              >
+                {sowError || sowMessage}
+              </p>
+            )}
           </div>
         </div>
       </header>
@@ -696,7 +856,9 @@ function AccountDetailPage() {
           {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} />}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
-          {tab === "Client History" && <ClientHistoryTab accountId={account.id} />}
+          {tab === "Client History" && (
+            <ClientHistoryTab accountId={account.id} accountName={account.name} />
+          )}
         </div>
       </div>
     </div>
@@ -730,6 +892,7 @@ function OverviewTab({ account }) {
     onSuccess: (_, kamId) => {
       setAssignedKamId(kamId);
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
   const initialFields = useMemo(
@@ -823,6 +986,7 @@ function OverviewTab({ account }) {
     onSuccess: () => {
       setSavedSnapshot({ ...fields });
       setShowSaved(true);
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
   // OCR file state
@@ -918,6 +1082,7 @@ function OverviewTab({ account }) {
         text: `${current.text}\n\nSynced ${syncedRows.length} selected field(s) into this account.`,
       }));
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
     },
     onError: (error) => {
@@ -952,6 +1117,7 @@ function OverviewTab({ account }) {
       setLinkedinSummaryError("");
       setSavedSnapshot((current) => ({ ...current, linkedinUrl: fields.linkedinUrl }));
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
     },
     onError: (error) => {
@@ -988,6 +1154,7 @@ function OverviewTab({ account }) {
       setWebsiteSummaryError("");
       setSavedSnapshot((current) => ({ ...current, websiteUrl: fields.websiteUrl }));
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
     },
     onError: (error) => {
@@ -2121,6 +2288,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const editable = getRolePermissions(profile?.role).write;
   const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const [sections, setSections] = useState(() => {
     if (block.kpiData) return block.kpiData;
@@ -2209,6 +2377,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       );
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["account-history", accountId] });
       router.invalidate();
       onClose();
     },
@@ -3121,7 +3290,179 @@ function EscalationsTab({ list }) {
   );
 }
 /* ============================== TAB 7: Client History ============================== */
-function ClientHistoryTab({ accountId }) {
+function ClientHistoryTab({ accountId, accountName }) {
+  const { data: history = [], isLoading } = useQuery({
+    queryKey: ["account-history", accountId],
+    queryFn: () => fetchAccountHistory(accountId),
+  });
+  const touchedFieldCount = useMemo(
+    () => new Set(history.map((entry) => entry.fieldName)).size,
+    [history],
+  );
+  const latestEntry = history[0] ?? null;
+  const latestEditor = latestEntry?.editedBy ?? "-";
+
+  if (isLoading) {
+    return (
+      <div className="py-16 text-center text-xs text-muted-foreground">Loading history...</div>
+    );
+  }
+  if (history.length === 0) {
+    return (
+      <div className="bg-card border rounded-lg p-12 text-center">
+        <Clock className="size-6 text-muted-foreground mx-auto mb-2" />
+        <p className="text-sm text-muted-foreground">No changes recorded yet.</p>
+        <p className="text-[11px] text-muted-foreground mt-1">
+          Account field updates will appear here after they are saved.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <HistoryMetric
+          icon={History}
+          label="Total changes"
+          value={history.length}
+          detail={`${touchedFieldCount} fields touched`}
+          tone="accent"
+        />
+        <HistoryMetric
+          icon={Clock}
+          label="Latest update"
+          value={latestEntry ? formatHistoryTime(latestEntry.editedAt) : "-"}
+          detail={latestEntry?.fieldName ?? "No dated records"}
+          tone="warn"
+        />
+        <HistoryMetric
+          icon={User}
+          label="Last edited by"
+          value={latestEditor}
+          detail={accountName}
+          tone="primary"
+        />
+      </div>
+
+      <div className="bg-card border rounded-lg overflow-hidden">
+        <div className="px-4 md:px-5 py-4 border-b flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold">Change History</h3>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Field-level updates for {accountName} - newest first.
+            </p>
+          </div>
+          <span className="w-fit rounded-md border bg-muted/40 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            {history.length} audit entries
+          </span>
+        </div>
+
+        <div className="divide-y">
+          {history.map((entry) => (
+            <HistoryChangeItem key={entry.id} entry={entry} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+function HistoryMetric({ icon: Icon, label, value, detail, tone }) {
+  const tones = {
+    accent: "bg-accent/10 text-accent",
+    success: "bg-success/10 text-success",
+    primary: "bg-primary/10 text-primary",
+    warn: "bg-warn/10 text-warn",
+  };
+  return (
+    <div className="bg-card border rounded-lg p-4 flex items-start justify-between gap-3 min-w-0">
+      <div className="min-w-0">
+        <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+          {label}
+        </p>
+        <p className="text-xl font-bold mt-1 truncate">{value}</p>
+        <p className="text-[11px] text-muted-foreground mt-1 truncate">{detail}</p>
+      </div>
+      <span
+        className={`size-9 rounded-md flex items-center justify-center shrink-0 ${tones[tone] ?? tones.accent}`}
+      >
+        <Icon className="size-4" />
+      </span>
+    </div>
+  );
+}
+function HistoryChangeItem({ entry }) {
+  return (
+    <article className="px-4 md:px-5 py-4 hover:bg-muted/20 transition-colors">
+      <div className="grid grid-cols-[2.25rem_1fr] gap-3">
+        <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+          <History className="size-4" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="border rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-accent/10 text-accent border-accent/20">
+                  Change
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  Edited by {entry.editedBy}
+                </span>
+              </div>
+              <h4 className="text-sm font-bold mt-2 leading-snug">{entry.fieldName}</h4>
+            </div>
+            <div className="text-left lg:text-right shrink-0">
+              <p className="text-xs font-bold whitespace-nowrap">
+                {formatHistoryTime(entry.editedAt)}
+              </p>
+              {entry.editedAt && (
+                <p className="text-[10px] text-muted-foreground mt-0.5 whitespace-nowrap">
+                  {formatHistoryDate(entry.editedAt)}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+            <HistoryValue label="Previous" value={entry.oldValue} />
+            <HistoryValue label="Updated" value={entry.newValue} emphasize />
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+function HistoryValue({ label, value, emphasize }) {
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 min-w-0 ${
+        emphasize ? "bg-accent/5 border-accent/20" : "bg-muted/20"
+      }`}
+    >
+      <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+        {label}
+      </p>
+      <p className="text-xs font-semibold mt-1 line-clamp-3 break-words">{toHistoryValue(value)}</p>
+    </div>
+  );
+}
+function toHistoryValue(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "-";
+  return String(value);
+}
+function formatHistoryDate(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+function ClientHistoryLegacyTab({ accountId }) {
   const { data: history = [], isLoading } = useQuery({
     queryKey: ["account-history", accountId],
     queryFn: () => fetchAccountHistory(accountId),
