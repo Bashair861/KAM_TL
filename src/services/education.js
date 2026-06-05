@@ -47,52 +47,87 @@ Return ONLY a valid JSON array — no markdown, no code fences:
   }
 ]`;
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    // Try Responses API (supports web_search_preview tool with gpt-4o)
+    const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-search-preview",
-        web_search_options: { search_context_size: "medium" },
-        messages: [{ role: "user", content: prompt }],
+        model: "gpt-4o",
+        tools: [{ type: "web_search_preview" }],
+        input: prompt,
       }),
     });
 
     if (!res.ok) {
       const err = await res.text().catch(() => "");
-      throw new Error(`OpenAI error ${res.status}: ${err.slice(0, 300)}`);
+      // Fallback to standard chat completions without web search
+      return await fetchWithChatCompletions(apiKey, prompt);
     }
 
     const json = await res.json();
-    const content = json.choices?.[0]?.message?.content ?? "";
 
-    // Build a URL map from web search annotations (real cited URLs)
-    const annotations = json.choices?.[0]?.message?.annotations ?? [];
+    // Extract text and annotations from Responses API output
+    let content = "";
     const urlMap = {};
-    for (const ann of annotations) {
-      if (ann.type === "url_citation" && ann.url_citation?.url) {
-        const key = (ann.url_citation.title ?? "").toLowerCase().trim();
-        if (key) urlMap[key] = ann.url_citation.url;
+    for (const output of json.output ?? []) {
+      if (output.type === "message") {
+        for (const block of output.content ?? []) {
+          if (block.type === "output_text") {
+            content = block.text ?? "";
+            for (const ann of block.annotations ?? []) {
+              if (ann.type === "url_citation" && ann.url) {
+                const key = (ann.title ?? "").toLowerCase().trim();
+                if (key) urlMap[key] = ann.url;
+              }
+            }
+          }
+        }
       }
     }
 
-    let articles = [];
-    try {
-      const match = content.match(/\[[\s\S]*\]/);
-      if (match) articles = JSON.parse(match[0]);
-    } catch {
-      return [];
-    }
-
-    return articles.map((a) => ({
-      id: crypto.randomUUID(),
-      title: a.title ?? "Untitled",
-      source: a.source ?? "Unknown",
-      url: urlMap[(a.title ?? "").toLowerCase().trim()] ?? a.url ?? "#",
-      summary: a.summary ?? "",
-      service: a.service ?? "",
-      tags: Array.isArray(a.tags) ? a.tags : [],
-    }));
+    return parseArticles(content, urlMap);
   });
+
+function parseArticles(content, urlMap = {}) {
+  let articles = [];
+  try {
+    const match = content.match(/\[[\s\S]*\]/);
+    if (match) articles = JSON.parse(match[0]);
+  } catch {
+    return [];
+  }
+  return articles.map((a) => ({
+    id: crypto.randomUUID(),
+    title: a.title ?? "Untitled",
+    source: a.source ?? "Unknown",
+    url: urlMap[(a.title ?? "").toLowerCase().trim()] ?? a.url ?? "#",
+    summary: a.summary ?? "",
+    service: a.service ?? "",
+    tags: Array.isArray(a.tags) ? a.tags : [],
+  }));
+}
+
+async function fetchWithChatCompletions(apiKey, prompt) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => "");
+    throw new Error(`OpenAI error ${res.status}: ${err.slice(0, 300)}`);
+  }
+  const json = await res.json();
+  const content = json.choices?.[0]?.message?.content ?? "";
+  return parseArticles(content);
+}
