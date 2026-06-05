@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "PowerShell($env:PATH = $env:PATH + \";C:\\\\Program Files\\\\Git\\\\cmd;C:\\\\Program Files\\\\Git\\\\bin\"; git --version)",
-      "PowerShell(Get-Command git -ErrorAction SilentlyContinue; \\(Get-ChildItem \"C:\\\\Program Files\\\\Git\" -Recurse -Filter \"git.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1\\).FullName)"
+      "PowerShell(Get-Command git -ErrorAction SilentlyContinue; \\(Get-ChildItem \"C:\\\\Program Files\\\\Git\" -Recurse -Filter \"git.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1\\).FullName)",
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git show --stat 3b4ada8; Write-Host \"---\"; & $git show --stat a45c819; Write-Host \"---\"; & $git show --stat fea7fc5)",
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git diff 3b4ada8 HEAD --stat)",
+      "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git status)"
     ]
   }
 }

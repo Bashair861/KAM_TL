@@ -9,18 +9,31 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as UsersRouteImport } from './routes/users'
 import { Route as StrategyRouteImport } from './routes/strategy'
+import { Route as SetPasswordRouteImport } from './routes/set-password'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as EscalationsRouteImport } from './routes/escalations'
 import { Route as EducateRouteImport } from './routes/educate'
 import { Route as ContractsRouteImport } from './routes/contracts'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountsIndexRouteImport } from './routes/accounts.index'
+import { Route as CalendarCallbackRouteImport } from './routes/calendar.callback'
 import { Route as AccountsAccountIdRouteImport } from './routes/accounts.$accountId'
 
+const UsersRoute = UsersRouteImport.update({
+  id: '/users',
+  path: '/users',
+  getParentRoute: () => rootRouteImport,
+})
 const StrategyRoute = StrategyRouteImport.update({
   id: '/strategy',
   path: '/strategy',
+  getParentRoute: () => rootRouteImport,
+})
+const SetPasswordRoute = SetPasswordRouteImport.update({
+  id: '/set-password',
+  path: '/set-password',
   getParentRoute: () => rootRouteImport,
 })
 const LoginRoute = LoginRouteImport.update({
@@ -53,6 +66,11 @@ const AccountsIndexRoute = AccountsIndexRouteImport.update({
   path: '/accounts/',
   getParentRoute: () => rootRouteImport,
 })
+const CalendarCallbackRoute = CalendarCallbackRouteImport.update({
+  id: '/calendar/callback',
+  path: '/calendar/callback',
+  getParentRoute: () => rootRouteImport,
+})
 const AccountsAccountIdRoute = AccountsAccountIdRouteImport.update({
   id: '/accounts/$accountId',
   path: '/accounts/$accountId',
@@ -65,8 +83,11 @@ const rootRouteChildren = {
   EducateRoute: EducateRoute,
   EscalationsRoute: EscalationsRoute,
   LoginRoute: LoginRoute,
+  SetPasswordRoute: SetPasswordRoute,
   StrategyRoute: StrategyRoute,
+  UsersRoute: UsersRoute,
   AccountsAccountIdRoute: AccountsAccountIdRoute,
+  CalendarCallbackRoute: CalendarCallbackRoute,
   AccountsIndexRoute: AccountsIndexRoute,
 }
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)

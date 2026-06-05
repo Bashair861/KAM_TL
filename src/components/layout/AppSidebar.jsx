@@ -8,6 +8,7 @@ import {
   FileText,
   GraduationCap,
   Settings,
+  UserCog,
   Bell,
   Shield,
   Menu,
@@ -15,7 +16,7 @@ import {
 } from "lucide-react";
 import {
   notifications as initialNotifications,
-  ROLE_PERMISSIONS,
+  getRolePermissions,
   getAccount,
 } from "@/data/kam-data";
 import { useAuth } from "@/context/AuthContext";
@@ -29,6 +30,7 @@ const items = [
   { to: "/contracts", label: "Contracts", icon: FileText },
   { to: "/educate", label: "Education", icon: GraduationCap },
 ];
+const userItems = [{ to: "/users", label: "All Users", icon: UserCog }];
 export function AppSidebar() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
   const { profile } = useAuth();
@@ -37,7 +39,7 @@ export function AppSidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const unread = notifs.filter((n) => !n.read).length;
   const role = profile?.role ?? "KAM";
-  const perms = ROLE_PERMISSIONS[role];
+  const perms = getRolePermissions(role);
   // close mobile drawer on navigation
   useEffect(() => {
     setMobileOpen(false);
@@ -140,6 +142,29 @@ export function AppSidebar() {
             </Link>
           );
         })}
+
+        {role === "Head of KAM" && (
+          <div className="pt-4 mt-4 border-t border-white/10">
+            <p className="px-3 pb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+              Users
+            </p>
+            {userItems.map((item) => {
+              const active = pathname.startsWith(item.to);
+              return (
+                <Link
+                  key={item.to}
+                  to={item.to}
+                  className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${active ? "bg-white/10 text-white" : "text-slate-400 hover:text-white hover:bg-white/5"}`}
+                >
+                  <span className="flex items-center gap-3">
+                    <item.icon className="size-4" />
+                    {item.label}
+                  </span>
+                </Link>
+              );
+            })}
+          </div>
+        )}
       </nav>
 
       <div className="p-4 border-t border-white/10 space-y-2">

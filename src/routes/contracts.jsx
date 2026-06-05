@@ -17,7 +17,7 @@ function ContractsPage() {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const userId = profile?.id;
-  const { data: contracts = [], isLoading } = useQuery({
+  const { data: contracts = [], isLoading, error } = useQuery({
     queryKey: ["contracts", userId, role],
     queryFn: () => fetchContracts({ role, userId }),
   });
@@ -37,6 +37,12 @@ function ContractsPage() {
         <div className="bg-card border rounded-xl overflow-hidden">
           {isLoading ? (
             <div className="p-12 text-center text-xs text-muted-foreground">Loading contracts…</div>
+          ) : error ? (
+            <div className="p-8">
+              <div className="rounded-lg border border-crit/20 bg-crit/10 px-4 py-3 text-sm text-crit">
+                Unable to load contracts: {error.message}
+              </div>
+            </div>
           ) : contracts.length === 0 ? (
             <div className="p-12 text-center">
               <FileText className="size-6 text-muted-foreground mx-auto mb-2" />
@@ -65,20 +71,22 @@ function ContractsPage() {
                           className="flex items-center gap-2 group"
                         >
                           <div className="size-8 rounded-md bg-primary/5 border flex items-center justify-center font-bold text-[11px] shrink-0">
-                            {c.shortCode}
+                            {c.shortCode ?? "--"}
                           </div>
                           <div>
                             <p className="font-semibold text-xs group-hover:text-accent transition-colors">
-                              {c.name}
+                              {c.name ?? "Untitled account"}
                             </p>
-                            <p className="text-[10px] text-muted-foreground">{c.tier}</p>
+                            <p className="text-[10px] text-muted-foreground">{c.tier ?? "—"}</p>
                           </div>
                         </Link>
                       </td>
-                      <td className="px-6 py-4 text-xs text-muted-foreground">{c.contractType}</td>
-                      <td className="px-6 py-4 text-xs">{c.duration}</td>
+                      <td className="px-6 py-4 text-xs text-muted-foreground">
+                        {c.contractType ?? "—"}
+                      </td>
+                      <td className="px-6 py-4 text-xs">{c.duration ?? "—"}</td>
                       <td className="px-6 py-4 text-right font-semibold text-sm">
-                        {formatCurrency(c.contractValue)}
+                        {formatContractValue(c.contractValue)}
                       </td>
                       <td className="px-6 py-4 text-right">
                         <RenewalBadge days={c.renewalDays} />
@@ -99,23 +107,36 @@ function ContractsPage() {
 }
 // ── Shared atoms ────────────────────────────────────────────────────────────
 function RenewalBadge({ days }) {
-  const urgent = days <= 14;
-  const warn = days <= 30;
+  const numericDays = Number(days);
+  if (!Number.isFinite(numericDays)) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const urgent = numericDays <= 14;
+  const warn = numericDays <= 30;
   return (
     <span
       className={`inline-flex items-center gap-1 text-xs font-semibold ${urgent ? "text-crit" : warn ? "text-warn" : "text-muted-foreground"}`}
     >
       {(urgent || warn) && <AlertTriangle className="size-3" />}
-      {days}d
+      {Math.round(numericDays)}d
     </span>
   );
 }
 function ComplianceBadge({ value }) {
-  const color = value >= 9 ? "text-success" : value >= 7 ? "text-warn" : "text-crit";
+  const score = Number(value);
+  if (!Number.isFinite(score)) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const color = score >= 9 ? "text-success" : score >= 7 ? "text-warn" : "text-crit";
   return (
     <span className={`text-xs font-mono font-bold ${color}`}>
-      {value.toFixed(1)}
+      {score.toFixed(1)}
       <span className="text-muted-foreground font-normal">/10</span>
     </span>
   );
+}
+function formatContractValue(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "—";
+  return formatCurrency(amount);
 }

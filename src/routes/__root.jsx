@@ -139,12 +139,12 @@ function AppShell() {
   const { session, loading } = useAuth();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
-  const isAuthPage = pathname === "/login";
+  const isAuthPage = pathname === "/login" || pathname === "/set-password";
   useEffect(() => {
     if (loading) return;
     if (!session && !isAuthPage) navigate({ to: "/login" });
-    if (session && isAuthPage) navigate({ to: "/" });
-  }, [loading, session, isAuthPage]);
+    if (session && pathname === "/login") navigate({ to: "/" });
+  }, [loading, session, isAuthPage, pathname, navigate]);
   // Full-screen spinner while session is being resolved
   if (loading) {
     return (

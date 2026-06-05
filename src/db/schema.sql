@@ -27,6 +27,7 @@ create table if not exists profiles (
   initials   text not null,
   role       user_role not null default 'KAM',
   email      text,
+  is_active  boolean not null default true,
   created_at timestamptz default now()
 );
 
@@ -67,6 +68,12 @@ create table if not exists accounts (
   team_size            int,
   competitors          text[],
   main_business_flow   text,
+  linkedin_url         text,
+  linkedin_summary     text,
+  linkedin_summary_updated_at timestamptz,
+  website_url          text,
+  website_summary      text,
+  website_summary_updated_at timestamptz,
   created_at           timestamptz default now(),
   updated_at           timestamptz default now()
 );
