@@ -15,6 +15,7 @@ import {
   logAccountChanges,
 } from "@/services/db";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
+import { fetchEducationArticles } from "@/services/education";
 import { useAuth } from "@/context/AuthContext";
 import {
   ArrowLeft,
@@ -41,6 +42,8 @@ import {
   Sparkles,
   Lightbulb,
   Loader2,
+  RefreshCw,
+  ExternalLink,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -2333,6 +2336,18 @@ function RetentionGrowthTab({ account, escalations = [] }) {
 function EducateTab({ account }) {
   const { profile } = useAuth();
   const editable = getRolePermissions(profile?.role).write;
+
+  const articlesMutation = useMutation({
+    mutationFn: () =>
+      fetchEducationArticles({
+        data: {
+          services: account.retentionGrowth ?? [],
+          industry: account.industry ?? "",
+          accountName: account.name ?? "",
+        },
+      }),
+  });
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <div className="lg:col-span-2 space-y-6">
@@ -2381,6 +2396,77 @@ function EducateTab({ account }) {
               ))}
             </tbody>
           </table>
+        </Card>
+
+        {/* Recommended Reading — web articles based on active services */}
+        <Card title="Recommended Reading">
+          <p className="text-[11px] text-muted-foreground mb-3">
+            Web articles relevant to {account.name}'s active services — sourced live.
+          </p>
+          {!articlesMutation.data && !articlesMutation.isPending && !articlesMutation.isError && (
+            <button
+              onClick={() => articlesMutation.mutate()}
+              className="flex items-center gap-2 px-4 py-2 text-xs font-semibold border rounded-md hover:bg-muted"
+            >
+              <Sparkles className="size-3 text-accent" />
+              Find Articles for {account.name}
+            </button>
+          )}
+          {articlesMutation.isPending && (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Searching web for {account.industry} articles…
+            </div>
+          )}
+          {articlesMutation.isError && (
+            <p className="text-xs text-destructive">{articlesMutation.error?.message}</p>
+          )}
+          {articlesMutation.data?.length > 0 && (
+            <div className="space-y-3">
+              {articlesMutation.data.map((a) => (
+                <div key={a.id} className="border rounded-lg p-3 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] uppercase tracking-widest font-bold text-accent">
+                      {a.source}
+                    </span>
+                    {a.service && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-semibold shrink-0">
+                        {a.service}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs font-semibold leading-snug">{a.title}</p>
+                  <p className="text-[11px] text-muted-foreground">{a.summary}</p>
+                  <div className="flex items-center justify-between mt-1">
+                    <div className="flex flex-wrap gap-1">
+                      {a.tags.map((t) => (
+                        <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-semibold">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                    {a.url && a.url !== "#" && (
+                      <a
+                        href={a.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] font-bold text-accent uppercase tracking-wider flex items-center gap-1 hover:underline shrink-0"
+                      >
+                        Read <ExternalLink className="size-3" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <button
+                onClick={() => articlesMutation.mutate()}
+                disabled={articlesMutation.isPending}
+                className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-1 hover:text-foreground"
+              >
+                <RefreshCw className="size-3" /> Refresh articles
+              </button>
+            </div>
+          )}
         </Card>
       </div>
 
