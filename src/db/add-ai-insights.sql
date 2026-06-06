@@ -31,21 +31,34 @@ create index if not exists ai_insights_account_idx on ai_insights(account_id);
 create index if not exists ai_insights_scope_idx on ai_insights(scope);
 create index if not exists ai_insights_requested_by_idx on ai_insights(requested_by);
 create index if not exists ai_insights_created_at_idx on ai_insights(created_at desc);
+create index if not exists ai_insights_account_focus_status_idx
+  on ai_insights(account_id, focus, status);
 
 alter table ai_insights enable row level security;
+
+grant select, insert, update, delete on ai_insights to anon, authenticated;
 
 drop policy if exists "ai insights read" on ai_insights;
 create policy "ai insights read" on ai_insights
   for select
+  to anon, authenticated
   using (true);
 
 drop policy if exists "ai insights insert" on ai_insights;
 create policy "ai insights insert" on ai_insights
   for insert
+  to anon, authenticated
   with check (true);
 
 drop policy if exists "ai insights update" on ai_insights;
 create policy "ai insights update" on ai_insights
   for update
+  to anon, authenticated
   using (true)
   with check (true);
+
+drop policy if exists "ai insights delete" on ai_insights;
+create policy "ai insights delete" on ai_insights
+  for delete
+  to anon, authenticated
+  using (true);

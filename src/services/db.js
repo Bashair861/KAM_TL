@@ -5,6 +5,7 @@ import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
 import { applySowFieldsServer } from "@/services/sow-upload";
+import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -25,6 +26,16 @@ function mapFlatAccount(r) {
     retentionRisk: r.retention_risk,
     growthUpside: r.growth_upside,
     whiteSpaceCount: r.white_space_count,
+    retentionHealthScore: r.retention_health_score ?? 0,
+    calculatedRetentionRisk: r.calculated_retention_risk ?? r.retention_risk ?? "Low",
+    growthPotentialScore: r.growth_potential_score ?? 0,
+    growthPotentialLevel: r.growth_potential_level ?? "Low",
+    revenueAtRisk: r.revenue_at_risk ?? 0,
+    growthPipelineValue: r.growth_pipeline_value ?? 0,
+    retentionGrowthQuadrant: r.retention_growth_quadrant ?? null,
+    retentionGrowthNextAction: r.retention_growth_next_action ?? null,
+    retentionGrowthCalculatedAt: r.retention_growth_calculated_at ?? null,
+    retentionGrowthCalculationReason: r.retention_growth_calculation_reason ?? {},
     cooperation: r.cooperation,
     serviceConsumption: r.service_consumption,
     meetingsPerMonth: r.meetings_per_month,
@@ -71,8 +82,296 @@ function mapHealthBlock(score, metrics, kpiData, updatedAt) {
     updatedAt: updatedAt ?? null,
   };
 }
+
+function mapActivityRuleEvidence(row) {
+  return {
+    id: row.id,
+    ruleActivityId: row.rule_activity_id,
+    submittedBy: row.submitted_by,
+    evidenceQuality: row.evidence_quality,
+    reviewStatus: row.review_status,
+    title: row.title,
+    notes: row.notes ?? "",
+    artifactUrl: row.artifact_url ?? "",
+    checklist: row.checklist ?? {},
+    requestedLift: row.requested_lift ?? "",
+    approvedLift: row.approved_lift ?? "",
+    reviewer: row.reviewer ?? "",
+    rejectionReason: row.rejection_reason ?? "",
+    submittedAt: row.submitted_at,
+    reviewedAt: row.reviewed_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapActivityRuleActivity(row, evidenceRows = []) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    sourceActivityId: row.source_activity_id,
+    ruleId: row.rule_id,
+    parameter: row.parameter,
+    impactedMetric: row.impacted_metric,
+    title: row.title,
+    nextStep: row.next_step ?? "",
+    owner: row.owner ?? "",
+    dueDate: row.due_date ?? "",
+    rag: row.rag,
+    status: row.status,
+    activityScorePct: Number(row.activity_score_pct ?? 0),
+    weakSignal: row.weak_signal ?? "",
+    currentValue: row.current_value ?? "",
+    targetValue: row.target_value ?? "",
+    expectedLift: row.expected_lift ?? "",
+    successCriteria: row.success_criteria ?? "",
+    evidenceRequired: row.evidence_required ?? [],
+    triggerLogic: row.trigger_logic ?? null,
+    evidenceLiftPolicy: row.evidence_lift_policy ?? [],
+    activityScoreLogic: row.activity_score_logic ?? [],
+    approvalSla: row.approval_sla ?? null,
+    reviewCadence: row.review_cadence ?? null,
+    sourceType: row.source_type ?? "",
+    sourceRef: row.source_ref ?? "",
+    generatedAt: row.generated_at,
+    acceptedAt: row.accepted_at,
+    plannedAt: row.planned_at,
+    completedAt: row.completed_at,
+    evidenceSubmittedAt: row.evidence_submitted_at,
+    validatedAt: row.validated_at,
+    closedAt: row.closed_at,
+    updatedAt: row.updated_at,
+    evidenceReviews: evidenceRows.map(mapActivityRuleEvidence),
+  };
+}
+
+function mapAccountTaskForAiSuggestion(row, index, fallbackAccountId) {
+  return {
+    id: row.id ?? row.task_id ?? `task-${fallbackAccountId}-${index}`,
+    accountId: row.account_id ?? row.accountId ?? fallbackAccountId,
+    title: row.title ?? row.name ?? row.task_name ?? row.subject ?? "Untitled task",
+    description: row.description ?? row.details ?? row.notes ?? row.summary ?? "",
+    area: row.area ?? row.health_area ?? row.parameter ?? row.category ?? "",
+    status: row.status ?? row.state ?? "",
+    priority: row.priority ?? row.urgency ?? "",
+    owner: row.owner ?? row.assigned_to ?? row.assignee ?? "",
+    dueDate: row.due_date ?? row.due ?? row.deadline ?? "",
+    source: "tasks",
+  };
+}
+
+function mapActivityScoreHistory(row) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    parameter: row.parameter,
+    metric: row.metric ?? "",
+    score: Number(row.score),
+    snapshotMonth: row.snapshot_month,
+    source: row.source,
+    notes: row.notes ?? "",
+    createdAt: row.created_at,
+  };
+}
+
+function normalizeActivityDuplicateText(value = "") {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSimilarActivityText(left, right) {
+  const a = normalizeActivityDuplicateText(left);
+  const b = normalizeActivityDuplicateText(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function isDuplicateRuleActivityInput(input, row) {
+  const sameArea = isSimilarActivityText(input.parameter, row.parameter);
+  const titleMatch = isSimilarActivityText(input.title, row.title);
+  const detailMatch = isSimilarActivityText(input.nextStep, row.next_step);
+  return sameArea && (titleMatch || detailMatch);
+}
+
+function buildActionItemTaskDescription(input) {
+  return [
+    input.description,
+    input.reason ? `Reason: ${input.reason}` : "",
+    input.source ? `Source: ${input.source}` : "",
+    input.healthArea ? `Health area: ${input.healthArea}` : "",
+    input.expectedLift ? `Expected lift: ${input.expectedLift}` : "",
+  ]
+    .filter((part) => String(part ?? "").trim())
+    .join("\n\n");
+}
+
+const ACTIVITY_AI_SUGGESTIONS_TABLE = "activity_ai_suggestions";
+const MEETING_INSIGHT_ACTION_FOCUS = "meeting_insight_action_item";
+
+function normalizeAiInsightStatus(status) {
+  if (status === "converted_to_action" || status === "dismissed" || status === "draft") {
+    return status;
+  }
+  return "draft";
+}
+
+function getAiInsightResponse(row) {
+  return row?.response && typeof row.response === "object" ? row.response : {};
+}
+
+function mapStagedAiRecommendation(row) {
+  const response = getAiInsightResponse(row);
+  return {
+    id: row.id,
+    sourceId: row.source_id ?? response.sourceId ?? response.originalId ?? row.id,
+    title: row.title ?? response.title ?? row.summary ?? row.prompt ?? "Untitled recommendation",
+    description: row.description ?? response.description ?? "",
+    healthArea: row.health_area ?? response.healthArea ?? response.health_area ?? "",
+    expectedLift: row.expected_lift ?? response.expectedLift ?? response.expected_lift ?? "",
+    reason: row.reason ?? response.reason ?? "",
+    sourceSummary:
+      row.source_reference ??
+      response.sourceSummary ??
+      response.source_reference ??
+      response.sourceReference ??
+      row.source ??
+      "",
+    status: row.status,
+    createdAt: row.created_at,
+  };
+}
+
+function buildAiRecommendationPayload(input) {
+  const suggestion = input.suggestion ?? input;
+  return {
+    originalId: suggestion.id ?? suggestion.sourceId ?? "",
+    title: String(suggestion.title ?? "").trim(),
+    description: String(suggestion.description ?? "").trim(),
+    healthArea: suggestion.healthArea ?? suggestion.health_area ?? "",
+    expectedLift: suggestion.expectedLift ?? suggestion.expected_lift ?? "",
+    reason: suggestion.reason ?? "",
+    sourceSummary:
+      suggestion.sourceSummary ?? suggestion.source_reference ?? suggestion.sourceReference ?? "",
+  };
+}
+
+function buildLocalStagedAiRecommendation(accountId, payload, status = "draft") {
+  const sourceId =
+    payload.originalId ||
+    normalizeActivityDuplicateText(payload.title) ||
+    `recommendation-${Date.now()}`;
+
+  return {
+    id: `local-ai-${accountId}-${sourceId}`,
+    sourceId,
+    title: payload.title || "Untitled recommendation",
+    description: payload.description ?? "",
+    healthArea: payload.healthArea ?? "",
+    expectedLift: payload.expectedLift ?? "",
+    reason: payload.reason ?? "",
+    sourceSummary: payload.sourceSummary ?? "AI Suggestions",
+    status,
+    createdAt: new Date().toISOString(),
+    localOnly: true,
+  };
+}
+
+function buildMeetingInsightPayload(input) {
+  const item = input.item ?? input;
+  return {
+    sourceRef: input.sourceRef ?? item.sourceRef ?? item.sourceId ?? item.id ?? "",
+    title: String(item.title ?? "").trim(),
+    description: item.description ?? item.reason ?? item.nextStep ?? "",
+    healthArea: item.healthArea ?? item.area ?? "",
+    expectedLift: item.expectedLift ?? "",
+    reason: item.reason ?? "",
+    sourceSummary: item.meetingTitle
+      ? `Meeting Insight: ${item.meetingTitle}`
+      : (item.sourceSummary ?? "Meeting Insight"),
+    meetingTitle: item.meetingTitle ?? "",
+    meetingDate: item.meetingDate ?? "",
+  };
+}
+
+function mapActivityRuleThresholdOverride(row) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    ruleId: row.rule_id,
+    parameter: row.parameter,
+    threshold: Number(row.threshold),
+    targetScore: Number(row.target_score),
+    redThreshold: row.red_threshold === null ? null : Number(row.red_threshold),
+    reason: row.reason ?? "",
+    approvedBy: row.approved_by ?? "",
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+// ─── fetch accounts (flat) ────────────────────────────────────────────────────
+function mapFirefliesMeetingSummary(row) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    transcriptId: row.fireflies_transcript_id,
+    title: row.title,
+    meetingDate: row.meeting_date,
+    transcriptUrl: row.transcript_url ?? "",
+    participants: row.participants ?? [],
+    attendees: row.attendees ?? [],
+    summary: row.summary ?? {},
+    overview: row.overview ?? "",
+    shortSummary: row.short_summary ?? "",
+    actionItems: row.action_items ?? "",
+    derivedActionItems: row.derived_action_items ?? [],
+    derivedOpportunities: row.derived_opportunities ?? [],
+    agentDiagnostics: row.agent_diagnostics ?? {},
+    sourceQuery: row.source_query ?? {},
+    syncedAt: row.synced_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function isMissingTableError(error) {
-  return error?.code === "42P01" || /relation .* does not exist/i.test(error?.message ?? "");
+  const message = String(error?.message ?? "").toLowerCase();
+  return (
+    error?.code === "42P01" ||
+    error?.code === "PGRST205" ||
+    /relation .* does not exist/i.test(error?.message ?? "") ||
+    message.includes("could not find the table") ||
+    (message.includes("schema cache") && message.includes("table"))
+  );
+}
+
+function isMissingColumnError(error, column = "") {
+  const message = String(error?.message ?? "").toLowerCase();
+  const columnName = String(column ?? "").toLowerCase();
+  return (
+    error?.code === "42703" ||
+    error?.code === "PGRST204" ||
+    (columnName && message.includes(columnName)) ||
+    (message.includes("could not find") && message.includes("column")) ||
+    (message.includes("schema cache") && message.includes("column"))
+  );
+}
+
+function getActivityAiSuggestionsSchemaError() {
+  return new Error(
+    "activity_ai_suggestions table schema does not match the app. Run src/db/add-activity-ai-suggestions.sql in Supabase SQL Editor, then restart the app.",
+  );
+}
+
+function isActivityAiSuggestionsTypeError(error) {
+  const message = String(error?.message ?? "").toLowerCase();
+  return (
+    error?.code === "22P02" &&
+    message.includes("invalid input syntax") &&
+    message.includes("uuid")
+  );
 }
 function getRowComplete(row) {
   return Boolean(row.complete ?? row.completed ?? row.Complete ?? false);
@@ -142,6 +441,25 @@ function mapTask(row, accountLookup = new Map(), healthMetricLookup = new Map())
     importanceScore: isEscalation ? 100 : row.health_metric_id ? 70 : 20,
   };
 }
+function mapRetentionGrowthDraft(row) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    kind: row.kind,
+    title: row.title,
+    owner: row.owner ?? "",
+    dueDate: row.due_date ?? "",
+    nextStep: row.next_step ?? "",
+    potentialValueLabel: row.potential_value_label ?? "Not provided",
+    reason: row.reason ?? "",
+    evidence: row.evidence ?? [],
+    offerType: row.offer_type ?? null,
+    approvalState: row.approval_state ?? "",
+    createdBy: row.created_by ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 // --- fetch accounts (flat) ----------------------------------------------------
 export async function fetchAccounts(opts) {
   let q = supabase.from("accounts").select("*");
@@ -152,14 +470,6 @@ export async function fetchAccounts(opts) {
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map(mapFlatAccount);
-}
-
-function isMissingColumnError(error, column) {
-  if (!error) return false;
-  const message = error.message?.toLowerCase() ?? "";
-  return (
-    error.code === "42703" || error.code === "PGRST204" || message.includes(column.toLowerCase())
-  );
 }
 
 export async function fetchKamTasks(opts = {}) {
@@ -332,6 +642,266 @@ export async function updateDashboardTaskComplete(taskId, complete, healthMetric
     complete,
     healthMetricId,
   });
+}
+
+export async function createAccountActionItemTask(input) {
+  const accountId = input.accountId;
+  const title = String(input.title ?? "").trim();
+  if (!accountId) throw new Error("Account is required before creating an action item.");
+  if (!title) throw new Error("Action item title is required.");
+
+  const description = buildActionItemTaskDescription(input);
+  const { data: existingRows, error: existingError } = await supabase
+    .from("tasks")
+    .select("*")
+    .eq("account_id", accountId)
+    .limit(200);
+
+  if (isMissingTableError(existingError)) {
+    throw new Error("Tasks table is missing. Run the tasks migration before adding action items.");
+  }
+  if (existingError) throw existingError;
+
+  const normalizedTitle = normalizeActivityDuplicateText(title);
+  const normalizedDescription = normalizeActivityDuplicateText(description);
+  const duplicate = (existingRows ?? [])
+    .filter((row) => !getRowComplete(row))
+    .some((row) => {
+      const rowTitle = normalizeActivityDuplicateText(row.title ?? row.name ?? row.label);
+      const rowDescription = normalizeActivityDuplicateText(row.description);
+      const titleMatch =
+        rowTitle &&
+        (rowTitle === normalizedTitle ||
+          rowTitle.includes(normalizedTitle) ||
+          normalizedTitle.includes(rowTitle));
+      const descriptionMatch =
+        !normalizedDescription ||
+        !rowDescription ||
+        rowDescription.includes(normalizedDescription) ||
+        normalizedDescription.includes(rowDescription);
+      return titleMatch && descriptionMatch;
+    });
+
+  if (duplicate) throw new Error("This action item already exists.");
+
+  const row = {
+    name: title,
+    description,
+    type: "Action Item",
+    account_id: accountId,
+    health_metric_id: input.healthMetricId ?? null,
+  };
+
+  const { data, error } = await supabase.from("tasks").insert(row).select("*").single();
+  if (error) throw error;
+  return mapTask(data);
+}
+
+export async function fetchStagedAiRecommendations(input = {}) {
+  if (!input.accountId) return [];
+  const query = supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .select("*")
+    .eq("account_id", input.accountId)
+    .eq("status", "draft")
+    .order("created_at", { ascending: true })
+    .limit(100);
+
+  const { data, error } = await query;
+  if (isMissingTableError(error)) return [];
+  if (isMissingColumnError(error) || isActivityAiSuggestionsTypeError(error)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (error) throw error;
+  return (data ?? []).map(mapStagedAiRecommendation);
+}
+
+export async function stageAccountAiRecommendation(input = {}) {
+  const accountId = input.accountId;
+  if (!accountId) throw new Error("Account is required before staging an AI recommendation.");
+
+  const payload = buildAiRecommendationPayload(input);
+  if (!payload.title) throw new Error("AI recommendation title is required.");
+
+  const existingQuery = supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("status", "draft")
+    .limit(100);
+
+  const { data: existingRows, error: existingError } = await existingQuery;
+  if (isMissingTableError(existingError)) {
+    return buildLocalStagedAiRecommendation(accountId, payload);
+  }
+  if (isMissingColumnError(existingError) || isActivityAiSuggestionsTypeError(existingError)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (existingError) throw existingError;
+
+  const normalizedTitle = normalizeActivityDuplicateText(payload.title);
+  const duplicate = (existingRows ?? []).find((row) => {
+    const rowTitle = normalizeActivityDuplicateText(mapStagedAiRecommendation(row).title);
+    return rowTitle === normalizedTitle;
+  });
+  if (duplicate) return mapStagedAiRecommendation(duplicate);
+
+  const row = {
+    account_id: accountId,
+    requested_by: input.requestedBy ?? null,
+    source_id: payload.originalId || normalizeActivityDuplicateText(payload.title),
+    title: payload.title,
+    description: payload.description,
+    health_area: payload.healthArea,
+    expected_lift: payload.expectedLift,
+    reason: payload.reason,
+    source_reference: payload.sourceSummary || "AI Suggestions",
+    status: "draft",
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .insert(row)
+    .select("*")
+    .single();
+  if (isMissingTableError(error)) {
+    return buildLocalStagedAiRecommendation(accountId, payload);
+  }
+  if (isMissingColumnError(error) || isActivityAiSuggestionsTypeError(error)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (error) throw error;
+  return mapStagedAiRecommendation(data);
+}
+
+export async function updateStagedAiRecommendationStatus(input = {}) {
+  if (!input.id) throw new Error("AI recommendation id is required.");
+  const status = normalizeAiInsightStatus(input.status);
+  if (String(input.id).startsWith("local-ai-")) {
+    return {
+      id: input.id,
+      status,
+      localOnly: true,
+    };
+  }
+  const { data, error } = await supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", input.id)
+    .select("*")
+    .single();
+
+  if (isMissingTableError(error)) {
+    return {
+      id: input.id,
+      status,
+      localOnly: true,
+    };
+  }
+  if (isMissingColumnError(error) || isActivityAiSuggestionsTypeError(error)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (error) throw error;
+  return mapStagedAiRecommendation(data);
+}
+
+export async function fetchMeetingInsightActionStates(input = {}) {
+  if (!input.accountId) return [];
+  const { data, error } = await supabase
+    .from("ai_insights")
+    .select("id, status, summary, response, created_at, updated_at")
+    .eq("account_id", input.accountId)
+    .eq("scope", "account")
+    .eq("focus", MEETING_INSIGHT_ACTION_FOCUS)
+    .in("status", ["converted_to_action", "dismissed"])
+    .limit(300);
+
+  if (isMissingTableError(error)) return [];
+  if (error) throw error;
+
+  return (data ?? []).map((row) => {
+    const response = getAiInsightResponse(row);
+    return {
+      id: row.id,
+      status: row.status,
+      sourceRef: response.sourceRef ?? "",
+      title: response.title ?? row.summary ?? "",
+    };
+  });
+}
+
+export async function markMeetingInsightActionItemState(input = {}) {
+  const accountId = input.accountId;
+  if (!accountId) throw new Error("Account is required before saving meeting insight state.");
+
+  const payload = buildMeetingInsightPayload(input);
+  if (!payload.title) throw new Error("Meeting insight title is required.");
+  const status = normalizeAiInsightStatus(input.status ?? "converted_to_action");
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from("ai_insights")
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("scope", "account")
+    .eq("focus", MEETING_INSIGHT_ACTION_FOCUS)
+    .limit(300);
+
+  if (isMissingTableError(existingError)) {
+    return null;
+  }
+  if (existingError) throw existingError;
+
+  const normalizedSourceRef = normalizeActivityDuplicateText(payload.sourceRef);
+  const normalizedTitle = normalizeActivityDuplicateText(payload.title);
+  const existing = (existingRows ?? []).find((row) => {
+    const response = getAiInsightResponse(row);
+    const rowSourceRef = normalizeActivityDuplicateText(response.sourceRef);
+    const rowTitle = normalizeActivityDuplicateText(response.title ?? row.summary ?? row.prompt);
+    return (
+      (normalizedSourceRef && rowSourceRef === normalizedSourceRef) ||
+      (normalizedTitle && rowTitle === normalizedTitle)
+    );
+  });
+
+  if (existing) {
+    const { data, error } = await supabase
+      .from("ai_insights")
+      .update({
+        status,
+        response: { ...getAiInsightResponse(existing), ...payload },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  const row = {
+    scope: "account",
+    account_id: accountId,
+    requested_by: input.requestedBy ?? null,
+    prompt: payload.title,
+    focus: MEETING_INSIGHT_ACTION_FOCUS,
+    timeframe: "staged",
+    summary: payload.title,
+    risk_level: "medium",
+    source: payload.sourceSummary || "Meeting Insight",
+    response: payload,
+    context_summary: {
+      healthArea: payload.healthArea,
+      expectedLift: payload.expectedLift,
+    },
+    status,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase.from("ai_insights").insert(row).select("*").single();
+  if (isMissingTableError(error)) return null;
+  if (error) throw error;
+  return data;
 }
 export async function fetchKamUsers() {
   const withStatus = await supabase
@@ -1035,7 +1605,38 @@ export async function fetchOpportunities(accountId) {
     title: o.title,
     source: o.source ?? "",
     signalDate: o.signal_date ?? "",
-    potential: o.potential ?? 0,
+    potential: o.potential ?? null,
+    confidence: o.confidence,
+    nextStep: o.next_step ?? "",
+  }));
+}
+
+export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportunities }) {
+  if (!opportunities?.length) return [];
+
+  const rows = opportunities.map((opportunity) => ({
+    id: opportunity.id,
+    account_id: accountId,
+    title: opportunity.title,
+    source: opportunity.source,
+    signal_date: opportunity.signalDate,
+    potential: opportunity.potential ?? null,
+    confidence: opportunity.confidence ?? "Medium",
+    next_step: opportunity.nextStep,
+  }));
+
+  const { data, error } = await supabase
+    .from("opportunities")
+    .upsert(rows, { onConflict: "id" })
+    .select("*");
+  if (error) throw error;
+  return (data ?? []).map((o) => ({
+    id: o.id,
+    accountId: o.account_id,
+    title: o.title,
+    source: o.source ?? "",
+    signalDate: o.signal_date ?? "",
+    potential: o.potential ?? null,
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
   }));
@@ -1046,6 +1647,106 @@ function firstRelatedRow(value) {
   return value ?? null;
 }
 
+function buildRetentionGrowthReasonPayload({ model, opportunities, escalations }) {
+  return {
+    trigger: "account_retention_growth_recalculation",
+    rules: {
+      retention:
+        "Health, renewal proximity, CSAT, risk score, financial score, relationship score, escalations, competitor pressure, and churn/renewal signals.",
+      growth:
+        "Whitespace count, growth upside, applicable-but-not-offered services, meeting cadence, current service proof, and opportunity pipeline.",
+    },
+    signals: {
+      retention: model.retentionSignals.map((signal) => ({
+        id: signal.id,
+        level: signal.level,
+        title: signal.title,
+      })),
+      growth: model.growthSignals.map((signal) => ({
+        id: signal.id,
+        level: signal.level,
+        title: signal.title,
+      })),
+    },
+    counts: {
+      opportunities: opportunities.length,
+      escalations: escalations.length,
+      applicableGrowth: model.applicableGrowth.length,
+      recommendedOffers: model.recommendedOffers.length,
+    },
+  };
+}
+
+function buildAccountRetentionGrowthUpdate({ model, opportunities, escalations }) {
+  const dashboard = model.dashboard;
+  const nextAction =
+    dashboard.actionRows[0]?.recommendedAction ||
+    dashboard.matrix?.recommendedAction ||
+    "Maintain account engagement and monitor for new signals.";
+
+  return {
+    retention_health_score: dashboard.retentionScore,
+    calculated_retention_risk: dashboard.riskLevel,
+    retention_risk: dashboard.riskLevel,
+    growth_potential_score: dashboard.growthScore,
+    growth_potential_level: dashboard.growthLevel,
+    revenue_at_risk: dashboard.revenueAtRisk,
+    growth_pipeline_value: dashboard.growthPipeline,
+    retention_growth_quadrant: dashboard.matrix?.quadrant ?? null,
+    retention_growth_next_action: nextAction,
+    retention_growth_calculated_at: new Date().toISOString(),
+    retention_growth_calculation_reason: buildRetentionGrowthReasonPayload({
+      model,
+      opportunities,
+      escalations,
+    }),
+  };
+}
+
+export async function refreshAccountRetentionGrowthScoring(accountId) {
+  const [account, opportunities, escalations] = await Promise.all([
+    fetchAccount(accountId),
+    fetchOpportunities(accountId),
+    fetchEscalations(accountId),
+  ]);
+
+  if (!account) throw new Error("Account not found for retention/growth scoring.");
+
+  const model = buildRetentionGrowthTabModel({ account, opportunities, escalations });
+  const update = buildAccountRetentionGrowthUpdate({ model, opportunities, escalations });
+  const { data, error } = await supabase
+    .from("accounts")
+    .update(update)
+    .eq("id", accountId)
+    .select("*")
+    .single();
+  if (error) throw error;
+
+  return {
+    account: mapFlatAccount(data),
+    dashboard: model.dashboard,
+    update,
+  };
+}
+
+export async function refreshAllAccountRetentionGrowthScoring(opts) {
+  const accounts = await fetchAccounts(opts);
+  const results = [];
+
+  for (const account of accounts) {
+    try {
+      results.push(await refreshAccountRetentionGrowthScoring(account.id));
+    } catch (error) {
+      results.push({
+        accountId: account.id,
+        failed: true,
+        error: error?.message ?? "Unknown scoring error",
+      });
+    }
+  }
+
+  return results;
+}
 export async function fetchContracts(opts) {
   let q = supabase
     .from("accounts")
@@ -1096,6 +1797,604 @@ export async function logAccountChanges(accountId, changes, editedBy) {
   );
   if (error) throw error;
 }
+
+export async function fetchAccountTasksForAiSuggestions(accountId) {
+  if (!accountId) return [];
+
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("*")
+    .eq("account_id", accountId)
+    .limit(100);
+
+  if (error) {
+    if (error.code === "42P01" || error.code === "42703") return [];
+    throw error;
+  }
+
+  return (data ?? []).map((row, index) =>
+    mapAccountTaskForAiSuggestion(row, index, accountId),
+  );
+}
+
+export async function fetchActivityScoreHistory(accountId) {
+  const { data, error } = await supabase
+    .from("activity_score_history")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("snapshot_month", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map(mapActivityScoreHistory);
+}
+
+export async function upsertActivityScoreSnapshot({
+  accountId,
+  parameter,
+  metric,
+  score,
+  snapshotMonth,
+  source = "score_snapshot",
+  notes = "",
+}) {
+  const month =
+    snapshotMonth ??
+    new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), 1))
+      .toISOString()
+      .slice(0, 10);
+
+  const { error } = await supabase.from("activity_score_history").upsert(
+    {
+      account_id: accountId,
+      parameter,
+      metric,
+      score,
+      snapshot_month: month,
+      source,
+      notes,
+    },
+    { onConflict: "account_id,parameter,metric,snapshot_month" },
+  );
+  if (error) throw error;
+}
+
+export async function fetchActivityRuleThresholdOverrides(accountId) {
+  const { data, error } = await supabase
+    .from("activity_rule_threshold_overrides")
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("active", true)
+    .order("updated_at", { ascending: false });
+  if (error) {
+    if (error.code === "42P01") return [];
+    throw error;
+  }
+  return (data ?? []).map(mapActivityRuleThresholdOverride);
+}
+
+export async function fetchFirefliesMeetingSummaries(accountId) {
+  const { data, error } = await supabase
+    .from("fireflies_meeting_summaries")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("meeting_date", { ascending: false, nullsFirst: false })
+    .order("synced_at", { ascending: false });
+  if (error) {
+    if (error.code === "42P01") return [];
+    throw error;
+  }
+  return (data ?? []).map(mapFirefliesMeetingSummary);
+}
+
+export async function upsertFirefliesMeetingSummaries(accountId, meetings) {
+  if (!meetings?.length) return [];
+  const now = new Date().toISOString();
+  const rows = meetings.map((meeting) => ({
+    account_id: accountId,
+    fireflies_transcript_id: meeting.transcriptId,
+    title: meeting.title,
+    meeting_date: meeting.meetingDate,
+    transcript_url: meeting.transcriptUrl || null,
+    participants: meeting.participants ?? [],
+    attendees: meeting.attendees ?? [],
+    summary: meeting.summary ?? {},
+    overview: meeting.overview ?? "",
+    short_summary: meeting.shortSummary ?? "",
+    action_items: meeting.actionItems ?? "",
+    derived_action_items: meeting.derivedActionItems ?? [],
+    derived_opportunities: meeting.derivedOpportunities ?? [],
+    agent_diagnostics: meeting.agentDiagnostics ?? {},
+    source_query: meeting.sourceQuery ?? {},
+    synced_at: now,
+    updated_at: now,
+  }));
+
+  const { data, error } = await supabase
+    .from("fireflies_meeting_summaries")
+    .upsert(rows, { onConflict: "account_id,fireflies_transcript_id" })
+    .select("*");
+  if (error) throw error;
+  return (data ?? []).map(mapFirefliesMeetingSummary);
+}
+
+export async function logFirefliesWebhookEvent(input = {}) {
+  const row = {
+    fireflies_transcript_id: input.transcriptId ?? null,
+    event_type: input.eventType ?? "meeting_ready",
+    status: input.status ?? "received",
+    matched_account_id: input.accountId ?? null,
+    match_score: input.matchScore ?? null,
+    title: input.title ?? null,
+    payload: input.payload ?? {},
+    diagnostics: input.diagnostics ?? {},
+    error_message: input.errorMessage ?? null,
+  };
+
+  const { data, error } = await supabase
+    .from("fireflies_webhook_events")
+    .insert(row)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "42P01") {
+      console.warn(
+        "Fireflies webhook event log table is missing. Run src/db/add-fireflies-webhook-events.sql.",
+      );
+      return null;
+    }
+    throw error;
+  }
+
+  return data ?? null;
+}
+
+export async function fetchRetentionGrowthDrafts(accountId) {
+  if (!accountId) return [];
+  const { data, error } = await supabase
+    .from("retention_growth_drafts")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    if (error.code === "42P01") return [];
+    throw error;
+  }
+
+  return (data ?? []).map(mapRetentionGrowthDraft);
+}
+
+export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "Unknown") {
+  if (!accountId) throw new Error("Account id is required to save a retention/growth draft.");
+  if (!draft?.id) throw new Error("Draft id is required.");
+
+  const now = new Date().toISOString();
+  const row = {
+    id: draft.id,
+    account_id: accountId,
+    kind: draft.kind,
+    title: draft.title,
+    owner: draft.owner,
+    due_date: draft.dueDate,
+    next_step: draft.nextStep,
+    potential_value_label: draft.potentialValueLabel,
+    reason: draft.reason,
+    evidence: draft.evidence ?? [],
+    offer_type: draft.offerType,
+    approval_state: draft.approvalState,
+    created_by: createdBy,
+    created_at: draft.createdAt ?? now,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabase
+    .from("retention_growth_drafts")
+    .upsert(row, { onConflict: "id" })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapRetentionGrowthDraft(data);
+}
+
+export async function deleteFirefliesMeetingHistory({
+  accountId,
+  meetingIds,
+  deleteActionItems = false,
+  deleteOpportunities = false,
+}) {
+  if (!accountId) throw new Error("Account id is required to delete meeting history.");
+
+  let query = supabase.from("fireflies_meeting_summaries").select("*").eq("account_id", accountId);
+  if (meetingIds?.length) query = query.in("id", meetingIds);
+
+  const { data: meetingRows, error: meetingFetchError } = await query;
+  if (meetingFetchError) throw meetingFetchError;
+
+  const meetings = meetingRows ?? [];
+  const idsToDelete = meetings.map((meeting) => meeting.id).filter(Boolean);
+  if (!idsToDelete.length) {
+    return { meetingsDeleted: 0, actionItemsDeleted: 0, opportunitiesDeleted: 0 };
+  }
+
+  const actionRefs = meetings
+    .flatMap((meeting) => meeting.derived_action_items ?? [])
+    .map((item) => item.id)
+    .filter(Boolean);
+  const opportunityIds = meetings
+    .flatMap((meeting) => meeting.derived_opportunities ?? [])
+    .map((item) => item.id)
+    .filter(Boolean);
+
+  let actionItemsDeleted = 0;
+  let opportunitiesDeleted = 0;
+
+  if (deleteActionItems && actionRefs.length) {
+    const { data, error } = await supabase
+      .from("activity_rule_activities")
+      .delete()
+      .eq("account_id", accountId)
+      .in("source_ref", actionRefs)
+      .select("id");
+    if (error) throw error;
+    actionItemsDeleted = data?.length ?? 0;
+  }
+
+  if (deleteOpportunities && opportunityIds.length) {
+    const { data, error } = await supabase
+      .from("opportunities")
+      .delete()
+      .eq("account_id", accountId)
+      .in("id", opportunityIds)
+      .select("id");
+    if (error) throw error;
+    opportunitiesDeleted = data?.length ?? 0;
+  }
+
+  const { data: deletedMeetings, error: deleteMeetingsError } = await supabase
+    .from("fireflies_meeting_summaries")
+    .delete()
+    .eq("account_id", accountId)
+    .in("id", idsToDelete)
+    .select("id");
+  if (deleteMeetingsError) throw deleteMeetingsError;
+
+  return {
+    meetingsDeleted: deletedMeetings?.length ?? 0,
+    actionItemsDeleted,
+    opportunitiesDeleted,
+  };
+}
+
+export async function fetchActivityRuleActivities(accountId) {
+  const { data: rows, error } = await supabase
+    .from("activity_rule_activities")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("generated_at", { ascending: false });
+  if (error) throw error;
+
+  const ids = (rows ?? []).map((row) => row.id);
+  let evidenceByActivity = new Map();
+
+  if (ids.length) {
+    const { data: evidenceRows, error: evidenceError } = await supabase
+      .from("activity_rule_evidence")
+      .select("*")
+      .in("rule_activity_id", ids)
+      .order("submitted_at", { ascending: false });
+    if (evidenceError) throw evidenceError;
+
+    evidenceByActivity = (evidenceRows ?? []).reduce((map, row) => {
+      const current = map.get(row.rule_activity_id) ?? [];
+      current.push(row);
+      map.set(row.rule_activity_id, current);
+      return map;
+    }, new Map());
+  }
+
+  return (rows ?? []).map((row) => mapActivityRuleActivity(row, evidenceByActivity.get(row.id)));
+}
+
+export async function createActivityRuleActivity(input) {
+  const now = new Date().toISOString();
+
+  if (input.sourceType !== "manual") {
+    const [
+      { data: existingRows, error: existingError },
+      { data: legacyRows, error: legacyError },
+    ] = await Promise.all([
+      supabase
+        .from("activity_rule_activities")
+        .select("id,title,next_step,parameter")
+        .eq("account_id", input.accountId)
+        .limit(200),
+      supabase
+        .from("activities")
+        .select("id,title,area")
+        .eq("account_id", input.accountId)
+        .limit(200),
+    ]);
+
+    if (existingError) throw existingError;
+    if (legacyError) throw legacyError;
+
+    const legacyActivityRows = (legacyRows ?? []).map((row) => ({
+      id: row.id,
+      title: row.title,
+      next_step: row.title,
+      parameter: row.area,
+    }));
+
+    if (
+      [...(existingRows ?? []), ...legacyActivityRows].some((row) =>
+        isDuplicateRuleActivityInput(input, row),
+      )
+    ) {
+      throw new Error("This activity already exists.");
+    }
+  }
+
+  const { data, error } = await supabase
+    .from("activity_rule_activities")
+    .insert({
+      account_id: input.accountId,
+      rule_id: input.ruleId,
+      parameter: input.parameter,
+      impacted_metric: input.impactedMetric,
+      title: input.title,
+      next_step: input.nextStep,
+      owner: input.owner,
+      due_date: input.dueDate || null,
+      rag: input.rag ?? "A",
+      status: "Planned",
+      activity_score_pct: input.owner && input.dueDate ? 20 : 10,
+      weak_signal: input.weakSignal,
+      current_value: input.currentValue,
+      target_value: input.targetValue,
+      expected_lift: input.expectedLift,
+      success_criteria: input.successCriteria,
+      evidence_required: input.evidenceRequired ?? [],
+      trigger_logic: input.triggerLogic ?? {},
+      evidence_lift_policy: input.evidenceLiftPolicy ?? [],
+      activity_score_logic: input.activityScoreLogic ?? [],
+      approval_sla: input.approvalSla ?? {},
+      review_cadence: input.reviewCadence ?? {},
+      source_type: input.sourceType,
+      source_ref: input.sourceRef,
+      accepted_at: now,
+      planned_at: input.owner && input.dueDate ? now : null,
+      updated_at: now,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapActivityRuleActivity(data);
+}
+
+export async function createActivityRuleActivitiesFromMeetingActions({ accountId, actions }) {
+  if (!actions?.length) return [];
+
+  const sourceRefs = actions.map((action) => action.id).filter(Boolean);
+  if (!sourceRefs.length) return [];
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from("activity_rule_activities")
+    .select("source_ref")
+    .eq("account_id", accountId)
+    .in("source_ref", sourceRefs);
+  if (existingError) throw existingError;
+
+  const existingRefs = new Set((existingRows ?? []).map((row) => row.source_ref));
+  const now = new Date().toISOString();
+  const rows = actions
+    .filter((action) => !existingRefs.has(action.id))
+    .map((action) => ({
+      account_id: accountId,
+      rule_id: action.ruleId ?? "MEET-01",
+      parameter: action.parameter ?? action.healthArea ?? "Relationship",
+      impacted_metric: action.impactedMetric ?? "Meeting-derived required action",
+      title: action.title,
+      next_step: action.nextStep ?? action.title,
+      owner: null,
+      due_date: null,
+      rag:
+        action.urgency ??
+        (action.confidence === "High" ? "R" : action.confidence === "Low" ? "G" : "A"),
+      status: "Generated",
+      activity_score_pct: 0,
+      weak_signal: action.weakSignal ?? "Fireflies meeting action item matched guardrails",
+      current_value: action.currentValue ?? "Meeting action identified",
+      target_value: action.targetValue ?? "Validated activity evidence",
+      expected_lift: action.expectedLift ?? "",
+      success_criteria:
+        action.successCriteria ??
+        "Action has owner, due date or next step, and evidence before score movement.",
+      evidence_required: action.evidenceRequired ?? [
+        "Fireflies action item",
+        "Owner/date confirmation",
+        "Completion evidence",
+      ],
+      trigger_logic: {
+        primary: "Fireflies meeting action passed the guarded meeting-action agent.",
+        source: action.actionSource ?? "explicit_action_items",
+      },
+      evidence_lift_policy: [],
+      activity_score_logic: [],
+      approval_sla: {},
+      review_cadence: {},
+      source_type: "fireflies_meeting",
+      source_ref: action.id,
+      generated_at: now,
+      updated_at: now,
+    }));
+
+  if (!rows.length) return [];
+
+  const { data, error } = await supabase.from("activity_rule_activities").insert(rows).select("*");
+  if (error) throw error;
+  return (data ?? []).map((row) => mapActivityRuleActivity(row));
+}
+
+export async function rejectActivityRuleSuggestion(input) {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("activity_rule_activities")
+    .insert({
+      account_id: input.accountId,
+      rule_id: input.ruleId,
+      parameter: input.parameter,
+      impacted_metric: input.impactedMetric,
+      title: input.title,
+      next_step: input.reason,
+      owner: input.reviewer,
+      rag: input.rag ?? "A",
+      status: "Rejected",
+      activity_score_pct: 0,
+      weak_signal: input.weakSignal,
+      current_value: input.currentValue,
+      target_value: input.targetValue,
+      expected_lift: input.expectedLift,
+      success_criteria: input.successCriteria,
+      evidence_required: input.evidenceRequired ?? [],
+      trigger_logic: input.triggerLogic ?? {},
+      evidence_lift_policy: input.evidenceLiftPolicy ?? [],
+      activity_score_logic: input.activityScoreLogic ?? [],
+      approval_sla: input.approvalSla ?? {},
+      review_cadence: input.reviewCadence ?? {},
+      source_type: input.sourceType,
+      source_ref: input.sourceRef,
+      updated_at: now,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapActivityRuleActivity(data);
+}
+
+export async function submitActivityRuleEvidence({
+  ruleActivityId,
+  submittedBy,
+  evidenceQuality,
+  title,
+  notes,
+  artifactUrl,
+  checklist = {},
+  requestedLift,
+}) {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("activity_rule_evidence")
+    .insert({
+      rule_activity_id: ruleActivityId,
+      submitted_by: submittedBy,
+      evidence_quality: evidenceQuality,
+      title,
+      notes,
+      artifact_url: artifactUrl || null,
+      checklist,
+      requested_lift: requestedLift,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+
+  const { error: activityError } = await supabase
+    .from("activity_rule_activities")
+    .update({
+      status: "Evidence Submitted",
+      activity_score_pct: 80,
+      completed_at: now,
+      evidence_submitted_at: now,
+      updated_at: now,
+    })
+    .eq("id", ruleActivityId);
+  if (activityError) throw activityError;
+
+  return mapActivityRuleEvidence(data);
+}
+
+export async function reviewActivityRuleEvidence({
+  evidenceId,
+  ruleActivityId,
+  reviewer,
+  reviewStatus,
+  approvedLift,
+  rejectionReason = "",
+}) {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("activity_rule_evidence")
+    .update({
+      review_status: reviewStatus,
+      approved_lift: reviewStatus === "Approved" ? approvedLift : null,
+      reviewer,
+      rejection_reason: reviewStatus === "Rejected" ? rejectionReason : null,
+      reviewed_at: now,
+      updated_at: now,
+    })
+    .eq("id", evidenceId)
+    .select("*")
+    .single();
+  if (error) throw error;
+
+  const statusByReview = {
+    Approved: "Validated",
+    Partial: "Evidence Submitted",
+    Rejected: "Rejected",
+  };
+  const pctByReview = {
+    Approved: 100,
+    Partial: 80,
+    Rejected: 60,
+  };
+  const activityStatus = statusByReview[reviewStatus] ?? "Evidence Submitted";
+  const { error: activityError } = await supabase
+    .from("activity_rule_activities")
+    .update({
+      status: activityStatus,
+      activity_score_pct: pctByReview[reviewStatus] ?? 80,
+      validated_at: reviewStatus === "Approved" ? now : null,
+      updated_at: now,
+    })
+    .eq("id", ruleActivityId);
+  if (activityError) throw activityError;
+
+  return mapActivityRuleEvidence(data);
+}
+// ─── fetch notifications ──────────────────────────────────────────────────────
+export async function markActivityRuleActivityDone(activityId) {
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("activity_rule_activities")
+    .update({
+      status: "Closed",
+      activity_score_pct: 100,
+      completed_at: now,
+      validated_at: now,
+      closed_at: now,
+      updated_at: now,
+    })
+    .eq("id", activityId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapActivityRuleActivity(data);
+}
+
+export async function markLegacyActivityDone(activityId) {
+  const { data, error } = await supabase
+    .from("activities")
+    .update({
+      status: "Done",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", activityId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 // --- fetch notifications ------------------------------------------------------
 export async function fetchNotifications() {
   const { data, error } = await supabase

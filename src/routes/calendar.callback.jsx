@@ -55,6 +55,12 @@ function CalendarCallbackPage() {
     })
       .then(() => {
         setComplete(true);
+        const returnTo = window.sessionStorage.getItem("kamCalendarReturnTo");
+        window.sessionStorage.removeItem("kamCalendarReturnTo");
+        if (returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//")) {
+          window.location.replace(returnTo);
+          return;
+        }
         navigate({ to: "/", replace: true });
       })
       .catch((err) => {
