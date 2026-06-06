@@ -5125,15 +5125,28 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
   });
 
   const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
-    mutationFn: ({ target, reason }) =>
-      rejectActivityRuleSuggestion(
+    mutationFn: async ({ target, reason }) => {
+      const rejectedActivity = await rejectActivityRuleSuggestion(
         buildRejectedRuleActivityInput({
           accountId: account.id,
           target,
           reason,
           reviewer: profile?.name ?? "Unknown",
         }),
-      ),
+      );
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "Activity rejected",
+            oldValue: buildActivityHistoryValue(target),
+            newValue: buildRejectedActivityHistoryValue(target, reason, rejectedActivity),
+          },
+        ],
+      });
+      return rejectedActivity;
+    },
     onSuccess: (_, { target, reason }) => {
       setResolvedItems((current) => ({
         ...current,
@@ -5144,6 +5157,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       setOpportunityStatus(`Rejected "${target.title}".`);
       setRejectTarget(null);
       setRejectReason("");
@@ -5476,14 +5490,27 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: saveRuleActivity, isPending: savingRuleActivity } = useMutation({
-    mutationFn: ({ target, form }) =>
-      createActivityRuleActivity(
+    mutationFn: async ({ target, form }) => {
+      const createdActivity = await createActivityRuleActivity(
         buildActivityRuleActivityInput({
           accountId: account.id,
           target,
           form,
         }),
-      ),
+      );
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "Activity created",
+            oldValue: null,
+            newValue: buildSavedActivityHistoryValue(target, form, createdActivity),
+          },
+        ],
+      });
+      return createdActivity;
+    },
     onSuccess: (_, { target }) => {
       setResolvedItems((current) => ({
         ...current,
@@ -5493,21 +5520,35 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
       closeReview();
     },
   });
 
   const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
-    mutationFn: ({ target, reason }) =>
-      rejectActivityRuleSuggestion(
+    mutationFn: async ({ target, reason }) => {
+      const rejectedActivity = await rejectActivityRuleSuggestion(
         buildRejectedRuleActivityInput({
           accountId: account.id,
           target,
           reason,
           reviewer: profile?.name ?? "Unknown",
         }),
-      ),
+      );
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "Activity rejected",
+            oldValue: buildActivityHistoryValue(target),
+            newValue: buildRejectedActivityHistoryValue(target, reason, rejectedActivity),
+          },
+        ],
+      });
+      return rejectedActivity;
+    },
     onSuccess: (_, { target, reason }) => {
       setResolvedItems((current) => ({
         ...current,
@@ -5518,14 +5559,15 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       setRejectTarget(null);
       setRejectReason("");
     },
   });
 
   const { mutate: submitEvidence, isPending: submittingEvidence } = useMutation({
-    mutationFn: ({ row, form }) =>
-      submitActivityRuleEvidence({
+    mutationFn: async ({ row, form }) => {
+      const submittedEvidence = await submitActivityRuleEvidence({
         ruleActivityId: row.dbId,
         submittedBy: profile?.name ?? "Unknown",
         evidenceQuality: form.evidenceQuality,
@@ -5534,25 +5576,53 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         artifactUrl: form.artifactUrl.trim(),
         checklist: buildEvidenceChecklistPayload(form.evidenceQuality),
         requestedLift: row.expectedLift,
-      }),
+      });
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: `Activity evidence submitted: ${getActivityHistoryTitle(row)}`,
+            oldValue: row.status ?? "Planned",
+            newValue: buildActivityEvidenceHistoryValue(row, submittedEvidence),
+          },
+        ],
+      });
+      return submittedEvidence;
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       setEvidenceSubmitTarget(null);
       setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
     },
   });
 
   const { mutate: validateEvidence, isPending: validatingEvidence } = useMutation({
-    mutationFn: (row) =>
-      reviewActivityRuleEvidence({
+    mutationFn: async (row) => {
+      const reviewedEvidence = await reviewActivityRuleEvidence({
         evidenceId: row.latestPendingEvidence.id,
         ruleActivityId: row.dbId,
         reviewer: profile?.name ?? "Unknown",
         reviewStatus: "Approved",
         approvedLift: row.expectedLift,
-      }),
+      });
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: `Activity evidence validated: ${getActivityHistoryTitle(row)}`,
+            oldValue: row.latestPendingEvidence?.reviewStatus ?? row.status ?? "Pending",
+            newValue: buildActivityEvidenceHistoryValue(row, reviewedEvidence),
+          },
+        ],
+      });
+      return reviewedEvidence;
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
     },
   });
@@ -6047,6 +6117,16 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         await markActivityRuleActivityDone(created.id);
       }),
     );
+
+    await logActivityHistoryChange({
+      accountId: account.id,
+      profile,
+      changes: rowsToComplete.map((entry) => ({
+        field: `Activity status: ${getActivityHistoryTitle(entry)}`,
+        oldValue: entry.status ?? "Open",
+        newValue: "Done",
+      })),
+    });
 
     setResolvedItems((current) => ({
       ...current,
@@ -8232,6 +8312,110 @@ function createInitialEvidenceForm(row, submitterName) {
     notes: "",
     artifactUrl: "",
   };
+}
+
+function normalizeHistoryText(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function compactHistoryParts(parts) {
+  return parts.map(normalizeHistoryText).filter(Boolean).join(" | ");
+}
+
+function getActivityHistoryTitle(row = {}) {
+  return (
+    normalizeHistoryText(row.title) ??
+    normalizeHistoryText(row.nextStep) ??
+    normalizeHistoryText(row.reason) ??
+    normalizeHistoryText(row.weakSignal) ??
+    "Untitled activity"
+  );
+}
+
+function buildActivityHistoryValue(row = {}) {
+  const area = row.area ?? row.healthArea ?? row.parameter;
+  const dueDate = row.dueDate ?? row.due ?? row.due_date;
+  const rag = row.rag ?? row.urgency;
+  const expectedLift = row.expectedLift ?? row.expected_lift;
+  const nextStep = row.nextStep ?? row.next_step ?? row.reason;
+
+  return compactHistoryParts([
+    `Title: ${getActivityHistoryTitle(row)}`,
+    area ? `Area: ${area}` : null,
+    row.status ? `Status: ${row.status}` : null,
+    row.owner ? `Owner: ${row.owner}` : null,
+    dueDate ? `Due: ${dueDate}` : null,
+    rag ? `RAG: ${rag}` : null,
+    expectedLift ? `Expected lift: ${expectedLift}` : null,
+    nextStep ? `Next step: ${nextStep}` : null,
+  ]);
+}
+
+function buildSavedActivityHistoryValue(target, form, createdActivity) {
+  const item = target?.item ?? target ?? {};
+  return buildActivityHistoryValue({
+    ...item,
+    ...createdActivity,
+    title: form?.title ?? createdActivity?.title ?? item.title,
+    owner: form?.owner ?? createdActivity?.owner ?? item.owner,
+    dueDate: form?.dueDate ?? createdActivity?.dueDate ?? item.dueDate,
+    nextStep: form?.nextStep ?? createdActivity?.nextStep ?? item.nextStep,
+    area: createdActivity?.parameter ?? item.area ?? item.healthArea ?? item.parameter,
+    parameter: createdActivity?.parameter ?? item.parameter,
+    status: createdActivity?.status ?? "Planned",
+    rag: createdActivity?.rag ?? item.rag ?? item.urgency,
+    expectedLift: createdActivity?.expectedLift ?? item.expectedLift,
+  });
+}
+
+function buildRejectedActivityHistoryValue(target, reason, rejectedActivity) {
+  return compactHistoryParts([
+    buildActivityHistoryValue({
+      ...target,
+      ...rejectedActivity,
+      area: rejectedActivity?.parameter ?? target?.area ?? target?.healthArea ?? target?.parameter,
+      status: "Rejected",
+      nextStep: null,
+    }),
+    reason ? `Rejection reason: ${reason}` : null,
+  ]);
+}
+
+function buildActivityEvidenceHistoryValue(row, evidence = {}) {
+  return compactHistoryParts([
+    `Activity: ${getActivityHistoryTitle(row)}`,
+    evidence.title ? `Evidence: ${evidence.title}` : null,
+    evidence.evidenceQuality ? `Quality: ${evidence.evidenceQuality}` : null,
+    evidence.reviewStatus ? `Review status: ${evidence.reviewStatus}` : null,
+    evidence.requestedLift ? `Requested lift: ${evidence.requestedLift}` : null,
+    evidence.approvedLift ? `Approved lift: ${evidence.approvedLift}` : null,
+    evidence.submittedBy ? `Submitted by: ${evidence.submittedBy}` : null,
+    evidence.reviewer ? `Reviewer: ${evidence.reviewer}` : null,
+    evidence.notes ? `Notes: ${evidence.notes}` : null,
+    evidence.artifactUrl ? `Artifact: ${evidence.artifactUrl}` : null,
+  ]);
+}
+
+async function logActivityHistoryChange({ accountId, profile, changes }) {
+  const seen = new Set();
+  const normalizedChanges = changes
+    .map((change) => ({
+      field: normalizeHistoryText(change.field),
+      oldValue: normalizeHistoryText(change.oldValue),
+      newValue: normalizeHistoryText(change.newValue),
+    }))
+    .filter((change) => {
+      if (!change.field || change.oldValue === change.newValue) return false;
+      const key = `${change.field}|${change.oldValue ?? ""}|${change.newValue ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  if (!normalizedChanges.length) return;
+  await logAccountChanges(accountId, normalizedChanges, profile?.name ?? "Unknown");
 }
 
 function buildEvidenceChecklistPayload(evidenceQuality) {
