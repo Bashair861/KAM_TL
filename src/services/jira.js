@@ -1,5 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { createClient } from "@supabase/supabase-js";
+import {
+  createActionItemNotifications,
+  createEscalationNotifications,
+} from "@/services/notifications";
 
 function readEnv(name) {
   if (typeof process !== "undefined" && process.env?.[name]) return process.env[name];
@@ -17,6 +21,10 @@ function slaHours(priority) {
   if (priority === "P1") return 48;
   if (priority === "P2") return 72;
   return 120;
+}
+
+function randomId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
 function extractText(doc) {
@@ -97,7 +105,7 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
     if (!accountId) throw new Error("Account is required.");
 
     const supabaseUrl = readEnv("VITE_SUPABASE_URL");
-    const supabaseKey = readEnv("VITE_SUPABASE_ANON_KEY");
+    const supabaseKey = readEnv("SUPABASE_SERVICE_ROLE_KEY") ?? readEnv("VITE_SUPABASE_ANON_KEY");
     if (!supabaseUrl || !supabaseKey) throw new Error("Supabase credentials not configured.");
 
     const supabase = createClient(supabaseUrl, supabaseKey);
@@ -105,6 +113,14 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
     for (const issue of issues) {
       const escalId = issue.key ?? issue.id;
       if (!escalId) throw new Error("Issue is missing an id/key field.");
+
+      const { data: existingEscalation, error: existingEscalationError } = await supabase
+        .from("escalations")
+        .select("id")
+        .eq("id", escalId)
+        .maybeSingle();
+      if (existingEscalationError) throw existingEscalationError;
+      const isNewEscalation = !existingEscalation;
 
       const { error: escalErr } = await supabase.from("escalations").upsert({
         id: escalId,
@@ -116,6 +132,14 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
         opened_at: issue.openedAt,
       });
       if (escalErr) throw escalErr;
+
+      if (isNewEscalation) {
+        await createEscalationNotifications(supabase, {
+          accountId,
+          escalationId: escalId,
+          title: issue.title,
+        }).catch(() => null);
+      }
 
       if (issue.actionItems?.length) {
         await supabase.from("escalation_action_items").delete().eq("escalation_id", escalId);
@@ -130,17 +154,28 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
 
         // Save each action item as a task
         await supabase.from("tasks").delete().eq("escalation_id", escalId);
-        const { error: taskErr } = await supabase.from("tasks").insert(
-          issue.actionItems.map((a) => ({
-            id: crypto.randomUUID(),
-            name: a.label,
-            type: "Action Item",
-            account_id: accountId,
-            escalation_id: escalId,
-            Complete: a.done,
-          })),
-        );
+        const taskRows = issue.actionItems.map((a) => ({
+          id: randomId(),
+          name: a.label,
+          type: "Action Item",
+          account_id: accountId,
+          escalation_id: escalId,
+          Complete: a.done,
+        }));
+        const { error: taskErr } = await supabase.from("tasks").insert(taskRows);
         if (taskErr) throw taskErr;
+
+        if (isNewEscalation) {
+          await Promise.all(
+            taskRows.map((task) =>
+              createActionItemNotifications(supabase, {
+                accountId,
+                actionItemId: task.id,
+                title: task.name,
+              }).catch(() => null),
+            ),
+          );
+        }
       }
     }
 
