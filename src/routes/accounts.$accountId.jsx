@@ -1,8 +1,21 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { formatCurrency, getRolePermissions } from "@/data/kam-data";
+import {
+  buildActivityTabModel,
+  ACTIVITY_TAB_AREAS,
+  isRetentionGrowthActivityArea,
+} from "@/services/activity-tab";
+import {
+  removeDuplicateAiSuggestions,
+  isDuplicateAiActivity,
+} from "@/services/activity-ai-suggestions";
+import { fetchFirefliesRequiredActionItems } from "@/services/fireflies-action-items.server";
+import { fetchKamAiSuggestions } from "@/services/kam-ai-suggestions.server";
+import { syncSummaryOpportunitiesServer } from "@/services/summary-opportunities.server";
+import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import {
   fetchAccount,
   fetchEscalations,
@@ -15,14 +28,52 @@ import {
   updateHealthBlock,
   fetchAccountHistory,
   logAccountChanges,
+  fetchActivityScoreHistory,
+  fetchActivityRuleThresholdOverrides,
+  fetchActivityRuleActivities,
+  createActivityRuleActivity,
+  rejectActivityRuleSuggestion,
+  submitActivityRuleEvidence,
+  reviewActivityRuleEvidence,
+  markActivityRuleActivityDone,
+  markLegacyActivityDone,
+  fetchKamTasks,
+  createAccountActionItemTask,
+  fetchStagedAiRecommendations,
+  stageAccountAiRecommendation,
+  updateStagedAiRecommendationStatus,
+  fetchMeetingInsightActionStates,
+  markMeetingInsightActionItemState,
+  fetchFirefliesMeetingSummaries,
   generateAccountLinkedinSummary,
   generateAccountWebsiteSummary,
 } from "@/services/db";
+import { upsertActivityScoreSnapshotServer } from "@/services/activity-score-snapshot.server";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { extractSowFields } from "@/services/sow-upload";
 import { fetchEducationArticles } from "@/services/education";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Textarea } from "@/components/ui/textarea";
 import { askAccountAi } from "@/services/ai";
 import {
   ArrowLeft,
@@ -49,6 +100,7 @@ import {
   Sparkles,
   Lightbulb,
   Loader2,
+  ChevronDown,
   ExternalLink,
   History,
   RefreshCw,
@@ -80,9 +132,11 @@ const TABS = [
   "Overview",
   "Score Marking Matrices",
   "Activity to Increase Score",
+  "Opportunities",
   "Retention VS Growth",
   "Educate client",
   "Escalation",
+  "Meeting History",
   "Client History",
 ];
 function hasSyncValue(value) {
@@ -1190,11 +1244,29 @@ function AccountDetailPage() {
           {tab === "Overview" && <OverviewTab account={account} />}
           {tab === "Score Marking Matrices" && <ScoreMatricsTab account={account} />}
           {tab === "Activity to Increase Score" && (
-            <ActivityTab account={account} opportunities={accountOpportunities} />
+            <ActivityTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
           )}
-          {tab === "Retention VS Growth" && <RetentionGrowthTab account={account} escalations={accountEscalations} />}
+          {tab === "Opportunities" && (
+            <OpportunitiesTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
+          )}
+          {tab === "Retention VS Growth" && (
+            <RetentionGrowthTab
+              account={account}
+              opportunities={accountOpportunities}
+              escalations={accountEscalations}
+            />
+          )}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
+          {tab === "Meeting History" && <MeetingHistoryTab account={account} profile={profile} />}
           {tab === "Client History" && (
             <ClientHistoryTab accountId={account.id} accountName={account.name} />
           )}
@@ -1449,6 +1521,974 @@ function AiList({ title, items, empty }) {
         <p className="text-xs text-muted-foreground">{empty}</p>
       )}
     </div>
+  );
+}
+function RetentionGrowthTabPlanner({ account, opportunities, escalations, profile }) {
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const canApproveCommercial = role === "Head of KAM";
+  const isViewOnly = role === "CEO" || (role === "KAM" && !isAssignedKam);
+  const model = useMemo(
+    () => buildRetentionGrowthTabModel({ account, opportunities, escalations }),
+    [account, escalations, opportunities],
+  );
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [draftPlans, setDraftPlans] = useState([]);
+  const [draftOffers, setDraftOffers] = useState([]);
+  const [planTarget, setPlanTarget] = useState(null);
+  const [planForm, setPlanForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [offerTarget, setOfferTarget] = useState(null);
+  const [offerForm, setOfferForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [evidenceTarget, setEvidenceTarget] = useState(null);
+
+  useEffect(() => {
+    setResolvedItems({});
+    setDraftPlans([]);
+    setDraftOffers([]);
+    setPlanTarget(null);
+    setPlanForm(createInitialReviewForm(null, profile?.name));
+    setOfferTarget(null);
+    setOfferForm(createInitialReviewForm(null, profile?.name));
+    setEvidenceTarget(null);
+  }, [account.id, profile?.name]);
+
+  const activeApplicableGrowth = model.applicableGrowth.filter((item) => !resolvedItems[item.id]);
+  const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
+  const activeOffers = model.recommendedOffers.filter((item) => !resolvedItems[item.id]);
+  const draftQueue = useMemo(
+    () => sortRetentionDrafts([...draftPlans, ...draftOffers]),
+    [draftOffers, draftPlans],
+  );
+
+  function openPlanReview(kind, item) {
+    setPlanTarget({ kind, item });
+    setPlanForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closePlanReview() {
+    setPlanTarget(null);
+    setPlanForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmPlanReview() {
+    if (!planTarget) return;
+    const draft = buildRetentionPlanDraft(planTarget, planForm, canApproveCommercial);
+    setDraftPlans((current) => [draft, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [planTarget.item.id]: {
+        status: "drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closePlanReview();
+  }
+
+  function openOfferReview(item) {
+    setOfferTarget(item);
+    setOfferForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closeOfferReview() {
+    setOfferTarget(null);
+    setOfferForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmOfferReview() {
+    if (!offerTarget) return;
+    const draft = buildRetentionOfferDraft(offerTarget, offerForm, canApproveCommercial);
+    setDraftOffers((current) => [draft, ...current]);
+    setResolvedItems((current) => ({
+      ...current,
+      [offerTarget.id]: {
+        status: "drafted",
+        reviewedAt: new Date().toISOString(),
+      },
+    }));
+    closeOfferReview();
+  }
+
+  return (
+    <div className="space-y-6">
+      {isViewOnly && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only planning surface</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            {role === "CEO"
+              ? "CEO can inspect services, opportunities, signals, and evidence here but cannot plan or draft offers."
+              : "Only the assigned KAM can plan pitches or create draft offers for this account."}
+          </p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <MiniStat label="Current services" value={`${model.currentServices.length} tracked`} />
+        <MiniStat label="Whitespace" value={`${activeApplicableGrowth.length} services ready`} />
+        <MiniStat label="Recommended offers" value={`${activeOffers.length} active`} />
+        <MiniStat
+          label="Top retention signal"
+          value={model.retentionSignals[0]?.title ?? "No immediate retention alarm"}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">What we are offering & giving</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Services already live, in flight, offered, or actively delivered for {account.name}.
+            </p>
+          </div>
+          {model.currentServices.length ? (
+            <div className="divide-y">
+              {model.currentServices.map((service) => (
+                <div key={service.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{service.service}</p>
+                    <ServiceStatusBadge status={service.status} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{service.description}</p>
+                  <MiniStat label="Tracking note" value={service.trackingNote} />
+                  <EvidencePreview
+                    evidence={service.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: service.service,
+                        subtitle: `${service.status} service context`,
+                        evidence: service.evidence,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No current services are mapped for this account.
+            </p>
+          )}
+        </div>
+
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold">Growth - applicable but not offered</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Relevant services and whitespace opportunities that fit this client now.
+              </p>
+            </div>
+            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              {activeApplicableGrowth.length} open
+            </span>
+          </div>
+          {activeApplicableGrowth.length ? (
+            <div className="divide-y">
+              {activeApplicableGrowth.map((item) => (
+                <div key={item.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                    <div className="space-y-2 min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{item.service}</p>
+                        <OfferTypeBadge type={item.offerType} />
+                        <ConfidenceBadge confidence={item.confidence} />
+                      </div>
+                      <p className="text-xs text-muted-foreground">{item.reason}</p>
+                      <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                        <MiniStat label="Potential value" value={getPotentialValueLabel(item)} />
+                        <MiniStat label="Next step" value={item.nextStep} />
+                      </div>
+                      <EvidencePreview
+                        evidence={item.evidence}
+                        onView={() =>
+                          setEvidenceTarget({
+                            title: item.service,
+                            subtitle: "Applicable but not offered",
+                            evidence: item.evidence,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="shrink-0">
+                      <Button
+                        size="sm"
+                        disabled={!canAct}
+                        onClick={() => openPlanReview("growth", item)}
+                      >
+                        Plan Pitch
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No applicable whitespace services are active for this account right now.
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold">Opportunities related to the client</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Client-specific opportunities surfaced from current services, Fireflies notes,
+              whitespace, renewal context, and escalations.
+            </p>
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            {activeOpportunities.length} active
+          </span>
+        </div>
+        {activeOpportunities.length ? (
+          <div className="divide-y">
+            {activeOpportunities.map((opportunity) => (
+              <div key={opportunity.id} className="px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold">{opportunity.title}</p>
+                      <PriorityBadge priority={opportunity.priority} />
+                      <ConfidenceBadge confidence={opportunity.confidence} />
+                      {opportunity.category ? <AreaBadge area={opportunity.category} /> : null}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">{opportunity.source}</p>
+                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                      <MiniStat
+                        label="Potential value"
+                        value={getPotentialValueLabel(opportunity)}
+                      />
+                      <MiniStat label="Next step" value={opportunity.nextStep} />
+                      <MiniStat
+                        label="Priority"
+                        value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
+                      />
+                    </div>
+                    <EvidencePreview
+                      evidence={opportunity.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: opportunity.title,
+                          subtitle: `${opportunity.source} · ${opportunity.category}`,
+                          evidence: opportunity.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="shrink-0">
+                    <Button
+                      size="sm"
+                      disabled={!canAct}
+                      onClick={() => openPlanReview("opportunity", opportunity)}
+                    >
+                      {opportunity.actionLabel ?? "Pursue"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No client-specific opportunities are active in this planning cycle.
+          </p>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Retention signals</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Signals that can affect renewal confidence, recovery planning, or client risk.
+            </p>
+          </div>
+          {model.retentionSignals.length ? (
+            <div className="divide-y">
+              {model.retentionSignals.map((signal) => (
+                <div key={signal.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{signal.title}</p>
+                    <SignalLevelBadge level={signal.level} tone="risk" />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{signal.reason}</p>
+                  <MiniStat label="Recommended action" value={signal.recommendedAction} />
+                  <EvidencePreview
+                    evidence={signal.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: signal.title,
+                        subtitle: "Retention signal",
+                        evidence: signal.evidence,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No material retention signals are active right now.
+            </p>
+          )}
+        </div>
+
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Growth signals</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Signals that point to expansion, whitespace, budget, or stakeholder interest.
+            </p>
+          </div>
+          {model.growthSignals.length ? (
+            <div className="divide-y">
+              {model.growthSignals.map((signal) => (
+                <div key={signal.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{signal.title}</p>
+                    <SignalLevelBadge level={signal.level} tone="growth" />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{signal.reason}</p>
+                  <MiniStat label="Recommended action" value={signal.recommendedAction} />
+                  <EvidencePreview
+                    evidence={signal.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: signal.title,
+                        subtitle: "Growth signal",
+                        evidence: signal.evidence,
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No material growth signals are active right now.
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-6">
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold">Recommended Offers</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                AI-assisted offers built from whitespace, client interest, retention signals, and
+                current service context.
+              </p>
+            </div>
+            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              {activeOffers.length} active
+            </span>
+          </div>
+          {activeOffers.length ? (
+            <div className="divide-y">
+              {activeOffers.map((offer) => (
+                <div key={offer.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                    <div className="space-y-2 min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{offer.title}</p>
+                        <OfferTypeBadge type={offer.offerType} />
+                        <ConfidenceBadge confidence={offer.confidence} />
+                        <ApprovalPill
+                          required={offer.approvalRequired}
+                          approverRole={offer.approverRole}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">{offer.reason}</p>
+                      <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                        <MiniStat label="Potential value" value={getPotentialValueLabel(offer)} />
+                        <MiniStat label="Allowed offer" value={offer.allowedValue} />
+                        <MiniStat label="Next step" value={offer.nextStep} />
+                      </div>
+                      <EvidencePreview
+                        evidence={offer.evidence}
+                        onView={() =>
+                          setEvidenceTarget({
+                            title: offer.title,
+                            subtitle: `${offer.offerType} offer`,
+                            evidence: offer.evidence,
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="shrink-0">
+                      <Button size="sm" disabled={!canAct} onClick={() => openOfferReview(offer)}>
+                        Create Draft Offer
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-6 text-xs text-muted-foreground">
+              No recommended offers are active for this account right now.
+            </p>
+          )}
+        </div>
+
+        <div className="bg-card border rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-sm font-bold">Commercial Guardrails</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              What can be offered, how much is allowed, and when Head of KAM approval is needed.
+            </p>
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <MiniStat label="POC limit" value={model.guardrails.summary.pocLimit} />
+              <MiniStat label="Discount limit" value={model.guardrails.summary.discountLimit} />
+              <MiniStat
+                label="Service credit"
+                value={model.guardrails.summary.serviceCreditLimit}
+              />
+              <MiniStat label="KAM proposal limit" value={model.guardrails.summary.proposalLimit} />
+            </div>
+            <p className="text-xs text-muted-foreground">{model.guardrails.narrative}</p>
+            <div className="space-y-3">
+              {model.guardrails.rules.map((rule) => (
+                <div key={rule.id} className="rounded-xl border p-4 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <OfferTypeBadge type={rule.offer} />
+                    <ApprovalPill
+                      required={rule.approvalRequired !== "No"}
+                      approverRole={rule.approverRole}
+                    />
+                  </div>
+                  <p className="text-sm font-semibold">{rule.allowedOffer}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <MiniStat label="Allowed value" value={rule.allowedValue} />
+                    <MiniStat label="Discount limit" value={rule.discountLimit} />
+                    <MiniStat label="Service credit" value={rule.serviceCreditLimit} />
+                    <MiniStat label="POC limit" value={rule.pocLimit} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{rule.reason}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b">
+          <h3 className="text-sm font-bold">Not applicable to this client</h3>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Services in this list are filtered out from growth opportunities, offers, and pitch
+            suggestions.
+          </p>
+        </div>
+        {model.notApplicable.length ? (
+          <div className="divide-y">
+            {model.notApplicable.map((item) => (
+              <div key={item.id} className="px-6 py-4 space-y-3">
+                <p className="text-sm font-semibold">{item.service}</p>
+                <p className="text-xs text-muted-foreground">{item.reason}</p>
+                <EvidencePreview
+                  evidence={item.evidence}
+                  onView={() =>
+                    setEvidenceTarget({
+                      title: item.service,
+                      subtitle: "Not applicable service",
+                      evidence: item.evidence,
+                    })
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No services are currently blocked from pitching for this account.
+          </p>
+        )}
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b">
+          <h3 className="text-sm font-bold">Draft Plans & Offers</h3>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Review-ready local drafts created from whitespace, opportunities, and recommended
+            offers.
+          </p>
+        </div>
+        {draftQueue.length ? (
+          <div className="divide-y">
+            {draftQueue.map((draft) => (
+              <div key={draft.id} className="px-6 py-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-semibold">{draft.title}</p>
+                  <DraftKindBadge kind={draft.kind} />
+                  {draft.offerType ? <OfferTypeBadge type={draft.offerType} /> : null}
+                </div>
+                <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                  <MiniStat label="Owner" value={draft.owner} />
+                  <MiniStat label="Due date" value={draft.dueDate} />
+                  <MiniStat label="Potential value" value={draft.potentialValueLabel} />
+                </div>
+                <MiniStat label="Next step" value={draft.nextStep} />
+                <p className="text-xs text-muted-foreground">{draft.reason}</p>
+                <p className="text-[11px] font-medium text-accent">{draft.approvalState}</p>
+                <EvidencePreview
+                  evidence={draft.evidence}
+                  onView={() =>
+                    setEvidenceTarget({
+                      title: draft.title,
+                      subtitle: draft.kind === "offer" ? "Draft offer" : "Draft plan",
+                      evidence: draft.evidence,
+                    })
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No draft pitches or offers have been created in this session yet.
+          </p>
+        )}
+      </div>
+
+      <RetentionPlanReviewSheet
+        target={planTarget}
+        form={planForm}
+        onChange={setPlanForm}
+        onClose={closePlanReview}
+        onConfirm={confirmPlanReview}
+      />
+
+      <RetentionOfferReviewSheet
+        target={offerTarget}
+        form={offerForm}
+        onChange={setOfferForm}
+        onClose={closeOfferReview}
+        onConfirm={confirmOfferReview}
+      />
+
+      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+    </div>
+  );
+}
+
+function ServiceStatusBadge({ status }) {
+  const styles = {
+    Live: "bg-success/10 text-success",
+    Delivered: "bg-accent/10 text-accent",
+    "In Flight": "bg-warn/10 text-warn",
+    Offered: "bg-muted text-muted-foreground",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[status] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {status}
+    </span>
+  );
+}
+
+function OfferTypeBadge({ type }) {
+  const styles = {
+    POC: "bg-accent/10 text-accent",
+    Upsell: "bg-success/10 text-success",
+    "Cross-sell": "bg-success/10 text-success",
+    Renewal: "bg-warn/10 text-warn",
+    "Service Credit": "bg-warn/10 text-warn",
+    Discount: "bg-warn/10 text-warn",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${styles[type] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {type}
+    </span>
+  );
+}
+
+function ApprovalPill({ required, approverRole }) {
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${
+        required ? "bg-warn/10 text-warn" : "bg-success/10 text-success"
+      }`}
+    >
+      {required ? `Approval · ${approverRole ?? "Required"}` : "No approval"}
+    </span>
+  );
+}
+
+function SignalLevelBadge({ level, tone }) {
+  const styles =
+    tone === "risk"
+      ? {
+          High: "bg-crit/10 text-crit",
+          Medium: "bg-warn/10 text-warn",
+          Low: "bg-success/10 text-success",
+        }
+      : {
+          High: "bg-success/10 text-success",
+          Medium: "bg-accent/10 text-accent",
+          Low: "bg-muted text-muted-foreground",
+        };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${styles[level] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {level}
+    </span>
+  );
+}
+
+function DraftKindBadge({ kind }) {
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+      {kind === "offer" ? "Draft Offer" : "Draft Plan"}
+    </span>
+  );
+}
+
+function getPotentialValueLabel(item) {
+  return item.potentialValueLabel ?? `+${formatCurrency(item.potentialValue ?? 0)}`;
+}
+
+function getDraftApprovalState(item, canApproveCommercial) {
+  if (!item.approvalRequired) return "Within KAM authority";
+  if (canApproveCommercial) return "Within Head of KAM authority";
+  return `Pending ${item.approverRole ?? "Head of KAM"} approval`;
+}
+
+function buildRetentionPlanDraft(target, form, canApproveCommercial) {
+  const item = target.item;
+
+  return {
+    id: `draft-plan-${item.id}`,
+    kind: "plan",
+    title: form.title.trim(),
+    owner: form.owner.trim(),
+    dueDate: formatDraftDate(form.dueDate),
+    nextStep: form.nextStep.trim(),
+    potentialValueLabel: getPotentialValueLabel(item),
+    reason: item.reason ?? item.title,
+    evidence: item.evidence ?? [],
+    approvalState: getDraftApprovalState(item, canApproveCommercial),
+    offerType: item.offerType ?? null,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildRetentionOfferDraft(item, form, canApproveCommercial) {
+  return {
+    id: `draft-offer-${item.id}`,
+    kind: "offer",
+    title: form.title.trim(),
+    owner: form.owner.trim(),
+    dueDate: formatDraftDate(form.dueDate),
+    nextStep: form.nextStep.trim(),
+    potentialValueLabel: getPotentialValueLabel(item),
+    reason: item.reason ?? item.title,
+    evidence: item.evidence ?? [],
+    offerType: item.offerType,
+    approvalState: getDraftApprovalState(item, canApproveCommercial),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function sortRetentionDrafts(drafts) {
+  return [...drafts].sort((left, right) => {
+    const leftDate = new Date(left.createdAt || 0).getTime();
+    const rightDate = new Date(right.createdAt || 0).getTime();
+    return rightDate - leftDate;
+  });
+}
+
+function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+  const item = target?.item ?? null;
+  const actionLabel =
+    target?.kind === "opportunity"
+      ? (item?.actionLabel ?? "Pursue")
+      : target?.kind === "growth"
+        ? "Plan Pitch"
+        : "Review";
+
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        {item && (
+          <>
+            <SheetHeader>
+              <SheetTitle>{actionLabel} draft plan</SheetTitle>
+              <SheetDescription>
+                AI suggests the next growth or retention move here. Review the draft before it
+                becomes an internal plan item.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-5 py-5">
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  {item.category ? <AreaBadge area={item.category} /> : null}
+                  {item.priority ? <PriorityBadge priority={item.priority} /> : null}
+                  {item.offerType ? <OfferTypeBadge type={item.offerType} /> : null}
+                  {item.confidence ? <ConfidenceBadge confidence={item.confidence} /> : null}
+                  <ApprovalPill
+                    required={Boolean(item.approvalRequired)}
+                    approverRole={item.approverRole}
+                  />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">{item.title ?? item.service}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {item.reason ?? item.nextStep}
+                  </p>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                  <MiniStat label="Potential value" value={getPotentialValueLabel(item)} />
+                  <MiniStat label="Next step" value={item.nextStep} />
+                </div>
+              </div>
+
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-plan-title">Title</Label>
+                  <Input
+                    id="retention-plan-title"
+                    value={form.title}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, title: event.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-plan-owner">Owner</Label>
+                    <Input
+                      id="retention-plan-owner"
+                      value={form.owner}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, owner: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-plan-due-date">Due date</Label>
+                    <Input
+                      id="retention-plan-due-date"
+                      type="date"
+                      value={form.dueDate}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, dueDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-plan-next-step">Next step</Label>
+                  <Textarea
+                    id="retention-plan-next-step"
+                    rows={4}
+                    value={form.nextStep}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, nextStep: event.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Evidence
+                </p>
+                <div className="space-y-3">
+                  {(item.evidence ?? []).map((entry, index) => (
+                    <div
+                      key={`${entry.source}-${index}`}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          {entry.sourceType}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                      </div>
+                      <p className="text-sm font-medium">{entry.source}</p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {entry.excerpt}
+                      </p>
+                      <p className="text-[11px] text-foreground">{entry.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <SheetFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={onConfirm}
+                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+              >
+                Save draft plan
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function RetentionOfferReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        {target && (
+          <>
+            <SheetHeader>
+              <SheetTitle>Create draft offer</SheetTitle>
+              <SheetDescription>
+                Review the recommended offer, adjust the internal draft, and mark any approval
+                dependency before it moves forward.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-5 py-5">
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <OfferTypeBadge type={target.offerType} />
+                  <ConfidenceBadge confidence={target.confidence} />
+                  <ApprovalPill
+                    required={Boolean(target.approvalRequired)}
+                    approverRole={target.approverRole}
+                  />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">{target.title}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{target.reason}</p>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-3 text-xs">
+                  <MiniStat label="Potential value" value={getPotentialValueLabel(target)} />
+                  <MiniStat label="Allowed offer" value={target.allowedValue} />
+                </div>
+              </div>
+
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-offer-title">Offer title</Label>
+                  <Input
+                    id="retention-offer-title"
+                    value={form.title}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, title: event.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-offer-owner">Owner</Label>
+                    <Input
+                      id="retention-offer-owner"
+                      value={form.owner}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, owner: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="retention-offer-due-date">Due date</Label>
+                    <Input
+                      id="retention-offer-due-date"
+                      type="date"
+                      value={form.dueDate}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, dueDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="retention-offer-next-step">Next step</Label>
+                  <Textarea
+                    id="retention-offer-next-step"
+                    rows={4}
+                    value={form.nextStep}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, nextStep: event.target.value }))
+                    }
+                  />
+                </div>
+
+                {target.approvalRequired && (
+                  <div className="rounded-xl border border-warn/30 bg-warn/5 p-4">
+                    <p className="text-sm font-semibold text-warn">
+                      Pending {target.approverRole ?? "Head of KAM"} approval
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      This draft can be created by the KAM, but it should not become a final
+                      client-facing offer until the required approver reviews it.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Evidence
+                </p>
+                <div className="space-y-3">
+                  {(target.evidence ?? []).map((entry, index) => (
+                    <div
+                      key={`${entry.source}-${index}`}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          {entry.sourceType}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                      </div>
+                      <p className="text-sm font-medium">{entry.source}</p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {entry.excerpt}
+                      </p>
+                      <p className="text-[11px] text-foreground">{entry.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <SheetFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={onConfirm}
+                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+              >
+                Create draft offer
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
   );
 }
 /* ============================== TAB 1: Overview (KYC) ============================== */
@@ -3083,11 +4123,12 @@ function buildDefaultSections(area, existingMetrics) {
   }));
 }
 function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const editable = getRolePermissions(profile?.role).write;
   const editorUser = profile?.name ?? "Unknown";
   const router = useRouter();
   const queryClient = useQueryClient();
+  const saveActivityScoreSnapshot = useServerFn(upsertActivityScoreSnapshotServer);
 
   const [sections, setSections] = useState(() => {
     if (block.kpiData) return block.kpiData;
@@ -3175,6 +4216,17 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         )
         .filter(Boolean);
       await updateHealthBlock(accountId, area, newScore, metricUpdates, sections);
+      await saveActivityScoreSnapshot({
+        data: {
+          authAccessToken: session?.access_token ?? "",
+          accountId,
+          parameter: scoreAreaToParameter(area),
+          metric: title,
+          score: newScore,
+          source: "kpi_editor",
+          notes: `Snapshot captured from KPI editor by ${editorUser}.`,
+        },
+      });
       await logAccountChanges(
         accountId,
         [
@@ -3506,8 +4558,18 @@ function ResourceHealthBlock({ account, onExpand }) {
   );
 }
 /* ============================== TAB 3: Activity to Increase Score ============================== */
-function ActivityTab({ account, opportunities }) {
+function ActivityTab({ account, opportunities, escalations }) {
   const { profile } = useAuth();
+  if (account) {
+    return (
+      <ActivityTabPlanner
+        account={account}
+        opportunities={opportunities}
+        escalations={escalations}
+        profile={profile}
+      />
+    );
+  }
   const editable = getRolePermissions(profile?.role).write;
   const ragColor = { R: "bg-crit", A: "bg-warn", G: "bg-success" };
   const areas = ["Profit", "Project", "Resource", "Financial", "Relationship"];
@@ -3619,7 +4681,7 @@ function ActivityTab({ account, opportunities }) {
         <div className="px-6 py-4 border-b flex items-center justify-between">
           <div>
             <h3 className="text-sm font-bold">
-              Extract Action Items from Meeting Notes to Increase Score
+              Meeting Insights to Improve Account Score
             </h3>
             <p className="text-[11px] text-muted-foreground">
               Auto-extracted from the last 5 meeting transcripts - accept to push into the
@@ -3706,7 +4768,6 @@ function ActivityTab({ account, opportunities }) {
               <th className="px-6 py-3">Due</th>
               <th className="px-6 py-3">Status</th>
               <th className="px-6 py-3">RAG</th>
-              <th className="px-6 py-3 text-right">Expected Lift</th>
             </tr>
           </thead>
           <tbody className="divide-y">
@@ -3735,9 +4796,6 @@ function ActivityTab({ account, opportunities }) {
                     <td className="px-6 py-3">
                       <span className={`inline-block size-2.5 rounded-full ${ragColor[a.rag]}`} />
                     </td>
-                    <td className="px-6 py-3 text-xs text-right font-semibold text-success">
-                      {a.expectedLift}
-                    </td>
                   </tr>
                 )),
             )}
@@ -3747,9 +4805,3523 @@ function ActivityTab({ account, opportunities }) {
     </div>
   );
 }
-/* ============================== TAB 4: Retention VS Growth ============================== */
-function RetentionGrowthTab({ account, escalations = [] }) {
+
+function OpportunitiesTab({ account, opportunities, escalations }) {
   const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const queryClient = useQueryClient();
+  const syncSummaryOpportunities = useServerFn(syncSummaryOpportunitiesServer);
+  const { data: scoreHistory = [] } = useQuery({
+    queryKey: ["activity-score-history", account.id],
+    queryFn: () => fetchActivityScoreHistory(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: thresholdOverrides = [] } = useQuery({
+    queryKey: ["activity-threshold-overrides", account.id],
+    queryFn: () => fetchActivityRuleThresholdOverrides(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: savedRuleActivities = [] } = useQuery({
+    queryKey: ["activity-rule-activities", account.id],
+    queryFn: () => fetchActivityRuleActivities(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: accountOpenTasks = [] } = useQuery({
+    queryKey: ["account-open-action-items", account.id],
+    queryFn: () => fetchKamTasks({ accountId: account.id }),
+    enabled: Boolean(account.id),
+  });
+  const hasSummarySources = Boolean(
+    account.linkedinSummary?.trim() || account.websiteSummary?.trim(),
+  );
+  const summarySourceKey = [
+    account.linkedinSummaryUpdatedAt ?? "",
+    account.websiteSummaryUpdatedAt ?? "",
+    account.linkedinSummary?.length ?? 0,
+    account.websiteSummary?.length ?? 0,
+  ].join("|");
+  const {
+    data: summaryOpportunitySync,
+    isFetching: syncingSummaryOpportunities,
+    error: summaryOpportunityError,
+  } = useQuery({
+    queryKey: ["summary-opportunity-sync", account.id, summarySourceKey],
+    queryFn: () => syncSummaryOpportunities({ data: { accountId: account.id } }),
+    enabled: Boolean(account.id && hasSummarySources),
+    staleTime: 60 * 60 * 1000,
+  });
+  const model = useMemo(
+    () =>
+      buildActivityTabModel({
+        account,
+        opportunities,
+        escalations,
+        scoreHistory,
+        thresholdOverrides,
+      }),
+    [account, escalations, opportunities, scoreHistory, thresholdOverrides],
+  );
+
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [rejectTarget, setRejectTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [opportunityStatus, setOpportunityStatus] = useState("");
+  const [pursuingOpportunityId, setPursuingOpportunityId] = useState("");
+  const [opportunityPage, setOpportunityPage] = useState(1);
+
+  useEffect(() => {
+    setResolvedItems({});
+    setEvidenceTarget(null);
+    setRejectTarget(null);
+    setRejectReason("");
+    setOpportunityStatus("");
+    setPursuingOpportunityId("");
+    setOpportunityPage(1);
+  }, [account.id]);
+
+  useEffect(() => {
+    if (!summaryOpportunitySync?.syncedAt) return;
+    queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+  }, [account.id, queryClient, summaryOpportunitySync?.syncedAt]);
+
+  const persistedOpportunityRefs = useMemo(
+    () =>
+      new Set(
+        savedRuleActivities
+          .filter((activity) => activity.sourceType === "opportunity")
+          .map((activity) => activity.sourceRef)
+          .filter((sourceRef) => sourceRef && sourceRef !== "manual"),
+      ),
+    [savedRuleActivities],
+  );
+  const isResolved = useCallback(
+    (item) =>
+      Boolean(
+        resolvedItems[item.id] ||
+          resolvedItems[getSuggestionSourceRef(item)] ||
+          persistedOpportunityRefs.has(getSuggestionSourceRef(item)),
+      ),
+    [persistedOpportunityRefs, resolvedItems],
+  );
+  const openTaskTitleKeys = useMemo(
+    () => new Set((accountOpenTasks ?? []).map((task) => normalizeActivityText(task.title))),
+    [accountOpenTasks],
+  );
+  const activeOpportunities = model.opportunities.filter(
+    (item) => !isResolved(item) && !openTaskTitleKeys.has(normalizeActivityText(item.title)),
+  );
+  const opportunityPageSize = 5;
+  const opportunityPageCount = Math.max(1, Math.ceil(activeOpportunities.length / opportunityPageSize));
+  const safeOpportunityPage = Math.min(opportunityPage, opportunityPageCount);
+  const opportunityPageStart = activeOpportunities.length
+    ? (safeOpportunityPage - 1) * opportunityPageSize
+    : 0;
+  const pagedOpportunities = activeOpportunities.slice(
+    opportunityPageStart,
+    opportunityPageStart + opportunityPageSize,
+  );
+
+  useEffect(() => {
+    setOpportunityPage(1);
+  }, [account.id, activeOpportunities.length]);
+
+  const { mutate: pursueOpportunityActionItem } = useMutation({
+    mutationFn: (opportunity) =>
+      createAccountActionItemTask({
+        accountId: account.id,
+        title: opportunity.title,
+        description: opportunity.nextStep,
+        reason: opportunity.reason ?? opportunity.nextStep,
+        source: `Opportunity: ${opportunity.source}`,
+        healthArea: opportunity.healthArea,
+        expectedLift:
+          opportunity.expectedLift ?? `+${formatCurrency(opportunity.potentialValue ?? 0)} potential`,
+      }),
+    onMutate: (opportunity) => {
+      setPursuingOpportunityId(opportunity.id);
+      setOpportunityStatus("");
+    },
+    onSuccess: (_, opportunity) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [opportunity.id]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+        [getSuggestionSourceRef(opportunity)]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      setOpportunityStatus(`Added "${opportunity.title}" to My Open Action Items.`);
+      queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
+      queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+    },
+    onError: (error) => {
+      setOpportunityStatus(error?.message ?? "Could not add this opportunity to action items.");
+    },
+    onSettled: () => {
+      setPursuingOpportunityId("");
+    },
+  });
+
+  const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
+    mutationFn: ({ target, reason }) =>
+      rejectActivityRuleSuggestion(
+        buildRejectedRuleActivityInput({
+          accountId: account.id,
+          target,
+          reason,
+          reviewer: profile?.name ?? "Unknown",
+        }),
+      ),
+    onSuccess: (_, { target, reason }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [getSuggestionSourceRef(target)]: {
+          status: "rejected",
+          reason,
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      setOpportunityStatus(`Rejected "${target.title}".`);
+      setRejectTarget(null);
+      setRejectReason("");
+    },
+  });
+
+  function confirmReject() {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
+  }
+
+  return (
+    <div className="space-y-6">
+      {role === "KAM" && !isAssignedKam && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only opportunities for this account</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            Only the assigned KAM can pursue or reject opportunity suggestions here.
+          </p>
+        </div>
+      )}
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <div className="flex items-start gap-3">
+            <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+              <Lightbulb className="size-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
+              <p className="text-[11px] text-muted-foreground">
+                Client-specific opportunities sourced from LinkedIn summary, website summary,
+                account context, escalation signals, retention/growth context, and meeting notes.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-col items-start md:items-end gap-1 self-start md:self-auto">
+            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              {activeOpportunities.length} open
+            </span>
+            {syncingSummaryOpportunities && (
+              <span className="text-[10px] font-semibold text-accent">
+                Scanning summaries...
+              </span>
+            )}
+          </div>
+        </div>
+
+        {(opportunityStatus || summaryOpportunityError) && (
+          <div className="px-4 md:px-6 py-2 border-b">
+            <p
+              className={`text-[11px] font-medium ${
+                summaryOpportunityError ? "text-crit" : "text-success"
+              }`}
+            >
+              {summaryOpportunityError?.message ?? opportunityStatus}
+            </p>
+          </div>
+        )}
+
+        {activeOpportunities.length ? (
+          <ul className="divide-y">
+            {pagedOpportunities.map((opportunity) => (
+              <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
+                      <PriorityBadge priority={opportunity.priority} />
+                      <ConfidenceBadge confidence={opportunity.confidence} />
+                      <AreaBadge area={opportunity.healthArea} />
+                      {opportunity.approvalRequired && (
+                        <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                          Approval required
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {opportunity.source} - {opportunity.signalDate}
+                    </p>
+                    <ScoreRuleDetails item={opportunity} />
+                    <EvidencePreview
+                      evidence={opportunity.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: opportunity.title,
+                          subtitle: `${opportunity.source} - ${opportunity.healthArea}`,
+                          evidence: opportunity.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      disabled={!canAct || pursuingOpportunityId === opportunity.id}
+                      onClick={() => pursueOpportunityActionItem(opportunity)}
+                    >
+                      {pursuingOpportunityId === opportunity.id && (
+                        <Loader2 className="size-3.5 animate-spin mr-1" />
+                      )}
+                      Pursue
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!canAct || pursuingOpportunityId === opportunity.id}
+                      onClick={() => setRejectTarget({ ...opportunity, sourceKind: "opportunity" })}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No open opportunities are active in this planning cycle.
+          </p>
+        )}
+        {activeOpportunities.length > opportunityPageSize && (
+          <PaginatedListFooter
+            page={safeOpportunityPage}
+            pageSize={opportunityPageSize}
+            total={activeOpportunities.length}
+            onPageChange={setOpportunityPage}
+            itemLabel="opportunities"
+          />
+        )}
+      </div>
+
+      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+
+      <RejectRecommendationDialog
+        target={rejectTarget}
+        value={rejectReason}
+        onChange={setRejectReason}
+        onClose={() => {
+          setRejectTarget(null);
+          setRejectReason("");
+        }}
+        onConfirm={confirmReject}
+        isSaving={rejectingRuleActivity}
+      />
+    </div>
+  );
+}
+
+function PaginatedListFooter({ page, pageSize, total, onPageChange, itemLabel = "items" }) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const start = total ? (safePage - 1) * pageSize + 1 : 0;
+  const end = Math.min(safePage * pageSize, total);
+
+  return (
+    <div className="px-4 md:px-6 py-3 border-t bg-muted/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <p className="text-[11px] text-muted-foreground">
+        Showing {start}-{end} of {total} {itemLabel}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={safePage <= 1}
+          onClick={() => onPageChange((current) => Math.max(1, current - 1))}
+        >
+          Previous
+        </Button>
+        <span className="text-[11px] font-semibold text-muted-foreground">
+          Page {safePage} of {pageCount}
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={safePage >= pageCount}
+          onClick={() => onPageChange((current) => Math.min(pageCount, current + 1))}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
+  const { session } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const canApproveEvidence = role === "Head of KAM" || role === "CEO";
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const saveActivityScoreSnapshot = useServerFn(upsertActivityScoreSnapshotServer);
+  const { data: scoreHistory = [] } = useQuery({
+    queryKey: ["activity-score-history", account.id],
+    queryFn: () => fetchActivityScoreHistory(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: thresholdOverrides = [] } = useQuery({
+    queryKey: ["activity-threshold-overrides", account.id],
+    queryFn: () => fetchActivityRuleThresholdOverrides(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: savedRuleActivities = [] } = useQuery({
+    queryKey: ["activity-rule-activities", account.id],
+    queryFn: () => fetchActivityRuleActivities(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { data: stagedAiRecommendationRows } = useQuery({
+    queryKey: ["staged-ai-recommendations", account.id],
+    queryFn: () =>
+      fetchStagedAiRecommendations({
+        accountId: account.id,
+      }),
+    enabled: Boolean(account.id),
+  });
+  const { data: meetingInsightActionStates } = useQuery({
+    queryKey: ["meeting-insight-action-states", account.id],
+    queryFn: () => fetchMeetingInsightActionStates({ accountId: account.id }),
+    enabled: Boolean(account.id),
+  });
+  const { data: accountOpenTasks } = useQuery({
+    queryKey: ["account-open-action-items", account.id],
+    queryFn: () => fetchKamTasks({ accountId: account.id }),
+    enabled: Boolean(account.id),
+  });
+  const model = useMemo(
+    () =>
+      buildActivityTabModel({
+        account,
+        opportunities,
+        escalations,
+        scoreHistory,
+        thresholdOverrides,
+      }),
+    [account, escalations, opportunities, scoreHistory, thresholdOverrides],
+  );
+
+  const [resolvedItems, setResolvedItems] = useState({});
+  const [reviewTarget, setReviewTarget] = useState(null);
+  const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
+  const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [evidenceSubmitTarget, setEvidenceSubmitTarget] = useState(null);
+  const [evidenceForm, setEvidenceForm] = useState(createInitialEvidenceForm(null, profile?.name));
+  const [rejectTarget, setRejectTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [firefliesActions, setFirefliesActions] = useState([]);
+  const [firefliesStatus, setFirefliesStatus] = useState("");
+  const [activityAreaFilter, setActivityAreaFilter] = useState("All");
+  const [expectedLiftSort, setExpectedLiftSort] = useState("desc");
+  const [activitySortMode, setActivitySortMode] = useState("score");
+  const [activityPage, setActivityPage] = useState(1);
+  const [activityPageSize, setActivityPageSize] = useState(10);
+  const [meetingInsightPage, setMeetingInsightPage] = useState(1);
+  const [activityStatus, setActivityStatus] = useState("");
+  const [aiSuggestions, setAiSuggestions] = useState([]);
+  const [selectedAiRecommendations, setSelectedAiRecommendations] = useState([]);
+  const [aiSuggestionRequested, setAiSuggestionRequested] = useState(false);
+  const [addingAiSuggestionId, setAddingAiSuggestionId] = useState("");
+  const [aiSuggestionStatus, setAiSuggestionStatus] = useState("");
+  const [aiSuggestionWarning, setAiSuggestionWarning] = useState("");
+  const [aiSuggestionError, setAiSuggestionError] = useState("");
+  const [aiRecommendationSheetOpen, setAiRecommendationSheetOpen] = useState(false);
+  const [scheduleTarget, setScheduleTarget] = useState(null);
+  const [scheduleForm, setScheduleForm] = useState(null);
+
+  const { mutate: rerunFirefliesExtraction, isPending: extractingFireflies } = useMutation({
+    mutationFn: () =>
+      fetchFirefliesRequiredActionItems({
+        data: {
+          accountId: account.id,
+          limit: 5,
+          daysBack: 60,
+        },
+      }),
+    onSuccess: (result) => {
+      setFirefliesActions([]);
+      setFirefliesStatus(result.status ?? "Fireflies extraction completed.");
+      queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+    },
+    onError: (error) => {
+      setFirefliesStatus(error?.message ?? "Fireflies extraction failed.");
+    },
+  });
+
+  const { mutate: requestAiSuggestions, isPending: generatingAiSuggestions } = useMutation({
+    mutationFn: () => fetchKamAiSuggestions({ data: { accountId: account.id } }),
+    onMutate: () => {
+      setAiSuggestionRequested(true);
+      setAiSuggestionError("");
+      setAiSuggestionWarning("");
+      setAiSuggestionStatus("");
+    },
+    onSuccess: (result) => {
+      const uniqueSuggestions = removeDuplicateAiSuggestions(
+        result?.suggestions ?? [],
+        activityRows,
+      )
+        .filter(
+          (suggestion) =>
+            !selectedAiRecommendations.some(
+              (selected) =>
+                normalizeActivityText(selected.title) === normalizeActivityText(suggestion.title),
+            ),
+        )
+        .slice(0, 6);
+      setAiSuggestions(uniqueSuggestions);
+
+      if (result?.fallback) {
+        setAiSuggestionWarning(
+          result.status || "OpenAI was unavailable; showing local fallback suggestions.",
+        );
+        return;
+      }
+
+      setAiSuggestionStatus(
+        result?.status ??
+          (uniqueSuggestions.length
+            ? `${uniqueSuggestions.length} best AI recommendation${uniqueSuggestions.length === 1 ? "" : "s"} generated for ${account.name}.`
+            : "No strong AI recommendations found for this account."),
+      );
+    },
+    onError: (error) => {
+      setAiSuggestions([]);
+      setAiSuggestionError(error?.message ?? "AI suggestions could not be generated.");
+    },
+  });
+
+  const { mutate: saveRuleActivity, isPending: savingRuleActivity } = useMutation({
+    mutationFn: ({ target, form }) =>
+      createActivityRuleActivity(
+        buildActivityRuleActivityInput({
+          accountId: account.id,
+          target,
+          form,
+        }),
+      ),
+    onSuccess: (_, { target }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [target.item.id]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      router.invalidate();
+      closeReview();
+    },
+  });
+
+  const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
+    mutationFn: ({ target, reason }) =>
+      rejectActivityRuleSuggestion(
+        buildRejectedRuleActivityInput({
+          accountId: account.id,
+          target,
+          reason,
+          reviewer: profile?.name ?? "Unknown",
+        }),
+      ),
+    onSuccess: (_, { target, reason }) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [getSuggestionSourceRef(target)]: {
+          status: "rejected",
+          reason,
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      setRejectTarget(null);
+      setRejectReason("");
+    },
+  });
+
+  const { mutate: submitEvidence, isPending: submittingEvidence } = useMutation({
+    mutationFn: ({ row, form }) =>
+      submitActivityRuleEvidence({
+        ruleActivityId: row.dbId,
+        submittedBy: profile?.name ?? "Unknown",
+        evidenceQuality: form.evidenceQuality,
+        title: form.title.trim(),
+        notes: form.notes.trim(),
+        artifactUrl: form.artifactUrl.trim(),
+        checklist: buildEvidenceChecklistPayload(form.evidenceQuality),
+        requestedLift: row.expectedLift,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      setEvidenceSubmitTarget(null);
+      setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
+    },
+  });
+
+  const { mutate: validateEvidence, isPending: validatingEvidence } = useMutation({
+    mutationFn: (row) =>
+      reviewActivityRuleEvidence({
+        evidenceId: row.latestPendingEvidence.id,
+        ruleActivityId: row.dbId,
+        reviewer: profile?.name ?? "Unknown",
+        reviewStatus: "Approved",
+        approvedLift: row.expectedLift,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      router.invalidate();
+    },
+  });
+
+  const { mutate: markActivityDone, isPending: completingActivity } = useMutation({
+    mutationFn: (payload) => completeActivityRow(payload),
+    onSuccess: (result) => {
+      setActivityStatus(result?.message ?? "Activity marked done.");
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setActivityStatus(error?.message ?? "Could not mark this activity done.");
+    },
+  });
+
+  const { mutate: addAiRecommendationActionItem } = useMutation({
+    mutationFn: async (suggestion) => {
+      const task = await createAccountActionItemTask({
+        accountId: account.id,
+        title: suggestion.title,
+        description: suggestion.description,
+        reason: suggestion.reason,
+        source: suggestion.sourceSummary,
+        healthArea: suggestion.healthArea,
+        expectedLift: suggestion.expectedLift,
+      });
+      await updateStagedAiRecommendationStatus({
+        id: suggestion.id,
+        status: "converted_to_action",
+      });
+      return task;
+    },
+    onMutate: (suggestion) => {
+      setAddingAiSuggestionId(suggestion.id);
+      setAiSuggestionError("");
+      setAiSuggestionStatus("");
+    },
+    onSuccess: (_, suggestion) => {
+      setSelectedAiRecommendations((current) =>
+        current.filter((item) => item.id !== suggestion.id),
+      );
+      setAiSuggestionStatus(`Added "${suggestion.title}" to My Open Action Items.`);
+      setAiSuggestionWarning("");
+      setAiSuggestionError("");
+      queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
+      if (!suggestion.localOnly) {
+        queryClient.invalidateQueries({
+          queryKey: ["staged-ai-recommendations", account.id],
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+    },
+    onError: (error) => {
+      setAiSuggestionError(error?.message ?? "AI recommendation could not be added.");
+    },
+    onSettled: () => {
+      setAddingAiSuggestionId("");
+    },
+  });
+
+  const { mutate: stageAiRecommendation } = useMutation({
+    mutationFn: (suggestion) =>
+      stageAccountAiRecommendation({
+        accountId: account.id,
+        requestedBy: profile?.id,
+        suggestion,
+      }),
+    onMutate: (suggestion) => {
+      setAddingAiSuggestionId(suggestion.id);
+      setAiSuggestionError("");
+      setAiSuggestionWarning("");
+      setAiSuggestionStatus("");
+    },
+    onSuccess: (stagedRecommendation, suggestion) => {
+      setAiSuggestions((current) => current.filter((item) => item.id !== suggestion.id));
+      setSelectedAiRecommendations((current) => {
+        if (
+          current.some(
+            (item) =>
+              item.id === stagedRecommendation.id ||
+              normalizeActivityText(item.title) === normalizeActivityText(stagedRecommendation.title),
+          )
+        ) {
+          return current;
+        }
+        return [...current, stagedRecommendation];
+      });
+      setAiSuggestionStatus(
+        `Selected "${stagedRecommendation.title}". Add it to action items when ready.`,
+      );
+      if (!stagedRecommendation.localOnly) {
+        queryClient.invalidateQueries({
+          queryKey: ["staged-ai-recommendations", account.id],
+        });
+      }
+    },
+    onError: (error) => {
+      setAiSuggestionError(error?.message ?? "AI recommendation could not be staged.");
+    },
+    onSettled: () => {
+      setAddingAiSuggestionId("");
+    },
+  });
+
+  const { mutate: dismissStagedAiRecommendation } = useMutation({
+    mutationFn: (suggestion) =>
+      updateStagedAiRecommendationStatus({
+        id: suggestion.id,
+        status: "dismissed",
+      }),
+    onMutate: (suggestion) => {
+      setAddingAiSuggestionId(suggestion.id);
+      setAiSuggestionError("");
+      setAiSuggestionStatus("");
+    },
+    onSuccess: (_, suggestion) => {
+      setSelectedAiRecommendations((current) =>
+        current.filter((item) => item.id !== suggestion.id),
+      );
+      setAiSuggestionStatus(`Removed "${suggestion.title}" from selected recommendations.`);
+      if (!suggestion.localOnly) {
+        queryClient.invalidateQueries({
+          queryKey: ["staged-ai-recommendations", account.id],
+        });
+      }
+    },
+    onError: (error) => {
+      setAiSuggestionError(error?.message ?? "AI recommendation could not be removed.");
+    },
+    onSettled: () => {
+      setAddingAiSuggestionId("");
+    },
+  });
+
+  const { mutate: addMeetingInsightActionItem, isPending: addingMeetingInsight } = useMutation({
+    mutationFn: async (item) => {
+      const task = await createAccountActionItemTask({
+        accountId: account.id,
+        title: item.title,
+        description: item.reason ?? item.nextStep ?? "",
+        reason: item.nextStep,
+        source: item.meetingTitle ? `Meeting Insight: ${item.meetingTitle}` : "Meeting Insight",
+        healthArea: item.healthArea,
+        expectedLift: item.expectedLift,
+      });
+      await markMeetingInsightActionItemState({
+        accountId: account.id,
+        requestedBy: profile?.id,
+        item,
+        sourceRef: getSuggestionSourceRef(item),
+        status: "converted_to_action",
+      });
+      return task;
+    },
+    onMutate: () => {
+      setFirefliesStatus("");
+    },
+    onSuccess: (_, item) => {
+      setResolvedItems((current) => ({
+        ...current,
+        [item.id]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+        [getSuggestionSourceRef(item)]: {
+          status: "saved",
+          reviewedAt: new Date().toISOString(),
+        },
+      }));
+      setFirefliesStatus(`Added "${item.title}" to My Open Action Items.`);
+      queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
+      queryClient.invalidateQueries({ queryKey: ["meeting-insight-action-states", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+    },
+    onError: (error) => {
+      setFirefliesStatus(error?.message ?? "Meeting insight could not be added.");
+    },
+  });
+
+  useEffect(() => {
+    setResolvedItems({});
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+    setEvidenceTarget(null);
+    setEvidenceSubmitTarget(null);
+    setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
+    setRejectTarget(null);
+    setRejectReason("");
+    setFirefliesActions([]);
+    setFirefliesStatus("");
+    setActivityAreaFilter("All");
+    setExpectedLiftSort("desc");
+    setActivitySortMode("score");
+    setActivityPage(1);
+    setActivityPageSize(10);
+    setMeetingInsightPage(1);
+    setActivityStatus("");
+    setAiSuggestions([]);
+    setSelectedAiRecommendations([]);
+    setAiSuggestionRequested(false);
+    setAddingAiSuggestionId("");
+    setAiSuggestionStatus("");
+    setAiSuggestionWarning("");
+    setAiSuggestionError("");
+    setScheduleTarget(null);
+    setScheduleForm(null);
+  }, [account.id, profile?.name]);
+
+  useEffect(() => {
+    if (!stagedAiRecommendationRows) return;
+    setSelectedAiRecommendations((current) => {
+      const persistedRows = stagedAiRecommendationRows;
+      const persistedTitleKeys = new Set(
+        persistedRows.map((item) => normalizeActivityText(item.title)),
+      );
+      const localRows = current.filter(
+        (item) => item.localOnly && !persistedTitleKeys.has(normalizeActivityText(item.title)),
+      );
+      const nextRows = [...persistedRows, ...localRows];
+      const currentKey = current.map((item) => `${item.id}:${item.status ?? ""}`).join("|");
+      const nextKey = nextRows.map((item) => `${item.id}:${item.status ?? ""}`).join("|");
+      return currentKey === nextKey ? current : nextRows;
+    });
+  }, [stagedAiRecommendationRows]);
+
+  const activeScoreMetricRefs = useMemo(
+    () => new Set(model.scoreMetricActivities.map((item) => getSuggestionSourceRef(item))),
+    [model.scoreMetricActivities],
+  );
+  const activeSavedRuleActivities = useMemo(
+    () =>
+      savedRuleActivities.filter((activity) => {
+        if (activity.status === "Rejected" || activity.status === "Closed") return false;
+        if (activity.sourceType === "opportunity") return false;
+        if (isRetentionGrowthActivityArea(activity.parameter)) return false;
+        if (activity.sourceType === "score_metric") {
+          return activeScoreMetricRefs.has(activity.sourceRef);
+        }
+        return true;
+      }),
+    [activeScoreMetricRefs, savedRuleActivities],
+  );
+  const persistedSourceRefs = useMemo(
+    () =>
+      new Set(
+        activeSavedRuleActivities
+          .map((activity) => activity.sourceRef)
+          .filter((sourceRef) => sourceRef && sourceRef !== "manual"),
+      ),
+    [activeSavedRuleActivities],
+  );
+  const isResolved = useCallback(
+    (item) =>
+      Boolean(
+        resolvedItems[item.id] ||
+          resolvedItems[getSuggestionSourceRef(item)] ||
+          persistedSourceRefs.has(getSuggestionSourceRef(item)),
+      ),
+    [persistedSourceRefs, resolvedItems],
+  );
+  const activeOpportunities = [];
+  const activeRagRecommendations = [];
+  const showLegacyActivityPanels = Boolean(account.__legacyActivityPanels);
+  const savedMeetingActions = useMemo(
+    () =>
+      activeSavedRuleActivities
+        .filter((activity) => activity.sourceType === "fireflies_meeting")
+        .map(mapPersistedMeetingActivityToCard),
+    [activeSavedRuleActivities],
+  );
+  const scoreFirefliesActions = useMemo(
+    () => firefliesActions.filter((item) => !isRetentionGrowthActivityArea(item.healthArea)),
+    [firefliesActions],
+  );
+  const mergedMeetingActions = useMemo(() => {
+    const actionsById = new Map();
+    [...model.meetingActions, ...scoreFirefliesActions, ...savedMeetingActions].forEach((item) => {
+      actionsById.set(getSuggestionSourceRef(item), item);
+    });
+    return [...actionsById.values()];
+  }, [model.meetingActions, savedMeetingActions, scoreFirefliesActions]);
+  const hiddenMeetingInsightRefs = useMemo(
+    () =>
+      new Set(
+        (meetingInsightActionStates ?? [])
+          .map((state) => state.sourceRef)
+          .filter((sourceRef) => Boolean(sourceRef)),
+      ),
+    [meetingInsightActionStates],
+  );
+  const openTaskTitleKeys = useMemo(
+    () => new Set((accountOpenTasks ?? []).map((task) => normalizeActivityText(task.title))),
+    [accountOpenTasks],
+  );
+  const activeMeetingActions = mergedMeetingActions.filter(
+    (item) => {
+      if (hiddenMeetingInsightRefs.has(getSuggestionSourceRef(item))) return false;
+      if (openTaskTitleKeys.has(normalizeActivityText(item.title))) return false;
+      return item.persisted || !isResolved(item);
+    },
+  );
+  const meetingInsightPageSize = 5;
+  const meetingInsightPageCount = Math.max(
+    1,
+    Math.ceil(activeMeetingActions.length / meetingInsightPageSize),
+  );
+  const safeMeetingInsightPage = Math.min(meetingInsightPage, meetingInsightPageCount);
+  const meetingInsightPageStart = activeMeetingActions.length
+    ? (safeMeetingInsightPage - 1) * meetingInsightPageSize
+    : 0;
+  const pagedMeetingActions = activeMeetingActions.slice(
+    meetingInsightPageStart,
+    meetingInsightPageStart + meetingInsightPageSize,
+  );
+
+  useEffect(() => {
+    setMeetingInsightPage(1);
+  }, [account.id, activeMeetingActions.length]);
+
+  const rawActivityRows = useMemo(() => {
+    const savedRows = activeSavedRuleActivities.map(mapPersistedRuleActivityToRow);
+    const visibleRows = model.activityRows.filter(
+      (row) => row.rowType === "existing" || !isResolved(row),
+    );
+    const firefliesRows = scoreFirefliesActions
+      .filter((item) => !isResolved(item))
+      .map((item) => mapMeetingActionToActivityRow(item, "meeting"));
+    return sortActivityRows([...savedRows, ...visibleRows, ...firefliesRows]);
+  }, [activeSavedRuleActivities, isResolved, model.activityRows, scoreFirefliesActions]);
+  const activityRows = useMemo(
+    () => groupDuplicateActivityRows(rawActivityRows),
+    [rawActivityRows],
+  );
+  const activityAreaOptions = useMemo(
+    () =>
+      ACTIVITY_TAB_AREAS.map((area) => {
+        const rows = activityRows.filter((row) => row.area === area);
+        return {
+          area,
+          count: rows.length,
+        };
+      }),
+    [activityRows],
+  );
+  const visibleActivityRows = useMemo(() => {
+    const filteredRows =
+      activityAreaFilter === "All"
+        ? activityRows
+        : activityRows.filter((row) => row.area === activityAreaFilter);
+    if (activitySortMode === "expectedLift") {
+      return sortActivityRowsByExpectedLift(filteredRows, expectedLiftSort);
+    }
+    return sortActivityRowsByLowestScore(filteredRows, account);
+  }, [account, activityAreaFilter, activityRows, activitySortMode, expectedLiftSort]);
+  const activityPageCount = Math.max(1, Math.ceil(visibleActivityRows.length / activityPageSize));
+  const safeActivityPage = Math.min(activityPage, activityPageCount);
+  const activityPageStart = visibleActivityRows.length
+    ? (safeActivityPage - 1) * activityPageSize
+    : 0;
+  const pagedActivityRows = visibleActivityRows.slice(
+    activityPageStart,
+    activityPageStart + activityPageSize,
+  );
+  const activityShowingStart = visibleActivityRows.length ? activityPageStart + 1 : 0;
+  const activityShowingEnd = Math.min(activityPageStart + activityPageSize, visibleActivityRows.length);
+
+  useEffect(() => {
+    setActivityPage(1);
+  }, [activityAreaFilter, activitySortMode, expectedLiftSort, activityPageSize, account.id]);
+
+  function generateAiSuggestions() {
+    setAiRecommendationSheetOpen(true);
+    requestAiSuggestions();
+  }
+
+  function acceptAiSuggestion(suggestion) {
+    if (!canAct) return;
+    stageAiRecommendation(suggestion);
+  }
+
+  function openReview(kind, item) {
+    setReviewTarget({ kind, item });
+    setReviewForm(createInitialReviewForm(item, profile?.name));
+  }
+
+  function closeReview() {
+    setReviewTarget(null);
+    setReviewForm(createInitialReviewForm(null, profile?.name));
+  }
+
+  function confirmReview() {
+    if (!reviewTarget) return;
+    saveRuleActivity({ target: reviewTarget, form: reviewForm });
+  }
+
+  function openEvidenceSubmit(row) {
+    setEvidenceSubmitTarget(row);
+    setEvidenceForm(createInitialEvidenceForm(row, profile?.name));
+  }
+
+  function confirmReject() {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
+  }
+
+  function toggleExpectedLiftSort() {
+    setActivitySortMode("expectedLift");
+    setExpectedLiftSort((current) => (current === "asc" ? "desc" : "asc"));
+  }
+
+  function openScheduleMeeting(row) {
+    const form = createMeetingScheduleForm(account, row, profile);
+    setScheduleTarget(row);
+    setScheduleForm(form);
+    setActivityStatus("");
+  }
+
+  function confirmScheduleMeeting() {
+    if (!scheduleTarget || !scheduleForm) return;
+    if (!scheduleForm.subject.trim() || !scheduleForm.date || !scheduleForm.time) {
+      setActivityStatus(
+        "Meeting details are incomplete or invalid. Please check date, time, attendee, and try again.",
+      );
+      return;
+    }
+    if (!scheduleForm.contactEmail.trim()) {
+      setActivityStatus("Contact email is required before scheduling.");
+      return;
+    }
+    if (!isValidEmailAddress(scheduleForm.contactEmail)) {
+      setActivityStatus(
+        "Meeting details are incomplete or invalid. Please check date, time, attendees, and try again.",
+      );
+      return;
+    }
+    const calendarUrl = buildGoogleCalendarTemplateUrl(scheduleForm);
+    if (typeof window !== "undefined") {
+      window.open(calendarUrl, "_blank", "noopener,noreferrer");
+    }
+    setActivityStatus("Google Calendar opened in a new tab with this meeting pre-filled.");
+    setScheduleTarget(null);
+    setScheduleForm(null);
+  }
+
+  async function completeActivityRow(row) {
+    const rowsToComplete = row.selectedRows ?? row.groupedRows ?? [row];
+    const scoreRows = rowsToComplete.filter((entry) => entry.sourceKind === "score_metric");
+
+    if (scoreRows.length) {
+      await completeScoreMetricRows({
+        account,
+        rows: scoreRows,
+        profile,
+        authAccessToken: session?.access_token ?? "",
+        saveActivityScoreSnapshot,
+        queryClient,
+        router,
+      });
+      setResolvedItems((current) => ({
+        ...current,
+        ...Object.fromEntries(scoreRows.map((entry) => [getSuggestionSourceRef(entry), true])),
+      }));
+    }
+
+    const savedRows = rowsToComplete.filter((entry) => entry.dbId);
+    await Promise.all(savedRows.map((entry) => markActivityRuleActivityDone(entry.dbId)));
+
+    const existingRows = rowsToComplete.filter(
+      (entry) => entry.sourceKind === "existing" && entry.sourceId,
+    );
+    await Promise.all(existingRows.map((entry) => markLegacyActivityDone(entry.sourceId)));
+
+    const transientRows = rowsToComplete.filter(
+      (entry) => !entry.dbId && entry.sourceKind !== "score_metric" && entry.sourceKind !== "existing",
+    );
+    await Promise.all(
+      transientRows.map(async (entry) => {
+        const created = await createActivityRuleActivity(
+          buildActivityRuleActivityInput({
+            accountId: account.id,
+            target: { kind: entry.sourceKind ?? "activity", item: entry },
+            form: {
+              title: entry.title,
+              owner: profile?.name ?? "KAM Person",
+              dueDate: getFutureDateInput(0),
+              nextStep: entry.nextStep ?? entry.reason ?? entry.title,
+            },
+          }),
+        );
+        await markActivityRuleActivityDone(created.id);
+      }),
+    );
+
+    setResolvedItems((current) => ({
+      ...current,
+      ...Object.fromEntries(rowsToComplete.map((entry) => [entry.id, true])),
+      ...Object.fromEntries(rowsToComplete.map((entry) => [getSuggestionSourceRef(entry), true])),
+    }));
+
+    return {
+      message:
+        scoreRows.length > 1
+          ? `Marked ${scoreRows.length} related Score Marking Matrics items checked.`
+          : "Activity marked done.",
+    };
+  }
+
+  return (
+    <div className="space-y-6">
+      {role === "KAM" && !isAssignedKam && (
+        <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
+          <p className="font-semibold text-warn">View-only planning surface for this account</p>
+          <p className="text-[12px] text-muted-foreground mt-1">
+            Only the assigned KAM can add, reject, or pursue score-improvement suggestions here.
+          </p>
+        </div>
+      )}
+
+      {showLegacyActivityPanels && (
+        <>
+          <div className="bg-card border rounded-xl overflow-hidden">
+            <div className="px-4 md:px-6 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+              <div className="flex items-start gap-3">
+                <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                  <Lightbulb className="size-4" />
+                </span>
+                <div>
+                  <h3 className="text-sm font-bold">Opportunities related to {account.name}</h3>
+                  <p className="text-[11px] text-muted-foreground">
+                    Client-specific opportunities sourced from account context, score gaps,
+                    escalation signals, and Fireflies-derived meeting notes.
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground self-start md:self-auto">
+                {activeOpportunities.length} open
+              </span>
+            </div>
+
+            {activeOpportunities.length ? (
+              <ul className="divide-y">
+                {activeOpportunities.map((opportunity) => (
+                  <li key={opportunity.id} className="px-4 md:px-6 py-4 space-y-3">
+                    <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                      <div className="space-y-2 min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold leading-snug">{opportunity.title}</p>
+                          <PriorityBadge priority={opportunity.priority} />
+                          <ConfidenceBadge confidence={opportunity.confidence} />
+                          <AreaBadge area={opportunity.healthArea} />
+                          {opportunity.approvalRequired && (
+                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                              Approval required
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {opportunity.source} · {opportunity.signalDate}
+                        </p>
+                        <ScoreRuleDetails item={opportunity} />
+                        <EvidencePreview
+                          evidence={opportunity.evidence}
+                          onView={() =>
+                            setEvidenceTarget({
+                              title: opportunity.title,
+                              subtitle: `${opportunity.source} · ${opportunity.healthArea}`,
+                              evidence: opportunity.evidence,
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="flex items-start lg:items-center shrink-0">
+                        <Button
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() => openReview("opportunity", opportunity)}
+                        >
+                          Pursue
+                        </Button>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="px-6 py-6 text-xs text-muted-foreground">
+                No open opportunities are active in this planning cycle.
+              </p>
+            )}
+          </div>
+
+          <div className="bg-card border rounded-xl p-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
+              <div>
+                <h3 className="text-sm font-bold">Global Activity Rule Matrix</h3>
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Standard rules that generate account-specific activities and define validation
+                  criteria.
+                </p>
+              </div>
+              <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                {activeRagRecommendations.length} active recommendations
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+              {["R", "A", "G"].map((urgency) => {
+                const items = activeRagRecommendations.filter((item) => item.urgency === urgency);
+                return (
+                  <div key={urgency} className="border rounded-lg overflow-hidden">
+                    <div
+                      className={`px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white ${
+                        urgency === "R" ? "bg-crit" : urgency === "A" ? "bg-warn" : "bg-success"
+                      }`}
+                    >
+                      {urgency === "R"
+                        ? "RED — Act Now"
+                        : urgency === "A"
+                          ? "AMBER — Plan"
+                          : "GREEN — Monitor"}
+                      <span className="ml-2 opacity-80">({items.length})</span>
+                    </div>
+                    <div className="p-3 space-y-3">
+                      {items.length ? (
+                        items.map((item) => (
+                          <div key={item.id} className="rounded-lg border p-3 space-y-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold leading-snug">{item.title}</p>
+                              <AreaBadge area={item.healthArea} />
+                              <RuleBadge ruleId={item.ruleId} />
+                              <ConfidenceBadge confidence={item.confidence} />
+                            </div>
+                            <p className="text-xs text-muted-foreground">{item.reason}</p>
+                            <ScoreRuleDetails item={item} />
+                            <EvidencePreview
+                              evidence={item.evidence}
+                              onView={() =>
+                                setEvidenceTarget({
+                                  title: item.title,
+                                  subtitle: `RAG analysis · ${item.healthArea}`,
+                                  evidence: item.evidence,
+                                })
+                              }
+                            />
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                disabled={!canAct}
+                                onClick={() => openReview("rag", item)}
+                              >
+                                Add
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!canAct}
+                                onClick={() => setRejectTarget({ ...item, sourceKind: "rag" })}
+                              >
+                                Reject
+                              </Button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground">
+                          No items in this urgency band.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold">
+                Meeting Insights to Improve Account Score
+              </h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Meeting summaries are saved to Meeting History, and guarded action items are saved to
+              the dashboard action item list.
+            </p>
+          </div>
+          <div className="flex flex-col items-start md:items-end gap-1">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canAct || extractingFireflies}
+              onClick={() => rerunFirefliesExtraction()}
+            >
+              {extractingFireflies && <Loader2 className="size-3.5 animate-spin mr-1" />}
+              Extract action items
+            </Button>
+            <p
+              className={`text-[10px] ${
+                firefliesStatus.includes("failed") || firefliesStatus.includes("Missing")
+                  ? "text-crit"
+                  : "text-muted-foreground"
+              }`}
+            >
+              {firefliesStatus ||
+                "Fetches summaries, derives required actions, and avoids duplicate action items."}
+            </p>
+          </div>
+        </div>
+
+        {activeMeetingActions.length ? (
+          <ul className="divide-y">
+            {pagedMeetingActions.map((item) => (
+              <li key={item.id} className="px-6 py-4 space-y-3">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                  <div className="space-y-2 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold leading-snug">{item.title}</p>
+                      <AreaBadge area={item.healthArea} />
+                      <ConfidenceBadge confidence={item.confidence} />
+                      {item.persisted && <ActivityStatusBadge row={item} />}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {item.meetingTitle} · {item.meetingDate}
+                    </p>
+                    <ScoreRuleDetails item={item} />
+                    <EvidencePreview
+                      evidence={item.evidence}
+                      onView={() =>
+                        setEvidenceTarget({
+                          title: item.title,
+                          subtitle: `${item.meetingTitle} · ${item.meetingDate}`,
+                          evidence: item.evidence,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                    {item.persisted ? (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!canAct || item.status === "Validated"}
+                          onClick={() => openEvidenceSubmit(item)}
+                        >
+                          Evidence
+                        </Button>
+                        {canApproveEvidence && item.latestPendingEvidence && (
+                          <Button
+                            size="sm"
+                            disabled={validatingEvidence}
+                            onClick={() => validateEvidence(item)}
+                          >
+                            Validate
+                          </Button>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          disabled={!canAct || addingMeetingInsight}
+                          onClick={() => addMeetingInsightActionItem(item)}
+                        >
+                          Add
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!canAct}
+                          onClick={() => setRejectTarget({ ...item, sourceKind: "meeting" })}
+                        >
+                          Reject
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-6 py-6 text-xs text-muted-foreground">
+            No meeting-note actions are active right now.
+          </p>
+        )}
+        {activeMeetingActions.length > meetingInsightPageSize && (
+          <PaginatedListFooter
+            page={safeMeetingInsightPage}
+            pageSize={meetingInsightPageSize}
+            total={activeMeetingActions.length}
+            onPageChange={setMeetingInsightPage}
+            itemLabel="meeting insights"
+          />
+        )}
+      </div>
+
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold">Activities Across Health Areas</h3>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Unchecked Score Marking Matrics items, meeting actions, and accepted drafts live in
+              one review queue.
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+            <div className="grid gap-1">
+              <Label
+                htmlFor="activity-health-area-filter"
+                className="text-[10px] uppercase tracking-widest text-muted-foreground"
+              >
+                Health area
+              </Label>
+              <select
+                id="activity-health-area-filter"
+                value={activityAreaFilter}
+                onChange={(event) => setActivityAreaFilter(event.target.value)}
+                className="h-8 min-w-[220px] rounded-md border bg-background px-3 text-xs font-medium"
+              >
+                <option value="All">All Health Areas ({activityRows.length})</option>
+                {activityAreaOptions.map((option) => (
+                  <option key={option.area} value={option.area}>
+                    {option.area} ({option.count})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid gap-1">
+              <Label
+                htmlFor="activity-page-size"
+                className="text-[10px] uppercase tracking-widest text-muted-foreground"
+              >
+                Rows
+              </Label>
+              <select
+                id="activity-page-size"
+                value={activityPageSize}
+                onChange={(event) => setActivityPageSize(Number(event.target.value))}
+                className="h-8 rounded-md border bg-background px-3 text-xs font-medium"
+              >
+                <option value={10}>10 per page</option>
+                <option value={20}>20 per page</option>
+                <option value={50}>50 per page</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="px-4 py-2 border-b bg-muted/20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+            Showing {activityShowingStart}-{activityShowingEnd} of {visibleActivityRows.length} items
+          </p>
+          {activityStatus && (
+            <p
+              className={`text-[11px] font-medium ${
+                /failed|could not|required|unavailable|not configured/i.test(activityStatus)
+                  ? "text-crit"
+                  : "text-success"
+              }`}
+            >
+              {activityStatus}
+            </p>
+          )}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[700px] text-xs">
+            <thead className="bg-card">
+              <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
+                <th className="px-4 py-2.5">Area</th>
+                <th className="px-4 py-2.5">Activity</th>
+                <th className="px-4 py-2.5">
+                  <button
+                    type="button"
+                    onClick={toggleExpectedLiftSort}
+                    className="inline-flex items-center gap-1 hover:text-foreground"
+                  >
+                    Expected Lift
+                    <ChevronDown
+                      className={`size-3 transition-transform ${
+                        activitySortMode === "expectedLift" && expectedLiftSort === "asc"
+                          ? "rotate-180"
+                          : ""
+                      }`}
+                    />
+                  </button>
+                </th>
+                <th className="px-4 py-2.5">Owner</th>
+                <th className="px-4 py-2.5">RAG</th>
+                <th className="px-4 py-2.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {pagedActivityRows.map((row) => (
+                <tr key={row.id} className="align-top hover:bg-muted/20">
+                  <td className="px-4 py-3 text-[11px] font-semibold whitespace-nowrap">
+                    <AreaBadge area={row.area} />
+                  </td>
+                  <td className="px-4 py-3 text-xs min-w-[260px]">
+                    <div className="space-y-1">
+                      <p className="font-semibold text-foreground">{row.title}</p>
+                      <p className="text-muted-foreground leading-relaxed line-clamp-2">
+                        {row.reason}
+                      </p>
+                      {row.relatedScoreGaps?.length ? (
+                        <div className="mt-2 rounded-md border bg-muted/20 px-3 py-2">
+                          <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                            Related score gaps
+                          </p>
+                          <ul className="mt-1 space-y-1 text-[11px] text-muted-foreground">
+                            {row.relatedScoreGaps.map((gap) => (
+                              <li key={gap}>{gap}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-xs font-semibold whitespace-nowrap">
+                    {row.expectedLift || "—"}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
+                    {row.owner}
+                  </td>
+                  <td className="px-4 py-3">
+                    <RagBadge code={row.rag} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {isMeetingRelatedActivity(row) && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!canAct}
+                          onClick={() => openScheduleMeeting(row)}
+                        >
+                          <Calendar className="size-3.5 mr-1" />
+                          Schedule Meeting
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        disabled={!canAct || completingActivity}
+                        onClick={() => markActivityDone(row)}
+                      >
+                        Done
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!visibleActivityRows.length && (
+            <p className="px-4 py-6 text-xs text-muted-foreground">
+              No activities are active for this health area.
+            </p>
+          )}
+        </div>
+        {visibleActivityRows.length > activityPageSize && (
+          <div className="px-4 py-3 border-t flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <p className="text-[11px] text-muted-foreground">
+              Page {safeActivityPage} of {activityPageCount}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={safeActivityPage <= 1}
+                onClick={() => setActivityPage((page) => Math.max(1, page - 1))}
+              >
+                Previous
+              </Button>
+              {Array.from({ length: Math.min(activityPageCount, 5) }, (_, index) => {
+                const page = index + 1;
+                return (
+                  <Button
+                    key={page}
+                    size="sm"
+                    variant={page === safeActivityPage ? "default" : "outline"}
+                    onClick={() => setActivityPage(page)}
+                  >
+                    {page}
+                  </Button>
+                );
+              })}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={safeActivityPage >= activityPageCount}
+                onClick={() => setActivityPage((page) => Math.min(activityPageCount, page + 1))}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-xl border bg-card overflow-hidden">
+        <div className="px-6 py-5 bg-gradient-to-r from-accent/10 via-card to-card">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="size-10 rounded-lg bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                <Sparkles className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-bold">AI Suggestions to Increase Score</h4>
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                    AI-generated
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-1 max-w-3xl">
+                  Generate AI-powered strategic recommendations for this account.
+                </p>
+                {aiSuggestions.length ? (
+                  <p className="mt-2 text-[11px] font-medium text-muted-foreground">
+                    {aiSuggestions.length} recommendation{aiSuggestions.length === 1 ? "" : "s"} ready
+                    to review.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              disabled={generatingAiSuggestions}
+              onClick={generateAiSuggestions}
+              className="shadow-sm"
+            >
+              {generatingAiSuggestions && <Loader2 className="size-3.5 animate-spin mr-1" />}
+              Ask AI for Suggestions
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {selectedAiRecommendations.length ? (
+        <div className="rounded-xl border bg-card overflow-hidden">
+          <div className="px-5 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-bold">Selected AI Recommendations</h4>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Review selected recommendations before adding them to dashboard action items.
+              </p>
+            </div>
+            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+              {selectedAiRecommendations.length} selected
+            </span>
+          </div>
+          <div className="divide-y">
+            {selectedAiRecommendations.map((suggestion) => (
+              <div
+                key={suggestion.id}
+                className="px-5 py-4 flex flex-col xl:flex-row xl:items-center gap-4"
+              >
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <AreaBadge area={suggestion.healthArea} />
+                    <span className="text-[10px] font-bold uppercase rounded-full bg-accent/10 text-accent px-2 py-1">
+                      {suggestion.expectedLift}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold leading-snug">{suggestion.title}</p>
+                    <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                      {suggestion.description}
+                    </p>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    <span className="font-semibold text-foreground">Source:</span>{" "}
+                    {suggestion.sourceSummary}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 xl:self-center">
+                  <Button
+                    size="sm"
+                    disabled={!canAct || addingAiSuggestionId === suggestion.id}
+                    onClick={() => addAiRecommendationActionItem(suggestion)}
+                  >
+                    {addingAiSuggestionId === suggestion.id && (
+                      <Loader2 className="size-3.5 animate-spin mr-1" />
+                    )}
+                    Add To Action Items
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!canAct || addingAiSuggestionId === suggestion.id}
+                    onClick={() => dismissStagedAiRecommendation(suggestion)}
+                  >
+                    Remove/Reject
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <ActivityReviewSheet
+        target={reviewTarget}
+        form={reviewForm}
+        onChange={setReviewForm}
+        onClose={closeReview}
+        onConfirm={confirmReview}
+        isSaving={savingRuleActivity}
+      />
+
+      <AiRecommendationsSheet
+        open={aiRecommendationSheetOpen}
+        onClose={() => setAiRecommendationSheetOpen(false)}
+        suggestions={aiSuggestions}
+        requested={aiSuggestionRequested}
+        isLoading={generatingAiSuggestions}
+        status={aiSuggestionStatus}
+        warning={aiSuggestionWarning}
+        error={aiSuggestionError}
+        canAct={canAct}
+        addingId={addingAiSuggestionId}
+        activityRows={activityRows}
+        onAccept={acceptAiSuggestion}
+        onRefresh={generateAiSuggestions}
+      />
+
+      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+
+      <EvidenceSubmissionDialog
+        target={evidenceSubmitTarget}
+        form={evidenceForm}
+        onChange={setEvidenceForm}
+        onClose={() => {
+          setEvidenceSubmitTarget(null);
+          setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
+        }}
+        onConfirm={() => submitEvidence({ row: evidenceSubmitTarget, form: evidenceForm })}
+        isSaving={submittingEvidence}
+      />
+
+      <ScheduleMeetingDialog
+        target={scheduleTarget}
+        form={scheduleForm}
+        onChange={setScheduleForm}
+        onClose={() => {
+          setScheduleTarget(null);
+          setScheduleForm(null);
+        }}
+        onConfirm={confirmScheduleMeeting}
+        isSaving={false}
+      />
+
+      <RejectRecommendationDialog
+        target={rejectTarget}
+        value={rejectReason}
+        onChange={setRejectReason}
+        onClose={() => {
+          setRejectTarget(null);
+          setRejectReason("");
+        }}
+        onConfirm={confirmReject}
+        isSaving={rejectingRuleActivity}
+      />
+    </div>
+  );
+}
+
+function AiRecommendationsSheet({
+  open,
+  onClose,
+  suggestions,
+  requested,
+  isLoading,
+  status,
+  warning,
+  error,
+  canAct,
+  addingId,
+  activityRows,
+  onAccept,
+  onRefresh,
+}) {
+  return (
+    <Sheet open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-2xl overflow-y-auto p-0">
+        <div className="min-h-full bg-background">
+          <div className="border-b bg-gradient-to-r from-accent/15 via-background to-background px-6 py-5">
+            <SheetHeader className="text-left space-y-3">
+              <div className="flex items-start gap-3 pr-8">
+                <span className="size-11 rounded-lg bg-accent/10 text-accent flex items-center justify-center shrink-0">
+                  <Sparkles className="size-5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SheetTitle>AI Recommendations to Increase Score</SheetTitle>
+                    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                      AI-generated
+                    </span>
+                  </div>
+                  <SheetDescription className="mt-1">
+                    Generated from account context, tasks, opportunities, risks, existing
+                    activities, and score logic.
+                  </SheetDescription>
+                </div>
+              </div>
+            </SheetHeader>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-[11px] text-muted-foreground">
+                Select recommendations to stage them for dashboard action items.
+                {!canAct ? " You can review recommendations, but adding requires activity permissions." : ""}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={isLoading}
+                  onClick={onRefresh}
+                >
+                  {isLoading && <Loader2 className="size-3.5 animate-spin mr-1" />}
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <div className="px-6 py-5 space-y-4">
+            {status && (
+              <p
+                className={`rounded-lg border px-3 py-2 text-[11px] font-medium ${
+                  status.startsWith("Added")
+                    ? "border-success/20 bg-success/5 text-success"
+                    : "border-border bg-muted/20 text-muted-foreground"
+                }`}
+              >
+                {status}
+              </p>
+            )}
+            {warning && (
+              <p className="rounded-lg border border-warn/20 bg-warn/5 px-3 py-2 text-[11px] font-medium text-warn">
+                {warning}
+              </p>
+            )}
+            {error && (
+              <p className="rounded-lg border border-crit/20 bg-crit/5 px-3 py-2 text-[11px] font-medium text-crit">
+                {error}
+              </p>
+            )}
+
+            {isLoading ? <AiRecommendationSkeleton /> : null}
+
+            {!isLoading && requested && !error && !suggestions.length ? (
+              <div className="rounded-xl border bg-muted/20 px-5 py-8 text-center">
+                <Sparkles className="mx-auto size-5 text-muted-foreground" />
+                <p className="mt-3 text-sm font-semibold">No strong AI recommendations found</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The agent did not find useful, account-specific recommendations that are not
+                  already covered by current activities.
+                </p>
+              </div>
+            ) : null}
+
+            {!isLoading && suggestions.length ? (
+              <div className="space-y-3">
+                {suggestions.map((suggestion) => (
+                  <AiRecommendationCard
+                    key={suggestion.id}
+                    suggestion={suggestion}
+                    duplicate={isDuplicateAiActivity(suggestion, activityRows)}
+                    isAdding={addingId === suggestion.id}
+                    canAct={canAct}
+                    onAccept={onAccept}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function AiRecommendationSkeleton() {
+  return (
+    <div className="space-y-3">
+      {[0, 1, 2].map((item) => (
+        <div key={item} className="rounded-xl border bg-card p-4 animate-pulse">
+          <div className="flex gap-3">
+            <div className="mt-1 size-4 rounded border bg-muted" />
+            <div className="flex-1 space-y-3">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-2 flex-1">
+                  <div className="h-4 w-2/3 rounded bg-muted" />
+                  <div className="h-3 w-full rounded bg-muted" />
+                  <div className="h-3 w-4/5 rounded bg-muted" />
+                </div>
+                <div className="h-6 w-24 rounded-full bg-muted" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="h-16 rounded-lg bg-muted" />
+                <div className="h-16 rounded-lg bg-muted" />
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AiRecommendationCard({ suggestion, duplicate, isAdding, canAct, onAccept }) {
+  return (
+    <div className="rounded-xl border bg-card p-4 shadow-sm">
+      <div className="flex gap-3">
+        <input
+          type="checkbox"
+          className="mt-1 size-4 shrink-0 accent-[hsl(var(--accent))]"
+          checked={isAdding}
+          disabled={!canAct || isAdding || duplicate}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => {
+            event.stopPropagation();
+            if (event.target.checked) onAccept(suggestion);
+          }}
+          aria-label={`Select ${suggestion.title} as an AI recommendation`}
+        />
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                  AI-generated
+                </span>
+                {duplicate && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-crit/10 text-crit px-2 py-1">
+                    Duplicate
+                  </span>
+                )}
+                {isAdding && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-success/10 text-success px-2 py-1">
+                    Adding
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-semibold leading-snug">{suggestion.title}</p>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                {suggestion.description}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <AreaBadge area={suggestion.healthArea} />
+              <span className="text-[10px] font-bold uppercase rounded-full bg-accent/10 text-accent px-2 py-1">
+                {suggestion.expectedLift}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg border bg-muted/10 p-3">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                Why this may increase score
+              </p>
+              <p className="mt-1 text-xs text-foreground leading-relaxed">{suggestion.reason}</p>
+            </div>
+            <div className="rounded-lg border bg-muted/10 p-3">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+                Source
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                {suggestion.sourceSummary}
+              </p>
+            </div>
+          </div>
+
+          {duplicate && (
+            <p className="text-[11px] font-semibold text-crit">This activity already exists.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ActivityReviewSheet({ target, form, onChange, onClose, onConfirm, isSaving = false }) {
+  const item = target?.item ?? null;
+  const title = target?.kind === "opportunity" ? "Review pursuit draft" : "Review activity draft";
+
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
+        {item && (
+          <>
+            <SheetHeader>
+              <SheetTitle>{title}</SheetTitle>
+              <SheetDescription>
+                Review the suggestion, adjust the details, and add it to the governed activity plan.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-5 py-5">
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <AreaBadge area={item.healthArea ?? item.area} />
+                  <RuleBadge ruleId={item.ruleId} />
+                  {item.priority ? <PriorityBadge priority={item.priority} /> : null}
+                  {item.confidence ? <ConfidenceBadge confidence={item.confidence} /> : null}
+                  {item.approvalRequired && (
+                    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-warn/10 text-warn px-2 py-1">
+                      {item.approverRole ?? "Head of KAM"} approval required
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">{item.title}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {item.reason ?? item.sourceExcerpt ?? item.nextStep}
+                  </p>
+                </div>
+                <ScoreRuleDetails item={item} />
+              </div>
+
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="activity-review-title">Title</Label>
+                  <Input
+                    id="activity-review-title"
+                    value={form.title}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, title: event.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="activity-review-owner">Owner</Label>
+                    <Input
+                      id="activity-review-owner"
+                      value={form.owner}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, owner: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="activity-review-due-date">Due date</Label>
+                    <Input
+                      id="activity-review-due-date"
+                      type="date"
+                      value={form.dueDate}
+                      onChange={(event) =>
+                        onChange((current) => ({ ...current, dueDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="activity-review-next-step">Next step</Label>
+                  <Textarea
+                    id="activity-review-next-step"
+                    rows={4}
+                    value={form.nextStep}
+                    onChange={(event) =>
+                      onChange((current) => ({ ...current, nextStep: event.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Evidence
+                </p>
+                <div className="space-y-3">
+                  {(item.evidence ?? []).map((entry, index) => (
+                    <div
+                      key={`${entry.source}-${index}`}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          {entry.sourceType}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                      </div>
+                      <p className="text-sm font-medium">{entry.source}</p>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {entry.excerpt}
+                      </p>
+                      <p className="text-[11px] text-foreground">{entry.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <SheetFooter>
+              <Button variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                onClick={onConfirm}
+                disabled={
+                  isSaving || !form.title.trim() || !form.owner.trim() || !form.nextStep.trim()
+                }
+              >
+                {isSaving ? "Adding..." : "Add to plan"}
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function EvidenceDetailSheet({ target, onClose }) {
+  return (
+    <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-lg overflow-y-auto">
+        {target && (
+          <>
+            <SheetHeader>
+              <SheetTitle>{target.title}</SheetTitle>
+              <SheetDescription>{target.subtitle}</SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-4 py-5">
+              {(target.evidence ?? []).map((entry, index) => (
+                <div key={`${entry.source}-${index}`} className="rounded-xl border p-4 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      {entry.sourceType}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">{entry.date}</span>
+                  </div>
+                  <p className="text-sm font-semibold">{entry.source}</p>
+                  <p className="text-sm text-muted-foreground leading-relaxed">{entry.excerpt}</p>
+                  <p className="text-xs text-foreground">{entry.reason}</p>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function EvidenceSubmissionDialog({ target, form, onChange, onClose, onConfirm, isSaving }) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Submit evidence</DialogTitle>
+          <DialogDescription>
+            Evidence quality controls how much lift is eligible after reviewer validation.
+          </DialogDescription>
+        </DialogHeader>
+
+        {target && (
+          <div className="space-y-4">
+            <div className="rounded-lg border p-3 bg-muted/20">
+              <p className="text-sm font-semibold">{target.title}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Current stage: {target.status} / {target.activityScorePct ?? 0}%
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-quality">Evidence quality</Label>
+              <select
+                id="evidence-quality"
+                value={form.evidenceQuality}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, evidenceQuality: event.target.value }))
+                }
+                className="h-10 rounded-md border bg-background px-3 text-sm"
+              >
+                <option value="Meeting note only">Meeting note only</option>
+                <option value="Action tracker plus note">Action tracker plus note</option>
+                <option value="Completed action plus outcome proof">
+                  Completed action plus outcome proof
+                </option>
+              </select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-title">Evidence title</Label>
+              <Input
+                id="evidence-title"
+                value={form.title}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, title: event.target.value }))
+                }
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-notes">Notes</Label>
+              <Textarea
+                id="evidence-notes"
+                rows={4}
+                value={form.notes}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, notes: event.target.value }))
+                }
+                placeholder="Mention meeting, tracker, completion proof, owner, and outcome."
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="evidence-url">Artifact URL</Label>
+              <Input
+                id="evidence-url"
+                value={form.artifactUrl}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, artifactUrl: event.target.value }))
+                }
+                placeholder="https://..."
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            disabled={isSaving || !form.title.trim() || !form.notes.trim()}
+            onClick={onConfirm}
+          >
+            {isSaving ? "Submitting..." : "Submit evidence"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const MEETING_TIME_OPTIONS = [
+  ["08:00", "8:00 AM"],
+  ["08:30", "8:30 AM"],
+  ["09:00", "9:00 AM"],
+  ["09:30", "9:30 AM"],
+  ["10:00", "10:00 AM"],
+  ["10:30", "10:30 AM"],
+  ["11:00", "11:00 AM"],
+  ["11:30", "11:30 AM"],
+  ["12:00", "12:00 PM"],
+  ["12:30", "12:30 PM"],
+  ["13:00", "1:00 PM"],
+  ["13:30", "1:30 PM"],
+  ["14:00", "2:00 PM"],
+  ["14:30", "2:30 PM"],
+  ["15:00", "3:00 PM"],
+  ["15:30", "3:30 PM"],
+  ["16:00", "4:00 PM"],
+  ["16:30", "4:30 PM"],
+  ["17:00", "5:00 PM"],
+];
+
+function ScheduleMeetingDialog({
+  target,
+  form,
+  onChange,
+  onClose,
+  onConfirm,
+  isSaving,
+}) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-3xl max-h-[88vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Schedule meeting</DialogTitle>
+          <DialogDescription>
+            Open a pre-filled Google Calendar event from this activity using account context.
+          </DialogDescription>
+        </DialogHeader>
+
+        {target && form && (
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Activity
+              </p>
+              <p className="mt-1 text-sm font-semibold">{target.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{target.reason}</p>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-account">Account</Label>
+                <Input id="meeting-account" value={form.accountName} readOnly />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-contact">Contact/person</Label>
+                <Input
+                  id="meeting-contact"
+                  value={form.contactName}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, contactName: event.target.value }))
+                  }
+                  placeholder="Client contact"
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-contact-email">
+                  Contact email <span className="text-crit">*</span>
+                </Label>
+                <Input
+                  id="meeting-contact-email"
+                  type="email"
+                  value={form.contactEmail}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, contactEmail: event.target.value }))
+                  }
+                  placeholder="client@example.com"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="meeting-subject">Meeting subject</Label>
+              <Input
+                id="meeting-subject"
+                value={form.subject}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, subject: event.target.value }))
+                }
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-date">Date</Label>
+                <Input
+                  id="meeting-date"
+                  type="date"
+                  value={form.date}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, date: event.target.value }))
+                  }
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-time">Time</Label>
+                <select
+                  id="meeting-time"
+                  value={form.time}
+                  onChange={(event) =>
+                    onChange((current) => ({ ...current, time: event.target.value }))
+                  }
+                  className="h-10 rounded-md border bg-background px-3 text-sm"
+                >
+                  {MEETING_TIME_OPTIONS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meeting-duration">Duration</Label>
+                <select
+                  id="meeting-duration"
+                  value={form.durationMinutes}
+                  onChange={(event) =>
+                    onChange((current) => ({
+                      ...current,
+                      durationMinutes: Number(event.target.value),
+                    }))
+                  }
+                  className="h-10 rounded-md border bg-background px-3 text-sm"
+                >
+                  <option value={30}>30 minutes</option>
+                  <option value={45}>45 minutes</option>
+                  <option value={60}>60 minutes</option>
+                  <option value={90}>90 minutes</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="meeting-description">Agenda and notes</Label>
+              <Textarea
+                id="meeting-description"
+                rows={5}
+                value={form.description}
+                onChange={(event) =>
+                  onChange((current) => ({ ...current, description: event.target.value }))
+                }
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            disabled={
+              isSaving ||
+              !form?.subject?.trim() ||
+              !form?.contactEmail?.trim() ||
+              !form?.date ||
+              !form?.time
+            }
+            onClick={onConfirm}
+          >
+            {isSaving ? "Opening..." : "Open Google Calendar"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RejectRecommendationDialog({
+  target,
+  value,
+  onChange,
+  onClose,
+  onConfirm,
+  isSaving = false,
+}) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Reject recommendation</DialogTitle>
+          <DialogDescription>
+            Rejected recommendations are removed from active suggestions in this tab.
+          </DialogDescription>
+        </DialogHeader>
+
+        {target && (
+          <div className="space-y-4">
+            <div className="rounded-lg border p-3 bg-muted/20">
+              <p className="text-sm font-semibold">{target.title}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Capture why this suggestion should not stay active.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="reject-reason">Rejection reason</Label>
+              <Textarea
+                id="reject-reason"
+                rows={4}
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+                placeholder="Example: already covered by an open action plan, not relevant for this client, or timing is wrong."
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="destructive" disabled={isSaving || !value.trim()} onClick={onConfirm}>
+            {isSaving ? "Rejecting..." : "Reject recommendation"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RuleBadge({ ruleId }) {
+  if (!ruleId) return null;
+
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
+      {ruleId}
+    </span>
+  );
+}
+
+function formatEvidenceRequired(evidenceRequired) {
+  if (!evidenceRequired) return "Activity evidence";
+  if (Array.isArray(evidenceRequired)) return evidenceRequired.join(", ");
+  return evidenceRequired;
+}
+
+function formatTriggerLogic(triggerLogic) {
+  if (!triggerLogic) return null;
+  return [
+    triggerLogic.primary ? `Primary: ${triggerLogic.primary}` : null,
+    triggerLogic.threshold ? `Threshold: ${triggerLogic.threshold}` : null,
+    triggerLogic.scoreBand ? `Band: ${triggerLogic.scoreBand}` : null,
+    triggerLogic.overrideReason ? `Reason: ${triggerLogic.overrideReason}` : null,
+    triggerLogic.trend ? `Trend: ${triggerLogic.trend}` : null,
+    triggerLogic.velocity ? `Velocity: ${triggerLogic.velocity}` : null,
+    triggerLogic.compound ? `Compound: ${triggerLogic.compound}` : null,
+    triggerLogic.optimization ? `Target logic: ${triggerLogic.optimization}` : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function formatEvidenceLiftPolicy(policy) {
+  if (!policy?.length) return null;
+  return policy.map((entry) => `${entry.quality}: ${entry.lift}`).join(" | ");
+}
+
+function formatActivityScoreLogic(logic) {
+  if (!logic?.length) return null;
+  return logic.join(" | ");
+}
+
+function formatApprovalSla(approvalSla) {
+  if (!approvalSla?.reviewWindow) return null;
+  return `Review: ${approvalSla.reviewWindow}; approver: ${approvalSla.primaryApprover}; fallback: ${approvalSla.fallbackApprover}; ${approvalSla.rejectionRule}`;
+}
+
+function formatReviewCadence(reviewCadence) {
+  if (!reviewCadence?.cadence) return null;
+  return `${reviewCadence.cadence}; ${reviewCadence.autoCloseRule}`;
+}
+
+function ScoreRuleDetails({ item }) {
+  if (
+    !item?.ruleId &&
+    !item?.successCriteria &&
+    !item?.expectedLift &&
+    !item?.nextStep &&
+    !item?.sourceExcerpt &&
+    !item?.potentialValue
+  ) {
+    return null;
+  }
+
+  const triggerLogic = formatTriggerLogic(item.triggerLogic);
+  const evidenceLiftPolicy = formatEvidenceLiftPolicy(item.evidenceLiftPolicy);
+  const activityScoreLogic = formatActivityScoreLogic(item.activityScoreLogic);
+  const approvalSla = formatApprovalSla(item.approvalSla);
+  const reviewCadence = formatReviewCadence(item.reviewCadence);
+  const summaryParts = [
+    item.scoreBand,
+    item.potentialValue ? `+${formatCurrency(item.potentialValue)}` : null,
+    item.currentValue && item.targetValue ? `${item.currentValue} to ${item.targetValue}` : null,
+    item.threshold || item.targetScore
+      ? `${item.thresholdSource ?? "Global default"} threshold`
+      : null,
+    item.nextStep ? "Next step" : null,
+  ].filter(Boolean);
+
+  return (
+    <details className="group rounded-lg border bg-muted/20 text-xs">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+            {item.ruleId ? "Rule details" : "Details"}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {summaryParts.length ? summaryParts.join(" | ") : "Evidence and next step"}
+          </p>
+        </div>
+        <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="space-y-2 border-t p-3">
+        <RuleDetailDisclosure
+          label="Rule and metric"
+          value={
+            item.ruleId
+              ? `${item.ruleId} / ${item.impactedMetric ?? item.parameter ?? item.healthArea}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure
+          label="Potential value"
+          value={item.potentialValue ? `+${formatCurrency(item.potentialValue)}` : null}
+        />
+        <RuleDetailDisclosure
+          label="Priority"
+          value={
+            item.priority
+              ? `${item.priority}${item.confidence ? ` / ${item.confidence} confidence` : ""}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure label="Expected lift" value={item.expectedLift} />
+        <RuleDetailDisclosure label="Next step" value={item.nextStep} />
+        <RuleDetailDisclosure label="Source excerpt" value={item.sourceExcerpt} />
+        <RuleDetailDisclosure
+          label="Current to target"
+          value={
+            item.currentValue || item.targetValue
+              ? `${item.currentValue ?? "Current"} to ${item.targetValue ?? "Target"}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure label="Score band" value={item.scoreBand} />
+        <RuleDetailDisclosure
+          label="Threshold / target"
+          value={
+            item.threshold || item.targetScore
+              ? `${item.thresholdSource ?? "Global default"}: ${item.threshold ?? "n/a"} to ${item.targetScore ?? "n/a"}`
+              : null
+          }
+        />
+        <RuleDetailDisclosure label="Threshold reason" value={item.thresholdReason} />
+        <RuleDetailDisclosure label="Success criteria" value={item.successCriteria} />
+        <RuleDetailDisclosure
+          label="Evidence required"
+          value={item.evidenceRequired ? formatEvidenceRequired(item.evidenceRequired) : null}
+        />
+        <RuleDetailDisclosure label="Trigger logic" value={triggerLogic} />
+        <RuleDetailDisclosure label="Evidence quality lift" value={evidenceLiftPolicy} />
+        <RuleDetailDisclosure label="Activity score logic" value={activityScoreLogic} />
+        <RuleDetailDisclosure label="Approval SLA" value={approvalSla} />
+        <RuleDetailDisclosure label="Review cadence" value={reviewCadence} />
+      </div>
+    </details>
+  );
+}
+
+function RuleDetailDisclosure({ label, value }) {
+  if (!value) return null;
+
+  return (
+    <details className="group/detail rounded-md border bg-background">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+            {label}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{value}</p>
+        </div>
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/detail:rotate-180" />
+      </summary>
+      <p className="border-t px-3 py-2 text-xs leading-relaxed text-foreground">{value}</p>
+    </details>
+  );
+}
+
+function ActivityRuleCell({ row }) {
+  if (!row.ruleId) {
+    return (
+      <div className="space-y-1">
+        <p className="font-semibold text-muted-foreground">{row.impactedMetric ?? "Tracked"}</p>
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          Existing activity context
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <RuleBadge ruleId={row.ruleId} />
+        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+          {row.parameter}
+        </span>
+      </div>
+      <p className="font-semibold text-foreground">{row.impactedMetric}</p>
+      {row.scoreBand && <p className="text-[11px] font-medium text-accent">{row.scoreBand}</p>}
+      {(row.currentValue || row.targetValue) && (
+        <p className="text-[11px] text-muted-foreground">
+          {row.currentValue ?? "Current"} to {row.targetValue ?? "Target"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function EvidencePreview({ evidence, onView, compact = false }) {
+  const primary = evidence?.[0];
+  if (!primary) {
+    return <p className="text-[11px] text-muted-foreground">Evidence unavailable.</p>;
+  }
+
+  return (
+    <div
+      className={`rounded-lg border bg-muted/20 ${compact ? "p-2.5" : "p-3"} flex items-start justify-between gap-3`}
+    >
+      <div className="min-w-0">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+          {primary.sourceType} · {primary.date}
+        </p>
+        <p
+          className={`${compact ? "text-[11px]" : "text-xs"} text-foreground leading-relaxed mt-1 line-clamp-2`}
+        >
+          {primary.excerpt}
+        </p>
+      </div>
+      <Button variant="ghost" size="sm" className="shrink-0" onClick={onView}>
+        View evidence
+      </Button>
+    </div>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">
+        {label}
+      </p>
+      <p className="text-sm font-medium leading-snug">{value}</p>
+    </div>
+  );
+}
+
+function PriorityBadge({ priority }) {
+  const styles = {
+    High: "bg-crit/10 text-crit",
+    Medium: "bg-warn/10 text-warn",
+    Low: "bg-success/10 text-success",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[priority] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {priority}
+    </span>
+  );
+}
+
+function ConfidenceBadge({ confidence }) {
+  const styles = {
+    High: "bg-success/10 text-success",
+    Medium: "bg-warn/10 text-warn",
+    Low: "bg-muted text-muted-foreground",
+  };
+
+  return (
+    <span
+      className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles[confidence] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {confidence}
+    </span>
+  );
+}
+
+function AreaBadge({ area }) {
+  return (
+    <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1 whitespace-nowrap">
+      {area}
+    </span>
+  );
+}
+
+function RagBadge({ code }) {
+  const styles = {
+    R: "bg-crit",
+    A: "bg-warn",
+    G: "bg-success",
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center justify-center size-6 rounded-full text-[10px] font-bold text-white ${styles[code] ?? "bg-muted-foreground"}`}
+      title={code === "R" ? "Red" : code === "A" ? "Amber" : "Green"}
+    >
+      {code}
+    </span>
+  );
+}
+
+function ActivityStatusBadge({ row }) {
+  if (row.rowType === "suggested") {
+    return (
+      <span className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-warn/10 text-warn">
+        Suggested
+      </span>
+    );
+  }
+
+  const statusStyles = {
+    Validated: "bg-success/10 text-success",
+    "Evidence Submitted": "bg-warn/10 text-warn",
+    Completed: "bg-accent/10 text-accent",
+    Planned: "bg-accent/10 text-accent",
+    Accepted: "bg-accent/10 text-accent",
+    Generated: "bg-muted text-muted-foreground",
+    Rejected: "bg-crit/10 text-crit",
+    Closed: "bg-muted text-muted-foreground",
+    Done: "bg-success/10 text-success",
+    "In Progress": "bg-accent/10 text-accent",
+  };
+  const styles = statusStyles[row.status] ?? "bg-muted text-muted-foreground";
+
+  return (
+    <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${styles}`}>
+      {row.status}
+    </span>
+  );
+}
+
+function createInitialReviewForm(item, ownerName) {
+  if (!item) {
+    return {
+      title: "",
+      owner: ownerName ?? "KAM Person",
+      dueDate: getFutureDateInput(7),
+      nextStep: "",
+    };
+  }
+
+  return {
+    title: item.title ?? "",
+    owner: ownerName ?? "KAM Person",
+    dueDate: getFutureDateInput(getSuggestedReviewDays(item)),
+    nextStep: item.nextStep ?? item.title ?? "",
+  };
+}
+
+function getSuggestedReviewDays(item) {
+  if (item.urgency === "R" || item.priority === "High") return 3;
+  if (item.urgency === "G" || item.priority === "Low") return 14;
+  return 7;
+}
+
+function getFutureDateInput(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDraftDate(dateValue) {
+  if (!dateValue) return "Needs scheduling";
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return dateValue;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function mapPriorityToRag(priority) {
+  return priority === "High" ? "R" : priority === "Low" ? "G" : "A";
+}
+
+function mapMeetingActionToActivityRow(item, sourceKind) {
+  return {
+    id: item.id,
+    rowType: "suggested",
+    sourceId: item.id,
+    sourceKind,
+    area: item.healthArea,
+    title: item.title,
+    owner: "KAM Person",
+    dueDate: "In 7d",
+    status: "Suggested",
+    rag: item.confidence === "High" ? "R" : "A",
+    expectedLift: item.expectedLift,
+    confidence: item.confidence,
+    ruleId: item.ruleId ?? null,
+    parameter: item.parameter ?? item.healthArea,
+    impactedMetric: item.impactedMetric ?? item.healthArea,
+    weakSignal: item.weakSignal ?? item.reason ?? item.sourceExcerpt,
+    currentValue: item.currentValue ?? null,
+    targetValue: item.targetValue ?? null,
+    triggerLogic: item.triggerLogic ?? null,
+    evidenceLiftPolicy: item.evidenceLiftPolicy ?? null,
+    activityScoreLogic: item.activityScoreLogic ?? null,
+    approvalSla: item.approvalSla ?? null,
+    reviewCadence: item.reviewCadence ?? null,
+    scoreBand: item.scoreBand ?? null,
+    threshold: item.threshold ?? null,
+    targetScore: item.targetScore ?? null,
+    thresholdSource: item.thresholdSource ?? null,
+    thresholdReason: item.thresholdReason ?? null,
+    successCriteria: item.successCriteria ?? "Complete the activity and review score impact.",
+    evidenceRequired: item.evidenceRequired ?? ["Activity evidence"],
+    reason: item.reason ?? item.sourceExcerpt ?? item.nextStep,
+    evidence: item.evidence ?? [],
+    nextStep: item.nextStep,
+  };
+}
+
+function mapPersistedRuleActivityToRow(activity) {
+  const pendingEvidence = activity.evidenceReviews.find(
+    (evidence) => evidence.reviewStatus === "Pending" || evidence.reviewStatus === "Partial",
+  );
+  const evidence = activity.evidenceReviews.length
+    ? activity.evidenceReviews.map((entry) => ({
+        source: entry.title,
+        sourceType: `${entry.evidenceQuality} / ${entry.reviewStatus}`,
+        date: formatDraftDate(entry.submittedAt),
+        excerpt: entry.notes || entry.artifactUrl || "Evidence submitted for reviewer validation.",
+        reason:
+          entry.reviewStatus === "Approved"
+            ? `Approved by ${entry.reviewer || "reviewer"} for ${entry.approvedLift || activity.expectedLift}.`
+            : entry.reviewStatus === "Rejected"
+              ? entry.rejectionReason
+              : "Awaiting reviewer validation.",
+      }))
+    : [
+        {
+          source: "Evidence pending",
+          sourceType: "Governance workflow",
+          date: activity.generatedAt ? formatDraftDate(activity.generatedAt) : "Current cycle",
+          excerpt: activity.successCriteria || activity.weakSignal,
+          reason: "Submit evidence before any parameter score lift can be validated.",
+        },
+      ];
+
+  return {
+    id: `saved-${activity.id}`,
+    dbId: activity.id,
+    rowType: "saved",
+    sourceId: activity.sourceRef || activity.id,
+    sourceKind: activity.sourceType || "saved",
+    area: activity.parameter,
+    title: activity.title,
+    owner: activity.owner || "Unassigned",
+    dueDate: formatDraftDate(activity.dueDate),
+    status: activity.status,
+    rag: activity.rag,
+    expectedLift: activity.expectedLift || "Governed lift",
+    confidence: "Saved",
+    ruleId: activity.ruleId,
+    parameter: activity.parameter,
+    impactedMetric: activity.impactedMetric,
+    weakSignal: activity.weakSignal,
+    currentValue: activity.currentValue,
+    targetValue: activity.targetValue,
+    triggerLogic: activity.triggerLogic,
+    evidenceLiftPolicy: activity.evidenceLiftPolicy,
+    activityScoreLogic: activity.activityScoreLogic,
+    approvalSla: activity.approvalSla,
+    reviewCadence: activity.reviewCadence,
+    scoreBand: activity.triggerLogic?.scoreBand?.replace(" band is active.", "") ?? null,
+    threshold: extractThresholdNumber(activity.triggerLogic?.threshold),
+    targetScore: extractTargetNumber(activity.triggerLogic?.threshold),
+    thresholdSource: activity.triggerLogic?.threshold?.split(":")[0] ?? null,
+    thresholdReason: activity.triggerLogic?.overrideReason ?? null,
+    successCriteria: activity.successCriteria,
+    evidenceRequired: activity.evidenceRequired,
+    reason: activity.weakSignal || activity.successCriteria,
+    evidence,
+    evidenceReviews: activity.evidenceReviews,
+    latestPendingEvidence: pendingEvidence,
+    nextStep: activity.nextStep,
+    activityScorePct: activity.activityScorePct,
+    reviewState: `Activity score stage: ${activity.activityScorePct}%`,
+  };
+}
+
+function mapPersistedMeetingActivityToCard(activity) {
+  const row = mapPersistedRuleActivityToRow(activity);
+  const sourceLabel =
+    activity.triggerLogic?.source === "llm_fallback"
+      ? "Fireflies meeting (LLM fallback)"
+      : activity.triggerLogic?.source === "summary_derived"
+        ? "Fireflies meeting (summary derived)"
+        : "Fireflies meeting action";
+
+  return {
+    ...row,
+    id: `meeting-saved-${activity.id}`,
+    persisted: true,
+    sourceId: activity.sourceRef || activity.id,
+    sourceKind: "fireflies_meeting",
+    healthArea: row.area,
+    meetingTitle: sourceLabel,
+    meetingDate: formatDraftDate(activity.generatedAt),
+    sourceExcerpt: activity.weakSignal,
+    confidence: activity.rag === "R" ? "High" : activity.rag === "G" ? "Low" : "Medium",
+    urgency: activity.rag,
+  };
+}
+
+function getSuggestionSourceRef(item) {
+  return item.sourceId ?? item.id;
+}
+
+function extractThresholdNumber(summary = "") {
+  const match = summary.match(/threshold\s+([0-9.]+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function extractTargetNumber(summary = "") {
+  const match = summary.match(/target\s+([0-9.]+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function getFallbackRuleId(sourceKind) {
+  if (sourceKind === "opportunity") return "OPP-01";
+  if (sourceKind === "meeting") return "MEET-01";
+  return "MANUAL-01";
+}
+
+function buildActivityRuleActivityInput({ accountId, target, form }) {
+  const { kind, item } = target;
+  const sourceRef = getSuggestionSourceRef(item);
+  const parameter = item.parameter ?? item.healthArea ?? item.area ?? "Relationship";
+  return {
+    accountId,
+    ruleId: item.ruleId ?? getFallbackRuleId(kind),
+    parameter,
+    impactedMetric: item.impactedMetric ?? parameter,
+    title: form.title.trim(),
+    nextStep: form.nextStep.trim(),
+    owner: form.owner.trim(),
+    dueDate: form.dueDate,
+    rag: item.urgency ?? item.rag ?? mapPriorityToRag(item.priority),
+    weakSignal: item.weakSignal ?? item.reason ?? item.sourceExcerpt ?? form.nextStep.trim(),
+    currentValue: item.currentValue ?? null,
+    targetValue: item.targetValue ?? null,
+    expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
+    successCriteria: item.successCriteria ?? "Complete the activity and review score impact.",
+    evidenceRequired: item.evidenceRequired ?? ["Activity evidence"],
+    triggerLogic: item.triggerLogic ?? null,
+    evidenceLiftPolicy: item.evidenceLiftPolicy ?? null,
+    activityScoreLogic: item.activityScoreLogic ?? null,
+    approvalSla: item.approvalSla ?? null,
+    reviewCadence: item.reviewCadence ?? null,
+    scoreBand: item.scoreBand ?? null,
+    threshold: item.threshold ?? null,
+    targetScore: item.targetScore ?? null,
+    thresholdSource: item.thresholdSource ?? null,
+    thresholdReason: item.thresholdReason ?? null,
+    sourceType: kind,
+    sourceRef,
+  };
+}
+
+function buildRejectedRuleActivityInput({ accountId, target, reason, reviewer }) {
+  const sourceKind = target.sourceKind ?? target.healthArea ?? "suggestion";
+  const parameter = target.parameter ?? target.healthArea ?? target.area ?? "Relationship";
+  return {
+    accountId,
+    ruleId: target.ruleId ?? getFallbackRuleId(sourceKind),
+    parameter,
+    impactedMetric: target.impactedMetric ?? parameter,
+    title: target.title,
+    reason,
+    reviewer,
+    rag: target.urgency ?? target.rag ?? mapPriorityToRag(target.priority),
+    weakSignal: target.weakSignal ?? target.reason ?? target.sourceExcerpt ?? reason,
+    currentValue: target.currentValue ?? null,
+    targetValue: target.targetValue ?? null,
+    expectedLift: target.expectedLift ?? "",
+    successCriteria: target.successCriteria ?? "Rejected by reviewer.",
+    evidenceRequired: target.evidenceRequired ?? ["Rejection reason"],
+    triggerLogic: target.triggerLogic ?? null,
+    evidenceLiftPolicy: target.evidenceLiftPolicy ?? null,
+    activityScoreLogic: target.activityScoreLogic ?? null,
+    approvalSla: target.approvalSla ?? null,
+    reviewCadence: target.reviewCadence ?? null,
+    sourceType: sourceKind,
+    sourceRef: getSuggestionSourceRef(target),
+  };
+}
+
+function createInitialEvidenceForm(row, submitterName) {
+  return {
+    submittedBy: submitterName ?? "Unknown",
+    evidenceQuality: "Action tracker plus note",
+    title: row ? `Evidence for ${row.title}` : "",
+    notes: "",
+    artifactUrl: "",
+  };
+}
+
+function buildEvidenceChecklistPayload(evidenceQuality) {
+  const checks = {
+    "Meeting note only": [
+      "Meeting title/date is present",
+      "Action is explicit",
+      "Account/client context is present",
+      "Owner or next step is mentioned",
+    ],
+    "Action tracker plus note": [
+      "Meeting note is present",
+      "Owner is assigned",
+      "Due date is assigned",
+      "Action tracker or task reference is present",
+    ],
+    "Completed action plus outcome proof": [
+      "Completion evidence is present",
+      "Outcome/result is documented",
+      "Client or internal validation exists",
+      "Reviewer can tie outcome to impacted metric",
+    ],
+  };
+
+  return {
+    evidenceQuality,
+    checks: checks[evidenceQuality] ?? [],
+  };
+}
+
+function scoreAreaToParameter(area) {
+  const map = {
+    relationship: "Relationship",
+    project: "Project",
+    resource: "Resource",
+    financial: "Financial",
+    risk: "Risk",
+    csat: "CSAT",
+    contract: "Financial",
+    white_space: "Growth",
+  };
+  return map[area] ?? area;
+}
+
+function getExpectedLiftSortValue(value) {
+  const match = String(value ?? "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatLiftNumber(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function summarizeExpectedLift(rows) {
+  const percentValues = rows
+    .filter((row) => String(row.expectedLift ?? "").includes("%"))
+    .map((row) => getExpectedLiftSortValue(row.expectedLift))
+    .filter((value) => value !== null);
+
+  if (percentValues.length) {
+    const total = percentValues.reduce((sum, value) => sum + value, 0);
+    return `${formatLiftNumber(total)}% expected lift`;
+  }
+
+  const numericValues = rows
+    .map((row) => getExpectedLiftSortValue(row.expectedLift))
+    .filter((value) => value !== null);
+
+  if (!numericValues.length) return "0 expected lift";
+  return `Max ${formatLiftNumber(Math.max(...numericValues))} expected lift`;
+}
+
+function sortActivityRowsByExpectedLift(rows, direction) {
+  const baseRows = sortActivityRows(rows);
+
+  return [...baseRows].sort((left, right) => {
+    const leftValue = getExpectedLiftSortValue(left.expectedLift);
+    const rightValue = getExpectedLiftSortValue(right.expectedLift);
+
+    if (leftValue === null && rightValue === null) return 0;
+    if (leftValue === null) return 1;
+    if (rightValue === null) return -1;
+
+    return direction === "asc" ? leftValue - rightValue : rightValue - leftValue;
+  });
+}
+
+function sortActivityRows(rows) {
+  const rowTypeOrder = {
+    saved: 0,
+    suggested: 1,
+    existing: 2,
+  };
+  const ragOrder = { R: 0, A: 1, G: 2 };
+
+  return [...rows].sort((left, right) => {
+    const leftArea = ACTIVITY_TAB_AREAS.indexOf(left.area);
+    const rightArea = ACTIVITY_TAB_AREAS.indexOf(right.area);
+    if (leftArea !== rightArea) return leftArea - rightArea;
+
+    const leftType = rowTypeOrder[left.rowType] ?? 99;
+    const rightType = rowTypeOrder[right.rowType] ?? 99;
+    if (leftType !== rightType) return leftType - rightType;
+
+    return (ragOrder[left.rag] ?? 99) - (ragOrder[right.rag] ?? 99);
+  });
+}
+
+function createAiSuggestionActivityForm(suggestion, ownerName) {
+  return {
+    title: suggestion.title ?? "",
+    owner: ownerName ?? "KAM Person",
+    dueDate: getFutureDateInput(getSuggestedReviewDays(suggestion)),
+    nextStep: suggestion.nextStep ?? suggestion.description ?? suggestion.reason ?? "",
+  };
+}
+
+const SCORE_AREA_CONFIG = {
+  Relationship: {
+    key: "relationship",
+    blockKey: "relationshipHealth",
+    title: "Relationship Health",
+  },
+  Project: {
+    key: "project",
+    blockKey: "projectHealth",
+    title: "Project Health",
+  },
+  Resource: {
+    key: "resource",
+    blockKey: "resourceHealth",
+    title: "Resources Health",
+  },
+  Financial: {
+    key: "financial",
+    blockKey: "financialHealth",
+    title: "Financial Health",
+  },
+  Risk: {
+    key: "risk",
+    blockKey: "riskScoring",
+    title: "Risk Scoring",
+  },
+  CSAT: {
+    key: "csat",
+    blockKey: "csat",
+    title: "Customer Satisfaction Score",
+  },
+};
+
+function normalizeActivityText(value = "") {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getRelatedScoreGap(row) {
+  if (row.scoreAreaTitle && row.scoreSection) {
+    return `${row.scoreAreaTitle} > ${row.scoreSection}`;
+  }
+  if (row.impactedMetric && row.sourceKind === "score_metric") {
+    const areaTitle = SCORE_AREA_CONFIG[row.area]?.title ?? `${row.area} Health`;
+    return `${areaTitle} > ${row.impactedMetric}`;
+  }
+  return null;
+}
+
+function groupDuplicateActivityRows(rows) {
+  const grouped = new Map();
+
+  rows.forEach((row) => {
+    const key = [
+      normalizeActivityText(row.area),
+      normalizeActivityText(row.title),
+      normalizeActivityText(row.nextStep || row.description || ""),
+    ].join("|");
+    const existing = grouped.get(key);
+    const relatedScoreGap = getRelatedScoreGap(row);
+
+    if (!existing) {
+      grouped.set(key, {
+        ...row,
+        groupedRows: [row],
+        relatedScoreGaps: relatedScoreGap ? [relatedScoreGap] : [],
+      });
+      return;
+    }
+
+    const relatedScoreGaps = Array.from(
+      new Set([...existing.relatedScoreGaps, relatedScoreGap].filter(Boolean)),
+    );
+    const groupedRows = [...existing.groupedRows, row];
+    grouped.set(key, {
+      ...existing,
+      id: `group-${key}`,
+      groupedRows,
+      relatedScoreGaps,
+      expectedLift: summarizeExpectedLift(groupedRows),
+      reason:
+        relatedScoreGaps.length > 1
+          ? `Same activity is linked to ${relatedScoreGaps.length} score gaps.`
+          : existing.reason,
+    });
+  });
+
+  return [...grouped.values()];
+}
+
+function getAreaScoreValue(account, area) {
+  if (area === "Health") return Number(account.health ?? 100) / 10;
+  const config = SCORE_AREA_CONFIG[area];
+  if (!config) return 10;
+  return Number(account[config.blockKey]?.score ?? 10);
+}
+
+function getRowScoreValue(row, account) {
+  const rows = row.groupedRows ?? [row];
+  const values = rows.map((entry) => {
+    const explicit = Number(entry.scoreSortValue);
+    return Number.isFinite(explicit) ? explicit : getAreaScoreValue(account, entry.area);
+  });
+  return Math.min(...values);
+}
+
+function sortActivityRowsByLowestScore(rows, account) {
+  return [...rows].sort((left, right) => {
+    const leftScore = getRowScoreValue(left, account);
+    const rightScore = getRowScoreValue(right, account);
+    if (leftScore !== rightScore) return leftScore - rightScore;
+
+    const leftLift = getExpectedLiftSortValue(left.expectedLift);
+    const rightLift = getExpectedLiftSortValue(right.expectedLift);
+    if (leftLift !== null || rightLift !== null) return (rightLift ?? -1) - (leftLift ?? -1);
+
+    return sortActivityRows([left, right])[0] === left ? -1 : 1;
+  });
+}
+
+function findScoreMetricRef(account, row) {
+  if (row.scoreAreaKey && row.scoreSectionId && row.scoreCriterionId) {
+    return {
+      areaKey: row.scoreAreaKey,
+      sectionId: row.scoreSectionId,
+      fieldId: row.scoreCriterionId,
+    };
+  }
+
+  const sourceRef = getSuggestionSourceRef(row);
+  for (const config of Object.values(SCORE_AREA_CONFIG)) {
+    const block = account[config.blockKey];
+    for (const section of block?.kpiData ?? []) {
+      for (const field of section.fields ?? []) {
+        if (`score-metric-${config.key}-${section.id}-${field.id}` === sourceRef) {
+          return { areaKey: config.key, sectionId: section.id, fieldId: field.id };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function calculateKpiScore(sections) {
+  const sectionScores = sections.map((section) => {
+    const totalWeight = (section.fields ?? []).reduce(
+      (sum, field) => sum + (Number(field.weight) || 0),
+      0,
+    );
+    const earned = (section.fields ?? []).reduce(
+      (sum, field) => sum + (field.checked ? Number(field.weight) || 0 : 0),
+      0,
+    );
+    return totalWeight > 0 ? (earned / totalWeight) * 10 : 0;
+  });
+
+  if (!sectionScores.length) return 0;
+  return parseFloat(
+    (sectionScores.reduce((sum, score) => sum + score, 0) / sectionScores.length).toFixed(1),
+  );
+}
+
+async function completeScoreMetricRows({
+  account,
+  rows,
+  profile,
+  authAccessToken,
+  saveActivityScoreSnapshot,
+}) {
+  const rowsByArea = new Map();
+
+  rows.forEach((row) => {
+    const ref = findScoreMetricRef(account, row);
+    if (!ref) return;
+    const current = rowsByArea.get(ref.areaKey) ?? [];
+    current.push(ref);
+    rowsByArea.set(ref.areaKey, current);
+  });
+
+  if (!rowsByArea.size) {
+    throw new Error("This activity is not linked to a Score Marking Matrics criterion.");
+  }
+
+  for (const [areaKey, refs] of rowsByArea.entries()) {
+    const areaEntry = Object.values(SCORE_AREA_CONFIG).find((entry) => entry.key === areaKey);
+    if (!areaEntry) continue;
+    const block = account[areaEntry.blockKey];
+    const refKeys = new Set(refs.map((ref) => `${ref.sectionId}|${ref.fieldId}`));
+    const baseSections =
+      Array.isArray(block?.kpiData) && block.kpiData.length
+        ? block.kpiData
+        : buildDefaultSections(areaKey, block?.metrics ?? []);
+    const sections = baseSections.map((section) => ({
+      ...section,
+      fields: (section.fields ?? []).map((field) => ({
+        ...field,
+        checked: refKeys.has(`${section.id}|${field.id}`) ? true : field.checked,
+      })),
+    }));
+    const newScore = calculateKpiScore(sections);
+    const metricUpdates = sections
+      .map((section) => {
+        if (!section.metricId) return null;
+        const sectionScore = calculateKpiScore([section]);
+        return {
+          id: section.metricId,
+          label: section.name,
+          value: parseFloat(sectionScore.toFixed(1)),
+        };
+      })
+      .filter(Boolean);
+
+    await updateHealthBlock(account.id, areaKey, newScore, metricUpdates, sections);
+    await saveActivityScoreSnapshot({
+      data: {
+        authAccessToken,
+        accountId: account.id,
+        parameter: scoreAreaToParameter(areaKey),
+        metric: areaEntry.title,
+        score: newScore,
+        source: "activity_done",
+        notes: `Activity marked done by ${profile?.name ?? "Unknown"}.`,
+      },
+    });
+    await logAccountChanges(
+      account.id,
+      [
+        {
+          field: `Score: ${areaEntry.title}`,
+          oldValue: String(block?.score ?? ""),
+          newValue: newScore.toFixed(1),
+        },
+      ],
+      profile?.name ?? "Unknown",
+    );
+  }
+}
+
+function isMeetingRelatedActivity(row) {
+  const text = [row.title, row.reason, row.nextStep, row.area, row.impactedMetric]
+    .filter(Boolean)
+    .join(" ");
+  return /meeting|meetup|sync|workshop|call|session|discussion|review|follow[-\s]?up|qbr/i.test(
+    text,
+  );
+}
+
+function findPrimaryMeetingContact(account) {
+  const stakeholder =
+    (account.stakeholders ?? []).find((person) => person.email) ?? account.stakeholders?.[0];
+  return {
+    name: stakeholder?.name ?? account.primaryContact?.name ?? "",
+    role: stakeholder?.role ?? account.primaryContact?.role ?? "",
+    email: stakeholder?.email ?? account.primaryContact?.email ?? "",
+  };
+}
+
+function createMeetingSubject(account, row) {
+  if (/director/i.test(row.title + row.reason)) {
+    return `Director-Level Relationship Review - ${account.name}`;
+  }
+  if (/ceo|executive/i.test(row.title + row.reason)) {
+    return `Executive Relationship Review - ${account.name}`;
+  }
+  if (/architecture|technical|delivery|project/i.test(row.title + row.reason)) {
+    return `Project Health Review - ${account.name}`;
+  }
+  return `${row.title} - ${account.name}`;
+}
+
+function createMeetingScheduleForm(account, row, profile) {
+  const contact = findPrimaryMeetingContact(account);
+  const agenda = [
+    `Account: ${account.name}`,
+    `Activity: ${row.title}`,
+    "",
+    "Agenda:",
+    "- Review current score gap and account context",
+    "- Identify missing stakeholders, blockers, or owners",
+    "- Align on next steps and due dates",
+    "- Confirm follow-up actions",
+  ].join("\n");
+
+  return {
+    accountName: account.name,
+    contactName: [contact.name, contact.role].filter(Boolean).join(" - "),
+    contactEmail: contact.email,
+    subject: createMeetingSubject(account, row),
+    date: getFutureDateInput(2),
+    time: "10:00",
+    durationMinutes: 45,
+    description: `${agenda}\n\nScheduled by ${profile?.name ?? "KAM"}.`,
+  };
+}
+
+function combineDateAndTime(date, time) {
+  return new Date(`${date}T${time || "10:00"}`).toISOString();
+}
+
+function formatGoogleCalendarDateTime(date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+function buildGoogleCalendarTemplateUrl(form) {
+  const start = new Date(`${form.date}T${form.time || "10:00"}`);
+  const durationMinutes = Math.max(15, Number(form.durationMinutes) || 45);
+  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: form.subject.trim(),
+    dates: `${formatGoogleCalendarDateTime(start)}/${formatGoogleCalendarDateTime(end)}`,
+    details: form.description ?? "",
+  });
+  const attendee = form.contactEmail?.trim();
+  if (attendee) params.set("add", attendee);
+  if (typeof Intl !== "undefined") {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (timeZone) params.set("ctz", timeZone);
+  }
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function isValidEmailAddress(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value ?? "").trim());
+}
+/* ============================== TAB 4: Retention VS Growth ============================== */
+function RetentionGrowthTab({ account, opportunities, escalations }) {
+  const { profile } = useAuth();
+  if (account) {
+    return (
+      <RetentionGrowthTabPlanner
+        account={account}
+        opportunities={opportunities}
+        escalations={escalations}
+        profile={profile}
+      />
+    );
+  }
   const editable = getRolePermissions(profile?.role).write;
   const delivered = account.retentionGrowth.filter((s) => s.delivered);
   const offeredNotDelivered = account.retentionGrowth.filter((s) => s.offered && !s.delivered);
@@ -4132,6 +8704,273 @@ function EscalationsTab({ list }) {
     </div>
   );
 }
+
+function MeetingHistoryTab({ account, profile }) {
+  const queryClient = useQueryClient();
+  const role = profile?.role ?? "KAM";
+  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
+  const canSync = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
+  const [syncStatus, setSyncStatus] = useState("");
+  const { data: meetings = [], isLoading } = useQuery({
+    queryKey: ["fireflies-meeting-summaries", account.id],
+    queryFn: () => fetchFirefliesMeetingSummaries(account.id),
+    enabled: Boolean(account.id),
+  });
+  const { mutate: syncFirefliesMeetings, isPending: syncingMeetings } = useMutation({
+    mutationFn: () =>
+      fetchFirefliesRequiredActionItems({
+        data: {
+          accountId: account.id,
+          limit: 10,
+          daysBack: 60,
+        },
+      }),
+    onSuccess: (result) => {
+      setSyncStatus(result.status ?? "Fireflies meetings synced.");
+      queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+    },
+    onError: (error) => {
+      setSyncStatus(error?.message ?? "Fireflies meeting sync failed.");
+    },
+  });
+
+  const actionCount = meetings.reduce(
+    (total, meeting) => total + (meeting.derivedActionItems?.length ?? 0),
+    0,
+  );
+  const opportunityCount = meetings.reduce(
+    (total, meeting) => total + (meeting.derivedOpportunities?.length ?? 0),
+    0,
+  );
+  const summaryDerivedCount = meetings.reduce(
+    (total, meeting) =>
+      total +
+      (meeting.derivedActionItems ?? []).filter((item) => item.actionSource === "summary_derived")
+        .length,
+    0,
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-card border rounded-xl p-6 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div className="space-y-2">
+          <h3 className="text-sm font-bold">Fireflies Meeting History</h3>
+          <p className="text-xs text-muted-foreground max-w-3xl">
+            Each synced meeting stores its Fireflies summary, raw action items, agent-derived action
+            items, and guardrail diagnostics for {account.name}.
+          </p>
+          <p
+            className={`text-[11px] ${
+              syncStatus.includes("failed") || syncStatus.includes("Missing")
+                ? "text-crit"
+                : "text-muted-foreground"
+            }`}
+          >
+            {syncStatus || "Latest saved meetings appear below after Fireflies sync runs."}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!canSync || syncingMeetings}
+          onClick={() => syncFirefliesMeetings()}
+        >
+          {syncingMeetings && <Loader2 className="size-3.5 animate-spin mr-1" />}
+          Sync Fireflies
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <MiniStat label="Meetings saved" value={isLoading ? "Loading" : `${meetings.length}`} />
+        <MiniStat label="Action items detected" value={`${actionCount}`} />
+        <MiniStat label="Opportunities detected" value={`${opportunityCount}`} />
+        <MiniStat label="Summary-derived actions" value={`${summaryDerivedCount}`} />
+      </div>
+
+      {isLoading ? (
+        <div className="py-16 text-center text-xs text-muted-foreground">
+          Loading meeting history...
+        </div>
+      ) : meetings.length ? (
+        <div className="space-y-4">
+          {meetings.map((meeting) => (
+            <div key={meeting.id} className="bg-card border rounded-xl overflow-hidden">
+              <div className="px-6 py-4 border-b flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-bold leading-snug">{meeting.title}</h3>
+                    {meeting.agentDiagnostics?.summaryFallbackUsed && (
+                      <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
+                        Summary derived
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {formatMeetingHistoryDate(meeting.meetingDate)} · synced{" "}
+                    {formatMeetingHistoryDate(meeting.syncedAt)}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span className="text-[10px] font-bold uppercase rounded-full bg-muted text-muted-foreground px-2 py-1">
+                    {(meeting.derivedActionItems ?? []).length} actions
+                  </span>
+                  <span className="text-[10px] font-bold uppercase rounded-full bg-success/10 text-success px-2 py-1">
+                    {(meeting.derivedOpportunities ?? []).length} opportunities
+                  </span>
+                  {meeting.transcriptUrl && (
+                    <a
+                      href={meeting.transcriptUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] font-bold uppercase tracking-wide text-accent"
+                    >
+                      Transcript
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div className="space-y-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                    Summary
+                  </p>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {meeting.overview || meeting.shortSummary || "No summary text available."}
+                  </p>
+                </div>
+
+                {(meeting.derivedActionItems ?? []).length ? (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      Agent action items
+                    </p>
+                    <div className="grid gap-3">
+                      {meeting.derivedActionItems.map((item) => (
+                        <div key={item.id} className="rounded-lg border bg-muted/20 p-3 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <AreaBadge area={item.healthArea} />
+                            <RuleBadge ruleId={item.ruleId} />
+                            <ConfidenceBadge confidence={item.confidence} />
+                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
+                              {formatMeetingActionSource(item.actionSource)}
+                            </span>
+                          </div>
+                          <p className="text-sm font-semibold">{item.title}</p>
+                          <p className="text-xs text-muted-foreground">{item.expectedLift}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No action item passed the guarded activity rules for this meeting.
+                  </p>
+                )}
+
+                {(meeting.derivedOpportunities ?? []).length ? (
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      Agent opportunities
+                    </p>
+                    <div className="grid gap-3">
+                      {meeting.derivedOpportunities.map((opportunity) => (
+                        <div
+                          key={opportunity.id}
+                          className="rounded-lg border bg-success/5 p-3 space-y-2"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <AreaBadge area={opportunity.category} />
+                            <ConfidenceBadge confidence={opportunity.confidence} />
+                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
+                              {formatMeetingActionSource(opportunity.sourceType)}
+                            </span>
+                          </div>
+                          <p className="text-sm font-semibold">{opportunity.title}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {formatCurrency(opportunity.potential ?? 0)} · {opportunity.nextStep}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No commercial or retention opportunity passed the guarded opportunity rules.
+                  </p>
+                )}
+
+                <details className="group rounded-lg border bg-muted/20 text-xs">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                    <span className="font-bold uppercase tracking-widest text-muted-foreground">
+                      Meeting details
+                    </span>
+                    <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                  </summary>
+                  <div className="border-t p-3 space-y-3">
+                    <MiniStat
+                      label="Participants"
+                      value={
+                        meeting.participants?.length
+                          ? meeting.participants.join(", ")
+                          : "Not available"
+                      }
+                    />
+                    <MiniStat
+                      label="Raw Fireflies action items"
+                      value={meeting.actionItems || "No explicit action items from Fireflies."}
+                    />
+                    <MiniStat
+                      label="Agent diagnostics"
+                      value={`Source: ${formatMeetingActionSource(
+                        meeting.agentDiagnostics?.actionSource,
+                      )}; candidates: ${meeting.agentDiagnostics?.candidateCount ?? 0}; accepted: ${
+                        meeting.agentDiagnostics?.acceptedCount ?? 0
+                      }; opportunity candidates: ${
+                        meeting.agentDiagnostics?.opportunity?.candidateCount ?? 0
+                      }; opportunities: ${
+                        meeting.agentDiagnostics?.opportunity?.acceptedCount ?? 0
+                      }`}
+                    />
+                  </div>
+                </details>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-card border rounded-xl p-12 text-center">
+          <Clock className="size-6 text-muted-foreground mx-auto mb-2" />
+          <p className="text-sm text-muted-foreground">No Fireflies meetings saved yet.</p>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Sync Fireflies to save meeting summaries and auto-create guarded activity items.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatMeetingHistoryDate(value) {
+  if (!value) return "Recent";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatMeetingActionSource(source) {
+  if (source === "llm_fallback") return "LLM fallback";
+  if (source === "summary_derived") return "Summary derived";
+  if (source === "explicit_action_items") return "Fireflies action item";
+  return "Meeting agent";
+}
+
 /* ============================== TAB 7: Client History ============================== */
 function ClientHistoryTab({ accountId, accountName }) {
   const { data: history = [], isLoading } = useQuery({
