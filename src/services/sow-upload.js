@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+const VALID_CONTRACT_TYPES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
 
 function readEnv(name) {
   if (typeof process !== "undefined" && process.env?.[name]) return process.env[name];
@@ -97,6 +98,62 @@ function normalizeExtractedFields(fields) {
   };
 }
 
+function validateSowApply(input) {
+  if (!input || typeof input !== "object") throw new Error("Invalid SOW apply payload.");
+  const accountId = String(input.accountId ?? "").trim();
+  const accessToken = String(input.accessToken ?? "");
+  const fields = input.fields && typeof input.fields === "object" ? input.fields : {};
+  if (!accountId) throw new Error("Account ID is required before applying SOW fields.");
+  if (!accessToken) throw new Error("Please sign in again before applying SOW fields.");
+  return { accountId, accessToken, fields: normalizeExtractedFields(fields) };
+}
+
+async function createSowAdminClient(accessToken) {
+  const supabaseUrl = readEnv("VITE_SUPABASE_URL");
+  const supabaseAnonKey = readEnv("VITE_SUPABASE_ANON_KEY");
+  const serviceRoleKey = readEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!supabaseUrl || !supabaseAnonKey || !serviceRoleKey) {
+    throw new Error("Supabase environment variables are required before applying SOW fields.");
+  }
+
+  const { createClient } = await import("@supabase/supabase-js");
+  const requester = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await requester.auth.getUser(accessToken);
+  if (error || !data?.user) throw new Error("Please sign in again before applying SOW fields.");
+
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+function buildSowUpdates(accountId, fields) {
+  const accountUpdates = {};
+  const contractUpdates = { account_id: accountId };
+
+  if (fields.accountName) accountUpdates.name = fields.accountName;
+  if (Number.isFinite(fields.arr)) accountUpdates.arr = Math.round(fields.arr);
+  if (Number.isFinite(fields.contractValue)) {
+    accountUpdates.contract_value = Math.round(fields.contractValue);
+  }
+  if (Number.isFinite(fields.renewalDays)) {
+    accountUpdates.renewal_days = Math.max(0, Math.round(fields.renewalDays));
+  }
+  if (fields.contractType && VALID_CONTRACT_TYPES.has(fields.contractType)) {
+    accountUpdates.contract_type = fields.contractType;
+    contractUpdates.type = fields.contractType;
+  }
+  if (fields.contractDuration) contractUpdates.duration = fields.contractDuration;
+
+  if (Object.keys(accountUpdates).length === 0 && Object.keys(contractUpdates).length === 1) {
+    throw new Error("No supported account fields were found in this SOW.");
+  }
+
+  return { accountUpdates, contractUpdates };
+}
+
 export const extractSowFields = createServerFn({ method: "POST" })
   .inputValidator(validateSowUpload)
   .handler(async ({ data }) => {
@@ -139,4 +196,28 @@ export const extractSowFields = createServerFn({ method: "POST" })
     } finally {
       await fs.rm(tempPath, { force: true });
     }
+  });
+
+export const applySowFieldsServer = createServerFn({ method: "POST" })
+  .inputValidator(validateSowApply)
+  .handler(async ({ data }) => {
+    const { accountUpdates, contractUpdates } = buildSowUpdates(data.accountId, data.fields);
+    const admin = await createSowAdminClient(data.accessToken);
+
+    if (Object.keys(accountUpdates).length > 0) {
+      const { error } = await admin.from("accounts").update(accountUpdates).eq("id", data.accountId);
+      if (error) throw error;
+    }
+
+    if (Object.keys(contractUpdates).length > 1) {
+      const { error } = await admin
+        .from("contract_details")
+        .upsert(
+          { ...contractUpdates, updated_at: new Date().toISOString() },
+          { onConflict: "account_id" },
+        );
+      if (error) throw error;
+    }
+
+    return { accountUpdates, contractUpdates };
   });
