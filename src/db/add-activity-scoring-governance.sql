@@ -177,47 +177,57 @@ ALTER TABLE public.activity_rule_activities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activity_rule_evidence ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activity_evidence_quality_checklist ENABLE ROW LEVEL SECURITY;
 
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.activity_score_history TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.activity_rule_activities TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.activity_rule_evidence TO anon, authenticated;
+GRANT SELECT ON public.activity_evidence_quality_checklist TO anon, authenticated;
+
 DO $$ BEGIN
   CREATE POLICY "authenticated can read activity_score_history"
-    ON public.activity_score_history FOR SELECT TO authenticated USING (true);
+    ON public.activity_score_history FOR SELECT TO anon, authenticated USING (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can insert activity_score_history"
-    ON public.activity_score_history FOR INSERT TO authenticated WITH CHECK (true);
+    ON public.activity_score_history FOR INSERT TO anon, authenticated WITH CHECK (true);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "authenticated can update activity_score_history"
+    ON public.activity_score_history FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can read activity_rule_activities"
-    ON public.activity_rule_activities FOR SELECT TO authenticated USING (true);
+    ON public.activity_rule_activities FOR SELECT TO anon, authenticated USING (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can insert activity_rule_activities"
-    ON public.activity_rule_activities FOR INSERT TO authenticated WITH CHECK (true);
+    ON public.activity_rule_activities FOR INSERT TO anon, authenticated WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can update activity_rule_activities"
-    ON public.activity_rule_activities FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+    ON public.activity_rule_activities FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can read activity_rule_evidence"
-    ON public.activity_rule_evidence FOR SELECT TO authenticated USING (true);
+    ON public.activity_rule_evidence FOR SELECT TO anon, authenticated USING (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can insert activity_rule_evidence"
-    ON public.activity_rule_evidence FOR INSERT TO authenticated WITH CHECK (true);
+    ON public.activity_rule_evidence FOR INSERT TO anon, authenticated WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can update activity_rule_evidence"
-    ON public.activity_rule_evidence FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+    ON public.activity_rule_evidence FOR UPDATE TO anon, authenticated USING (true) WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can read activity_evidence_quality_checklist"
-    ON public.activity_evidence_quality_checklist FOR SELECT TO authenticated USING (true);
+    ON public.activity_evidence_quality_checklist FOR SELECT TO anon, authenticated USING (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

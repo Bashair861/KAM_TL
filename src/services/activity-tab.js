@@ -19,6 +19,30 @@ const AREA_ORDER = new Map(ACTIVITY_TAB_AREAS.map((area, index) => [area, index]
 const HIGH_VALUE_THRESHOLD = 100_000;
 const RETENTION_GROWTH_AREAS = new Set(["Growth", "Retention"]);
 const RETENTION_GROWTH_RULE_IDS = new Set(["RET-01", "GROW-01", "GROW-02"]);
+const SUMMARY_OPPORTUNITY_SOURCE_PATTERN = /linkedin summary|website summary|summary scan/i;
+const STRICT_SUMMARY_OPPORTUNITY_SIGNAL_PATTERN =
+  /\b(hire|hiring|hired|hires|job|jobs|job\s+post|job\s+opening|open\s+role|opening|openings|recruit|recruiting|recruitment|headcount|expand|expands|expanded|expanding|expansion|opportunity|opportunities)\b/i;
+const SUMMARY_OPPORTUNITY_STOP_WORDS = new Set([
+  "account",
+  "and",
+  "business",
+  "client",
+  "company",
+  "for",
+  "from",
+  "growth",
+  "need",
+  "needs",
+  "new",
+  "rapid",
+  "service",
+  "services",
+  "support",
+  "the",
+  "this",
+  "to",
+  "with",
+]);
 
 const SCORE_BLOCKS = [
   {
@@ -71,6 +95,158 @@ const SCORE_BLOCKS = [
   },
 ];
 
+const SCORE_KPI_DEFAULTS = {
+  relationship: [
+    {
+      name: "CEO & Executive Engagement",
+      fields: [
+        { label: "CEO-to-CEO meeting held this quarter", weight: 40 },
+        { label: "Director-level meeting completed on schedule", weight: 35 },
+        { label: "Executive sponsor actively engaged", weight: 25 },
+      ],
+    },
+    {
+      name: "Meeting Cadence",
+      fields: [
+        { label: "Monthly cadence meetings held on schedule", weight: 50 },
+        { label: "Action items closed before next cycle", weight: 30 },
+        { label: "Meeting notes shared within 24 hours", weight: 20 },
+      ],
+    },
+    {
+      name: "Cooperation & Trust",
+      fields: [
+        { label: "Client responsive to requests within 48 hours", weight: 60 },
+        { label: "Joint planning or roadmap session completed", weight: 40 },
+      ],
+    },
+  ],
+  project: [
+    {
+      name: "Delivery Performance",
+      fields: [
+        { label: "Sprint or milestone delivered on time", weight: 50 },
+        { label: "Defect rate within agreed threshold", weight: 30 },
+        { label: "No critical production incidents this cycle", weight: 20 },
+      ],
+    },
+    {
+      name: "Quality & Feedback",
+      fields: [
+        { label: "Client feedback positive this cycle", weight: 55 },
+        { label: "Feedback actioned and communicated back to client", weight: 45 },
+      ],
+    },
+    {
+      name: "Scope & Change Control",
+      fields: [
+        { label: "Change requests formally reviewed and documented", weight: 50 },
+        { label: "No unmanaged scope creep this cycle", weight: 50 },
+      ],
+    },
+  ],
+  resource: [
+    {
+      name: "Backup & Continuity",
+      fields: [
+        { label: "Backup engineer assigned for every critical role", weight: 55 },
+        { label: "Knowledge transfer documentation up to date", weight: 45 },
+      ],
+    },
+    {
+      name: "Staffing Stability",
+      fields: [
+        { label: "No unplanned attrition on account this month", weight: 50 },
+        { label: "Planned leaves managed without delivery impact", weight: 50 },
+      ],
+    },
+    {
+      name: "Critical Resource Retention",
+      fields: [
+        { label: "Critical resources engaged and retained", weight: 55 },
+        { label: "Succession plan in place for key technical roles", weight: 45 },
+      ],
+    },
+  ],
+  financial: [
+    {
+      name: "Revenue Performance",
+      fields: [
+        { label: "Monthly billing target met", weight: 50 },
+        { label: "ARR growth on track versus annual plan", weight: 50 },
+      ],
+    },
+    {
+      name: "Margin & Efficiency",
+      fields: [
+        { label: "Resource utilization above 80 percent", weight: 50 },
+        { label: "Cost overruns within 5 percent of budget", weight: 50 },
+      ],
+    },
+    {
+      name: "Commercial Growth",
+      fields: [
+        { label: "Upsell or expansion proposal submitted this quarter", weight: 55 },
+        { label: "Renewal pipeline initiated before 90-day mark", weight: 45 },
+      ],
+    },
+  ],
+  risk: [
+    {
+      name: "Competitive Risk",
+      fields: [
+        { label: "Competitor activity monitored and documented", weight: 45 },
+        { label: "Defense strategy or counter-proposal ready", weight: 55 },
+      ],
+    },
+    {
+      name: "Relationship & POC Risk",
+      fields: [
+        { label: "Key POC stable - no resignation or transfer risk", weight: 50 },
+        { label: "C-level sponsor accessible and engaged", weight: 50 },
+      ],
+    },
+    {
+      name: "Financial Risk",
+      fields: [
+        { label: "Invoice paid within agreed payment terms", weight: 55 },
+        { label: "No overdue balance outstanding", weight: 45 },
+      ],
+    },
+    {
+      name: "Operational Risk",
+      fields: [
+        { label: "Compliance and regulatory requirements met", weight: 50 },
+        { label: "No geopolitical disruptions impacting delivery", weight: 50 },
+      ],
+    },
+  ],
+  csat: [
+    {
+      name: "NPS & Surveys",
+      fields: [
+        { label: "NPS score collected and above 7 this quarter", weight: 45 },
+        { label: "Quarterly satisfaction survey completed", weight: 35 },
+        { label: "Low-score responses addressed within 2 weeks", weight: 20 },
+      ],
+    },
+    {
+      name: "Support Quality",
+      fields: [
+        { label: "Support tickets resolved within SLA", weight: 55 },
+        { label: "CSAT rating of 4 or above on closed tickets", weight: 45 },
+      ],
+    },
+    {
+      name: "Executive Sentiment",
+      fields: [
+        { label: "Executive sponsor expressed positive sentiment", weight: 55 },
+        { label: "No major complaints or unresolved escalations", weight: 45 },
+      ],
+    },
+  ],
+};
+
 export function isRetentionGrowthActivityArea(area) {
   return RETENTION_GROWTH_AREAS.has(area);
 }
@@ -79,6 +255,77 @@ function toId(value) {
   return String(value)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-");
+}
+
+function normalizeOpportunityText(value = "") {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function canonicalOpportunityToken(token = "") {
+  if (/^(hire|hiring|hired|hires|recruit|recruiting|recruitment|headcount)$/.test(token)) {
+    return "hire";
+  }
+  if (/^(job|jobs|role|roles|opening|openings)$/.test(token)) return "job";
+  if (/^(expand|expands|expanded|expanding|expansion|growth)$/.test(token)) return "expand";
+  if (/^opportunit/.test(token)) return "opportunity";
+  if (/^consult/.test(token)) return "consultant";
+  if (/^internation/.test(token)) return "international";
+  return token;
+}
+
+function getOpportunityTokens(item = {}) {
+  return new Set(
+    normalizeOpportunityText([item.title, item.nextStep, item.source].filter(Boolean).join(" "))
+      .split(" ")
+      .map(canonicalOpportunityToken)
+      .filter((token) => token.length >= 3 && !SUMMARY_OPPORTUNITY_STOP_WORDS.has(token)),
+  );
+}
+
+function isSimilarOpportunity(left, right) {
+  const leftTitle = normalizeOpportunityText(left?.title);
+  const rightTitle = normalizeOpportunityText(right?.title);
+  if (leftTitle && rightTitle && leftTitle === rightTitle) return true;
+
+  const leftTokens = getOpportunityTokens(left);
+  const rightTokens = getOpportunityTokens(right);
+  if (!leftTokens.size || !rightTokens.size) return false;
+
+  const intersectionSize = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  const unionSize = new Set([...leftTokens, ...rightTokens]).size;
+  const overlap = intersectionSize / Math.min(leftTokens.size, rightTokens.size);
+  const jaccard = intersectionSize / unionSize;
+  return jaccard >= 0.72 || (overlap >= 0.9 && intersectionSize >= 3);
+}
+
+function isSummaryOpportunity(item = {}) {
+  return SUMMARY_OPPORTUNITY_SOURCE_PATTERN.test(`${item.source ?? ""} ${item.signalDate ?? ""}`);
+}
+
+function hasStrictSummaryOpportunitySignal(item = {}) {
+  if (!isSummaryOpportunity(item)) return true;
+  return STRICT_SUMMARY_OPPORTUNITY_SIGNAL_PATTERN.test(
+    [item.title, item.nextStep].filter(Boolean).join(" "),
+  );
+}
+
+function dedupeSummaryOpportunities(items = []) {
+  const accepted = [];
+  for (const item of items) {
+    if (!hasStrictSummaryOpportunitySignal(item)) continue;
+    if (
+      isSummaryOpportunity(item) &&
+      accepted.some((existing) => isSummaryOpportunity(existing) && isSimilarOpportunity(existing, item))
+    ) {
+      continue;
+    }
+    accepted.push(item);
+  }
+  return accepted;
 }
 
 function buildEvidence({ source, sourceType, date, excerpt, reason }) {
@@ -205,6 +452,30 @@ function getFallbackKpiData(block) {
   }));
 }
 
+function getDefaultKpiData(area) {
+  const templates = SCORE_KPI_DEFAULTS[area] ?? [];
+  return templates.map((template, sectionIndex) => ({
+    id: `kpi-${area}-${sectionIndex}`,
+    metricId: null,
+    name: template.name,
+    fields: template.fields.map((field, fieldIndex) => ({
+      id: `${area}-${sectionIndex}-${fieldIndex}`,
+      label: field.label,
+      weight: field.weight,
+      checked: false,
+    })),
+  }));
+}
+
+function getScoreKpiData(config, block) {
+  if (Array.isArray(block?.kpiData) && block.kpiData.length) return block.kpiData;
+
+  const metricFallback = getFallbackKpiData(block);
+  if (metricFallback.length) return metricFallback;
+
+  return getDefaultKpiData(config.key);
+}
+
 function formatScoreMetricExpectedLift(field) {
   const weight = Number(field?.weight ?? 0);
   if (!Number.isFinite(weight)) return "0%";
@@ -225,7 +496,7 @@ function getSectionScore(section) {
 function getScoreMetricActivities(account) {
   return SCORE_BLOCKS.flatMap((config) => {
     const block = account[config.blockKey];
-    const sections = block?.kpiData ?? getFallbackKpiData(block);
+    const sections = getScoreKpiData(config, block);
 
     return sections.flatMap((section) =>
       (section.fields ?? [])
@@ -341,7 +612,7 @@ function buildOpportunityEvidence(opportunity, account) {
 }
 
 function buildBackendOpportunities(account, opportunities) {
-  return (opportunities ?? []).map((opportunity) => {
+  const items = (opportunities ?? []).map((opportunity) => {
     const healthArea =
       isEscalationSource(opportunity.source) || isRetentionOpportunitySource(opportunity.source)
         ? "Retention"
@@ -364,6 +635,8 @@ function buildBackendOpportunities(account, opportunities) {
     item.evidence = buildOpportunityEvidence(item, account);
     return item;
   });
+
+  return dedupeSummaryOpportunities(items);
 }
 
 function buildWhitespaceOpportunity(account) {

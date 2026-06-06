@@ -183,6 +183,106 @@ function isDuplicateRuleActivityInput(input, row) {
   return sameArea && (titleMatch || detailMatch);
 }
 
+function buildActionItemTaskDescription(input) {
+  return [
+    input.description,
+    input.reason ? `Reason: ${input.reason}` : "",
+    input.source ? `Source: ${input.source}` : "",
+    input.healthArea ? `Health area: ${input.healthArea}` : "",
+    input.expectedLift ? `Expected lift: ${input.expectedLift}` : "",
+  ]
+    .filter((part) => String(part ?? "").trim())
+    .join("\n\n");
+}
+
+const ACTIVITY_AI_SUGGESTIONS_TABLE = "activity_ai_suggestions";
+const MEETING_INSIGHT_ACTION_FOCUS = "meeting_insight_action_item";
+
+function normalizeAiInsightStatus(status) {
+  if (status === "converted_to_action" || status === "dismissed" || status === "draft") {
+    return status;
+  }
+  return "draft";
+}
+
+function getAiInsightResponse(row) {
+  return row?.response && typeof row.response === "object" ? row.response : {};
+}
+
+function mapStagedAiRecommendation(row) {
+  const response = getAiInsightResponse(row);
+  return {
+    id: row.id,
+    sourceId: row.source_id ?? response.sourceId ?? response.originalId ?? row.id,
+    title: row.title ?? response.title ?? row.summary ?? row.prompt ?? "Untitled recommendation",
+    description: row.description ?? response.description ?? "",
+    healthArea: row.health_area ?? response.healthArea ?? response.health_area ?? "",
+    expectedLift: row.expected_lift ?? response.expectedLift ?? response.expected_lift ?? "",
+    reason: row.reason ?? response.reason ?? "",
+    sourceSummary:
+      row.source_reference ??
+      response.sourceSummary ??
+      response.source_reference ??
+      response.sourceReference ??
+      row.source ??
+      "",
+    status: row.status,
+    createdAt: row.created_at,
+  };
+}
+
+function buildAiRecommendationPayload(input) {
+  const suggestion = input.suggestion ?? input;
+  return {
+    originalId: suggestion.id ?? suggestion.sourceId ?? "",
+    title: String(suggestion.title ?? "").trim(),
+    description: String(suggestion.description ?? "").trim(),
+    healthArea: suggestion.healthArea ?? suggestion.health_area ?? "",
+    expectedLift: suggestion.expectedLift ?? suggestion.expected_lift ?? "",
+    reason: suggestion.reason ?? "",
+    sourceSummary:
+      suggestion.sourceSummary ?? suggestion.source_reference ?? suggestion.sourceReference ?? "",
+  };
+}
+
+function buildLocalStagedAiRecommendation(accountId, payload, status = "draft") {
+  const sourceId =
+    payload.originalId ||
+    normalizeActivityDuplicateText(payload.title) ||
+    `recommendation-${Date.now()}`;
+
+  return {
+    id: `local-ai-${accountId}-${sourceId}`,
+    sourceId,
+    title: payload.title || "Untitled recommendation",
+    description: payload.description ?? "",
+    healthArea: payload.healthArea ?? "",
+    expectedLift: payload.expectedLift ?? "",
+    reason: payload.reason ?? "",
+    sourceSummary: payload.sourceSummary ?? "AI Suggestions",
+    status,
+    createdAt: new Date().toISOString(),
+    localOnly: true,
+  };
+}
+
+function buildMeetingInsightPayload(input) {
+  const item = input.item ?? input;
+  return {
+    sourceRef: input.sourceRef ?? item.sourceRef ?? item.sourceId ?? item.id ?? "",
+    title: String(item.title ?? "").trim(),
+    description: item.description ?? item.reason ?? item.nextStep ?? "",
+    healthArea: item.healthArea ?? item.area ?? "",
+    expectedLift: item.expectedLift ?? "",
+    reason: item.reason ?? "",
+    sourceSummary: item.meetingTitle
+      ? `Meeting Insight: ${item.meetingTitle}`
+      : (item.sourceSummary ?? "Meeting Insight"),
+    meetingTitle: item.meetingTitle ?? "",
+    meetingDate: item.meetingDate ?? "",
+  };
+}
+
 function mapActivityRuleThresholdOverride(row) {
   return {
     id: row.id,
@@ -225,7 +325,41 @@ function mapFirefliesMeetingSummary(row) {
 }
 
 function isMissingTableError(error) {
-  return error?.code === "42P01" || /relation .* does not exist/i.test(error?.message ?? "");
+  const message = String(error?.message ?? "").toLowerCase();
+  return (
+    error?.code === "42P01" ||
+    error?.code === "PGRST205" ||
+    /relation .* does not exist/i.test(error?.message ?? "") ||
+    message.includes("could not find the table") ||
+    (message.includes("schema cache") && message.includes("table"))
+  );
+}
+
+function isMissingColumnError(error, column = "") {
+  const message = String(error?.message ?? "").toLowerCase();
+  const columnName = String(column ?? "").toLowerCase();
+  return (
+    error?.code === "42703" ||
+    error?.code === "PGRST204" ||
+    (columnName && message.includes(columnName)) ||
+    (message.includes("could not find") && message.includes("column")) ||
+    (message.includes("schema cache") && message.includes("column"))
+  );
+}
+
+function getActivityAiSuggestionsSchemaError() {
+  return new Error(
+    "activity_ai_suggestions table schema does not match the app. Run src/db/add-activity-ai-suggestions.sql in Supabase SQL Editor, then restart the app.",
+  );
+}
+
+function isActivityAiSuggestionsTypeError(error) {
+  const message = String(error?.message ?? "").toLowerCase();
+  return (
+    error?.code === "22P02" &&
+    message.includes("invalid input syntax") &&
+    message.includes("uuid")
+  );
 }
 function getRowComplete(row) {
   return Boolean(row.complete ?? row.completed ?? row.Complete ?? false);
@@ -305,14 +439,6 @@ export async function fetchAccounts(opts) {
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map(mapFlatAccount);
-}
-
-function isMissingColumnError(error, column) {
-  if (!error) return false;
-  const message = error.message?.toLowerCase() ?? "";
-  return (
-    error.code === "42703" || error.code === "PGRST204" || message.includes(column.toLowerCase())
-  );
 }
 
 export async function fetchKamTasks(opts = {}) {
@@ -485,6 +611,266 @@ export async function updateDashboardTaskComplete(taskId, complete, healthMetric
     complete,
     healthMetricId,
   });
+}
+
+export async function createAccountActionItemTask(input) {
+  const accountId = input.accountId;
+  const title = String(input.title ?? "").trim();
+  if (!accountId) throw new Error("Account is required before creating an action item.");
+  if (!title) throw new Error("Action item title is required.");
+
+  const description = buildActionItemTaskDescription(input);
+  const { data: existingRows, error: existingError } = await supabase
+    .from("tasks")
+    .select("*")
+    .eq("account_id", accountId)
+    .limit(200);
+
+  if (isMissingTableError(existingError)) {
+    throw new Error("Tasks table is missing. Run the tasks migration before adding action items.");
+  }
+  if (existingError) throw existingError;
+
+  const normalizedTitle = normalizeActivityDuplicateText(title);
+  const normalizedDescription = normalizeActivityDuplicateText(description);
+  const duplicate = (existingRows ?? [])
+    .filter((row) => !getRowComplete(row))
+    .some((row) => {
+      const rowTitle = normalizeActivityDuplicateText(row.title ?? row.name ?? row.label);
+      const rowDescription = normalizeActivityDuplicateText(row.description);
+      const titleMatch =
+        rowTitle &&
+        (rowTitle === normalizedTitle ||
+          rowTitle.includes(normalizedTitle) ||
+          normalizedTitle.includes(rowTitle));
+      const descriptionMatch =
+        !normalizedDescription ||
+        !rowDescription ||
+        rowDescription.includes(normalizedDescription) ||
+        normalizedDescription.includes(rowDescription);
+      return titleMatch && descriptionMatch;
+    });
+
+  if (duplicate) throw new Error("This action item already exists.");
+
+  const row = {
+    name: title,
+    description,
+    type: "Action Item",
+    account_id: accountId,
+    health_metric_id: input.healthMetricId ?? null,
+  };
+
+  const { data, error } = await supabase.from("tasks").insert(row).select("*").single();
+  if (error) throw error;
+  return mapTask(data);
+}
+
+export async function fetchStagedAiRecommendations(input = {}) {
+  if (!input.accountId) return [];
+  const query = supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .select("*")
+    .eq("account_id", input.accountId)
+    .eq("status", "draft")
+    .order("created_at", { ascending: true })
+    .limit(100);
+
+  const { data, error } = await query;
+  if (isMissingTableError(error)) return [];
+  if (isMissingColumnError(error) || isActivityAiSuggestionsTypeError(error)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (error) throw error;
+  return (data ?? []).map(mapStagedAiRecommendation);
+}
+
+export async function stageAccountAiRecommendation(input = {}) {
+  const accountId = input.accountId;
+  if (!accountId) throw new Error("Account is required before staging an AI recommendation.");
+
+  const payload = buildAiRecommendationPayload(input);
+  if (!payload.title) throw new Error("AI recommendation title is required.");
+
+  const existingQuery = supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("status", "draft")
+    .limit(100);
+
+  const { data: existingRows, error: existingError } = await existingQuery;
+  if (isMissingTableError(existingError)) {
+    return buildLocalStagedAiRecommendation(accountId, payload);
+  }
+  if (isMissingColumnError(existingError) || isActivityAiSuggestionsTypeError(existingError)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (existingError) throw existingError;
+
+  const normalizedTitle = normalizeActivityDuplicateText(payload.title);
+  const duplicate = (existingRows ?? []).find((row) => {
+    const rowTitle = normalizeActivityDuplicateText(mapStagedAiRecommendation(row).title);
+    return rowTitle === normalizedTitle;
+  });
+  if (duplicate) return mapStagedAiRecommendation(duplicate);
+
+  const row = {
+    account_id: accountId,
+    requested_by: input.requestedBy ?? null,
+    source_id: payload.originalId || normalizeActivityDuplicateText(payload.title),
+    title: payload.title,
+    description: payload.description,
+    health_area: payload.healthArea,
+    expected_lift: payload.expectedLift,
+    reason: payload.reason,
+    source_reference: payload.sourceSummary || "AI Suggestions",
+    status: "draft",
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .insert(row)
+    .select("*")
+    .single();
+  if (isMissingTableError(error)) {
+    return buildLocalStagedAiRecommendation(accountId, payload);
+  }
+  if (isMissingColumnError(error) || isActivityAiSuggestionsTypeError(error)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (error) throw error;
+  return mapStagedAiRecommendation(data);
+}
+
+export async function updateStagedAiRecommendationStatus(input = {}) {
+  if (!input.id) throw new Error("AI recommendation id is required.");
+  const status = normalizeAiInsightStatus(input.status);
+  if (String(input.id).startsWith("local-ai-")) {
+    return {
+      id: input.id,
+      status,
+      localOnly: true,
+    };
+  }
+  const { data, error } = await supabase
+    .from(ACTIVITY_AI_SUGGESTIONS_TABLE)
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", input.id)
+    .select("*")
+    .single();
+
+  if (isMissingTableError(error)) {
+    return {
+      id: input.id,
+      status,
+      localOnly: true,
+    };
+  }
+  if (isMissingColumnError(error) || isActivityAiSuggestionsTypeError(error)) {
+    throw getActivityAiSuggestionsSchemaError();
+  }
+  if (error) throw error;
+  return mapStagedAiRecommendation(data);
+}
+
+export async function fetchMeetingInsightActionStates(input = {}) {
+  if (!input.accountId) return [];
+  const { data, error } = await supabase
+    .from("ai_insights")
+    .select("id, status, summary, response, created_at, updated_at")
+    .eq("account_id", input.accountId)
+    .eq("scope", "account")
+    .eq("focus", MEETING_INSIGHT_ACTION_FOCUS)
+    .in("status", ["converted_to_action", "dismissed"])
+    .limit(300);
+
+  if (isMissingTableError(error)) return [];
+  if (error) throw error;
+
+  return (data ?? []).map((row) => {
+    const response = getAiInsightResponse(row);
+    return {
+      id: row.id,
+      status: row.status,
+      sourceRef: response.sourceRef ?? "",
+      title: response.title ?? row.summary ?? "",
+    };
+  });
+}
+
+export async function markMeetingInsightActionItemState(input = {}) {
+  const accountId = input.accountId;
+  if (!accountId) throw new Error("Account is required before saving meeting insight state.");
+
+  const payload = buildMeetingInsightPayload(input);
+  if (!payload.title) throw new Error("Meeting insight title is required.");
+  const status = normalizeAiInsightStatus(input.status ?? "converted_to_action");
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from("ai_insights")
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("scope", "account")
+    .eq("focus", MEETING_INSIGHT_ACTION_FOCUS)
+    .limit(300);
+
+  if (isMissingTableError(existingError)) {
+    return null;
+  }
+  if (existingError) throw existingError;
+
+  const normalizedSourceRef = normalizeActivityDuplicateText(payload.sourceRef);
+  const normalizedTitle = normalizeActivityDuplicateText(payload.title);
+  const existing = (existingRows ?? []).find((row) => {
+    const response = getAiInsightResponse(row);
+    const rowSourceRef = normalizeActivityDuplicateText(response.sourceRef);
+    const rowTitle = normalizeActivityDuplicateText(response.title ?? row.summary ?? row.prompt);
+    return (
+      (normalizedSourceRef && rowSourceRef === normalizedSourceRef) ||
+      (normalizedTitle && rowTitle === normalizedTitle)
+    );
+  });
+
+  if (existing) {
+    const { data, error } = await supabase
+      .from("ai_insights")
+      .update({
+        status,
+        response: { ...getAiInsightResponse(existing), ...payload },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  const row = {
+    scope: "account",
+    account_id: accountId,
+    requested_by: input.requestedBy ?? null,
+    prompt: payload.title,
+    focus: MEETING_INSIGHT_ACTION_FOCUS,
+    timeframe: "staged",
+    summary: payload.title,
+    risk_level: "medium",
+    source: payload.sourceSummary || "Meeting Insight",
+    response: payload,
+    context_summary: {
+      healthArea: payload.healthArea,
+      expectedLift: payload.expectedLift,
+    },
+    status,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase.from("ai_insights").insert(row).select("*").single();
+  if (isMissingTableError(error)) return null;
+  if (error) throw error;
+  return data;
 }
 export async function fetchKamUsers() {
   const withStatus = await supabase

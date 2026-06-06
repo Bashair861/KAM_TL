@@ -65,28 +65,104 @@ function validateCreateEventInput(data) {
   };
 }
 
+function validateScheduleContextInput(data) {
+  const input = data && typeof data === "object" ? data : {};
+  return {
+    ...validateAuthInput(input),
+    date: cleanString(input.date),
+    durationMinutes: Number(input.durationMinutes ?? 45),
+  };
+}
+
 function env(name) {
-  return process.env[name] ?? "";
+  const metaEnv =
+    typeof import.meta !== "undefined" && import.meta.env ? import.meta.env : undefined;
+  return (
+    metaEnv?.[name] ??
+    globalThis?.process?.env?.[name] ??
+    globalThis?.__env?.[name] ??
+    globalThis?.[name] ??
+    ""
+  );
 }
 
 function getSupabaseUrl() {
   return env("SUPABASE_URL") || env("VITE_SUPABASE_URL");
 }
 
-function getRequiredEnv(name, fallbackName) {
-  const value = env(name) || (fallbackName ? env(fallbackName) : "");
-  if (!value) throw new Error(`${name}${fallbackName ? ` or ${fallbackName}` : ""} is required`);
+function getRequiredEnv(name, fallbackNames = []) {
+  const aliases = Array.isArray(fallbackNames)
+    ? fallbackNames
+    : fallbackNames
+      ? [fallbackNames]
+      : [];
+  const value = env(name) || aliases.map((alias) => env(alias)).find((candidate) => candidate);
+  if (!value) {
+    const names = [name, ...aliases].join(" or ");
+    throw new Error(`${names} is required`);
+  }
   return value;
 }
 
+class CalendarServiceError extends Error {
+  constructor({ code, publicMessage, status = null, safeDetails = null }) {
+    super(publicMessage);
+    this.name = "CalendarServiceError";
+    this.code = code;
+    this.publicMessage = publicMessage;
+    this.status = status;
+    this.safeDetails = safeDetails;
+  }
+}
+
+function parseGoogleError(rawText) {
+  const text = String(rawText ?? "");
+  try {
+    const payload = JSON.parse(text);
+    const error = payload.error ?? payload;
+    const firstError = Array.isArray(error.errors) ? error.errors[0] : null;
+    return {
+      message: cleanString(error.message ?? payload.message ?? text).slice(0, 500),
+      reason: cleanString(firstError?.reason ?? error.status ?? "").slice(0, 120),
+      domain: cleanString(firstError?.domain ?? "").slice(0, 120),
+    };
+  } catch {
+    return {
+      message: text.slice(0, 500),
+      reason: "",
+      domain: "",
+    };
+  }
+}
+
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanString(value));
+}
+
+function throwCalendarServiceError({ code, publicMessage, status, rawGoogleError }) {
+  throw new CalendarServiceError({
+    code,
+    publicMessage,
+    status,
+    safeDetails: rawGoogleError ? parseGoogleError(rawGoogleError) : null,
+  });
+}
+
 function getGoogleConfig(redirectOrigin) {
-  const clientId = getRequiredEnv("GOOGLE_CALENDAR_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID");
+  const clientId = getRequiredEnv("GOOGLE_CALENDAR_CLIENT_ID", [
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "GOOGLE_CLIENT_ID",
+    "VITE_GOOGLE_CALENDAR_CLIENT_ID",
+    "VITE_GOOGLE_CLIENT_ID",
+  ]);
   const clientSecret = getRequiredEnv(
     "GOOGLE_CALENDAR_CLIENT_SECRET",
-    "GOOGLE_OAUTH_CLIENT_SECRET",
+    ["GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"],
   );
   const redirectUri =
-    env("GOOGLE_CALENDAR_REDIRECT_URI") || `${redirectOrigin.replace(/\/$/, "")}/calendar/callback`;
+    env("GOOGLE_CALENDAR_REDIRECT_URI") ||
+    env("GOOGLE_OAUTH_REDIRECT_URI") ||
+    `${redirectOrigin.replace(/\/$/, "")}/calendar/callback`;
 
   return { clientId, clientSecret, redirectUri };
 }
@@ -207,7 +283,12 @@ async function refreshAccessToken({ refreshToken, clientId, clientSecret }) {
   });
 
   if (!response.ok) {
-    throw new Error(`Google token refresh failed: ${await response.text()}`);
+    throwCalendarServiceError({
+      code: "token_refresh_failed",
+      publicMessage: "Google Calendar connection expired. Please reconnect your calendar.",
+      status: response.status,
+      rawGoogleError: await response.text(),
+    });
   }
 
   return response.json();
@@ -244,6 +325,27 @@ async function fetchCalendarEvents(accessToken, calendarId, horizonDays) {
     singleEvents: "true",
     orderBy: "startTime",
     maxResults: "20",
+  });
+
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+
+  if (!response.ok) throw new Error(`Google events lookup failed: ${await response.text()}`);
+  const payload = await response.json();
+  return payload.items ?? [];
+}
+
+async function fetchCalendarEventsBetween(accessToken, calendarId, timeMin, timeMax) {
+  const params = asSearchParams({
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    singleEvents: "true",
+    orderBy: "startTime",
+    maxResults: "50",
   });
 
   const response = await fetch(
@@ -298,7 +400,28 @@ async function fetchTasks(accessToken, taskListId, horizonDays) {
 
 async function createGoogleEvent(accessToken, calendarId, event) {
   const start = new Date(event.startDateTime);
-  if (Number.isNaN(start.getTime())) throw new Error("Choose a valid meeting date and time");
+  if (!event.summary) {
+    throwCalendarServiceError({
+      code: "invalid_event_payload",
+      publicMessage:
+        "Meeting details are incomplete or invalid. Please check date, time, attendees, and try again.",
+    });
+  }
+  if (Number.isNaN(start.getTime())) {
+    throwCalendarServiceError({
+      code: "invalid_event_payload",
+      publicMessage:
+        "Meeting details are incomplete or invalid. Please check date, time, attendees, and try again.",
+    });
+  }
+  const invalidAttendee = (event.attendees ?? []).find((attendee) => !isValidEmail(attendee.email));
+  if (invalidAttendee) {
+    throwCalendarServiceError({
+      code: "invalid_event_payload",
+      publicMessage:
+        "Meeting details are incomplete or invalid. Please check date, time, attendees, and try again.",
+    });
+  }
 
   const durationMinutes = Number.isFinite(event.durationMinutes)
     ? Math.max(15, event.durationMinutes)
@@ -308,7 +431,7 @@ async function createGoogleEvent(accessToken, calendarId, event) {
   const response = await fetch(
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
       calendarId,
-    )}/events?sendUpdates=all`,
+    )}/events?sendUpdates=all&conferenceDataVersion=1`,
     {
       method: "POST",
       headers: {
@@ -325,6 +448,12 @@ async function createGoogleEvent(accessToken, calendarId, event) {
           dateTime: end.toISOString(),
         },
         attendees: event.attendees,
+        conferenceData: {
+          createRequest: {
+            requestId: crypto.randomUUID(),
+            conferenceSolutionKey: { type: "hangoutsMeet" },
+          },
+        },
         reminders: {
           useDefault: true,
         },
@@ -332,7 +461,25 @@ async function createGoogleEvent(accessToken, calendarId, event) {
     },
   );
 
-  if (!response.ok) throw new Error(`Google event creation failed: ${await response.text()}`);
+  if (!response.ok) {
+    const rawGoogleError = await response.text();
+    const safeDetails = parseGoogleError(rawGoogleError);
+    const reason = `${safeDetails.reason} ${safeDetails.message}`.toLowerCase();
+    const publicMessage =
+      response.status === 400
+        ? "Meeting details are incomplete or invalid. Please check date, time, attendees, and try again."
+        : response.status === 401
+          ? "Google Calendar connection expired. Please reconnect your calendar."
+          : response.status === 403 && /scope|permission|insufficient/i.test(reason)
+            ? "Google Calendar connection is missing event creation permission. Please reconnect your calendar."
+            : "Google Calendar rejected the invite request. Please check the meeting details and try again.";
+    throwCalendarServiceError({
+      code: "google_event_rejected",
+      publicMessage,
+      status: response.status,
+      rawGoogleError,
+    });
+  }
   return response.json();
 }
 
@@ -347,7 +494,10 @@ async function ensureFreshAccessToken({ admin, connection, redirectOrigin }) {
   }
 
   if (!connection.refresh_token) {
-    throw new Error(`No refresh token stored for ${connection.email}`);
+    throwCalendarServiceError({
+      code: "missing_refresh_token",
+      publicMessage: "Google Calendar connection expired. Please reconnect your calendar.",
+    });
   }
 
   const { clientId, clientSecret } = getGoogleConfig(redirectOrigin);
@@ -446,6 +596,100 @@ function mapGoogleTask({ task, sourceId, connectionId, taskListId }) {
     attendees: undefined,
     htmlLink: task.webViewLink ?? task.selfLink,
   };
+}
+
+function formatTimeRange(startRaw, endRaw) {
+  const start = new Date(startRaw);
+  const end = new Date(endRaw);
+  if (Number.isNaN(start.getTime())) return "Time TBD";
+  const format = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+  if (Number.isNaN(end.getTime())) return format.format(start);
+  return `${format.format(start)} - ${format.format(end)}`;
+}
+
+function parseScheduleDay(date) {
+  const dayStart = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(dayStart.getTime())) {
+    throw new Error("Select a valid meeting date.");
+  }
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+  return { dayStart, dayEnd };
+}
+
+function mapScheduleEvent(event) {
+  const startRaw = event.start?.dateTime ?? event.start?.date ?? "";
+  const endRaw = event.end?.dateTime ?? event.end?.date ?? "";
+  return {
+    id: event.id,
+    title: event.summary || "(Busy)",
+    startDateTime: startRaw,
+    endDateTime: endRaw,
+    timeLabel: formatTimeRange(startRaw, endRaw),
+    allDay: Boolean(event.start?.date && !event.start?.dateTime),
+    htmlLink: event.htmlLink ?? "",
+    attendees: event.attendees?.length ?? 0,
+  };
+}
+
+function overlaps(leftStart, leftEnd, rightStart, rightEnd) {
+  return leftStart < rightEnd && rightStart < leftEnd;
+}
+
+function buildSuggestedSlots({ date, events, durationMinutes }) {
+  const durationMs = Math.max(15, Number(durationMinutes) || 45) * 60 * 1000;
+  const workStart = new Date(`${date}T09:00:00`);
+  const workEnd = new Date(`${date}T17:00:00`);
+  if (Number.isNaN(workStart.getTime()) || Number.isNaN(workEnd.getTime())) return [];
+
+  const busy = events
+    .filter((event) => event.status !== "cancelled" && event.transparency !== "transparent")
+    .map((event) => {
+      const startRaw = event.start?.dateTime ?? event.start?.date;
+      const endRaw = event.end?.dateTime ?? event.end?.date;
+      return {
+        start: new Date(startRaw).getTime(),
+        end: new Date(endRaw).getTime(),
+      };
+    })
+    .filter((slot) => !Number.isNaN(slot.start) && !Number.isNaN(slot.end));
+
+  const slots = [];
+  for (let startMs = workStart.getTime(); startMs + durationMs <= workEnd.getTime(); startMs += 30 * 60 * 1000) {
+    const endMs = startMs + durationMs;
+    const available = !busy.some((slot) => overlaps(startMs, endMs, slot.start, slot.end));
+    if (!available) continue;
+    const start = new Date(startMs);
+    const time = `${String(start.getHours()).padStart(2, "0")}:${String(
+      start.getMinutes(),
+    ).padStart(2, "0")}`;
+    slots.push({
+      time,
+      label: new Intl.DateTimeFormat("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      }).format(start),
+      startDateTime: start.toISOString(),
+    });
+    if (slots.length >= 8) break;
+  }
+  return slots;
+}
+
+async function fetchPrimaryCalendarConnection(admin, profileId) {
+  return admin
+    .from("calendar_connections")
+    .select("*")
+    .eq("profile_id", profileId)
+    .eq("provider", "google")
+    .eq("connected", true)
+    .eq("calendar_id", "primary")
+    .maybeSingle();
 }
 
 export const createGoogleCalendarAuthUrl = createServerFn({ method: "POST" })
@@ -583,12 +827,14 @@ export const fetchGoogleCalendarDashboard = createServerFn({ method: "POST" })
 
     const admin = getSupabaseAdmin(true);
     if (!admin) {
+      console.error("[calendar.dashboard] Missing Supabase service role configuration.");
       return {
         sources: [],
         events: [],
         connected: false,
         setupRequired: true,
-        message: "Add SUPABASE_SERVICE_ROLE_KEY to enable secure calendar token storage.",
+        message:
+          "Calendar is not configured on this server. Add SUPABASE_SERVICE_ROLE_KEY to the server environment and restart the app.",
       };
     }
 
@@ -607,6 +853,7 @@ export const fetchGoogleCalendarDashboard = createServerFn({ method: "POST" })
       .order("created_at", { ascending: true });
 
     if (error) {
+      console.error("[calendar.dashboard] Calendar connection query failed:", error.message);
       return {
         sources: [],
         events: [],
@@ -719,6 +966,133 @@ export const fetchGoogleCalendarDashboard = createServerFn({ method: "POST" })
     };
   });
 
+export const fetchGoogleCalendarScheduleContext = createServerFn({ method: "POST" })
+  .inputValidator(validateScheduleContextInput)
+  .handler(async ({ data }) => {
+    if (!data.authAccessToken) {
+      return {
+        connected: false,
+        setupRequired: false,
+        events: [],
+        suggestedSlots: [],
+        message: "Please sign in before viewing your Google Calendar.",
+      };
+    }
+
+    if (!data.date) {
+      return {
+        connected: false,
+        setupRequired: false,
+        events: [],
+        suggestedSlots: [],
+        message: "Select a meeting date to view your calendar.",
+      };
+    }
+
+    const admin = getSupabaseAdmin(true);
+    if (!admin) {
+      console.error("[calendar.scheduleContext] Missing Supabase service role configuration.");
+      return {
+        connected: false,
+        setupRequired: true,
+        events: [],
+        suggestedSlots: [],
+        message:
+          "Calendar is not configured on this server. Add SUPABASE_SERVICE_ROLE_KEY to the server environment and restart the app.",
+      };
+    }
+
+    const { profileId } = await resolveProfile({
+      admin,
+      authAccessToken: data.authAccessToken,
+      profileId: data.profileId,
+    });
+
+    const { data: connection, error } = await fetchPrimaryCalendarConnection(admin, profileId);
+    if (error) {
+      console.error("[calendar.scheduleContext] Calendar connection query failed:", error.message);
+      return {
+        connected: false,
+        setupRequired: true,
+        events: [],
+        suggestedSlots: [],
+        message: `Run the calendar SQL migration. ${error.message}`,
+      };
+    }
+
+    if (!connection) {
+      return {
+        connected: false,
+        setupRequired: false,
+        events: [],
+        suggestedSlots: [],
+        message: "Connect Google Calendar to view your calendar and schedule meetings.",
+      };
+    }
+
+    try {
+      const { dayStart, dayEnd } = parseScheduleDay(data.date);
+      const accessToken = await ensureFreshAccessToken({
+        admin,
+        connection,
+        redirectOrigin: data.redirectOrigin || "http://localhost:8080",
+      });
+      const googleEvents = await fetchCalendarEventsBetween(
+        accessToken,
+        connection.calendar_id || "primary",
+        dayStart,
+        dayEnd,
+      );
+
+      return {
+        connected: true,
+        setupRequired: false,
+        email: connection.email,
+        displayName: connection.display_name ?? connection.email,
+        calendarLabel: connection.calendar_label ?? "Primary calendar",
+        events: googleEvents.map(mapScheduleEvent),
+        suggestedSlots: buildSuggestedSlots({
+          date: data.date,
+          events: googleEvents,
+          durationMinutes: data.durationMinutes,
+        }),
+        syncedAt: new Date().toISOString(),
+        message: "",
+      };
+    } catch (error) {
+      if (error instanceof CalendarServiceError) {
+        console.error("[calendar.scheduleContext] Google Calendar failure:", {
+          code: error.code,
+          status: error.status,
+          reason: error.safeDetails?.reason ?? "",
+          message: error.safeDetails?.message ?? error.publicMessage,
+        });
+        return {
+          connected: false,
+          setupRequired: false,
+          events: [],
+          suggestedSlots: [],
+          message: error.publicMessage,
+        };
+      }
+
+      const configMissing = /GOOGLE_.*required/i.test(error.message ?? "");
+      console.error("[calendar.scheduleContext] Calendar preview failed:", {
+        message: error.message,
+        configMissing,
+      });
+      return {
+        connected: false,
+        setupRequired: configMissing,
+        events: [],
+        suggestedSlots: [],
+        message: configMissing
+          ? "Google Calendar OAuth credentials are missing on the server. Add GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET, restart the app, then reconnect Google Calendar."
+          : "Could not load your Google Calendar. Please reconnect Google Calendar and try again.",
+      };
+    }
+  });
+
 export const createGoogleCalendarEvent = createServerFn({ method: "POST" })
   .inputValidator(validateCreateEventInput)
   .handler(async ({ data }) => {
@@ -728,10 +1102,12 @@ export const createGoogleCalendarEvent = createServerFn({ method: "POST" })
 
     const admin = getSupabaseAdmin(true);
     if (!admin) {
+      console.error("[calendar.schedule] Missing Supabase service role configuration.");
       return {
         ok: false,
         setupRequired: true,
-        message: "Calendar scheduling needs SUPABASE_SERVICE_ROLE_KEY on the server.",
+        message:
+          "Calendar scheduling is not configured on this server. Add SUPABASE_SERVICE_ROLE_KEY to the server environment and restart the app.",
       };
     }
 
@@ -751,6 +1127,7 @@ export const createGoogleCalendarEvent = createServerFn({ method: "POST" })
       .maybeSingle();
 
     if (error) {
+      console.error("[calendar.schedule] Calendar connection query failed:", error.message);
       return {
         ok: false,
         setupRequired: true,
@@ -759,19 +1136,50 @@ export const createGoogleCalendarEvent = createServerFn({ method: "POST" })
     }
 
     if (!connection) {
+      console.error("[calendar.schedule] No connected Google Calendar found for profile.");
       return {
         ok: false,
         setupRequired: false,
-        message: "Connect Google Calendar before scheduling meetings.",
+        message: "Please connect Google Calendar before scheduling a meeting.",
       };
     }
 
-    const accessToken = await ensureFreshAccessToken({
-      admin,
-      connection,
-      redirectOrigin: data.redirectOrigin || "http://localhost:8080",
-    });
-    const event = await createGoogleEvent(accessToken, connection.calendar_id || "primary", data.event);
+    let event;
+    try {
+      const accessToken = await ensureFreshAccessToken({
+        admin,
+        connection,
+        redirectOrigin: data.redirectOrigin || "http://localhost:8080",
+      });
+      event = await createGoogleEvent(accessToken, connection.calendar_id || "primary", data.event);
+    } catch (error) {
+      if (error instanceof CalendarServiceError) {
+        console.error("[calendar.schedule] Google Calendar failure:", {
+          code: error.code,
+          status: error.status,
+          reason: error.safeDetails?.reason ?? "",
+          message: error.safeDetails?.message ?? error.publicMessage,
+        });
+        return {
+          ok: false,
+          setupRequired: false,
+          message: error.publicMessage,
+        };
+      }
+
+      const configMissing = /GOOGLE_.*required/i.test(error.message ?? "");
+      console.error("[calendar.schedule] Google Calendar event creation failed:", {
+        message: error.message,
+        configMissing,
+      });
+      return {
+        ok: false,
+        setupRequired: configMissing,
+        message: configMissing
+          ? "Google Calendar OAuth credentials are missing on the server. Add GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET, restart the app, then reconnect Google Calendar."
+          : "Google Calendar rejected the invite request. Please check the meeting details and try again.",
+      };
+    }
 
     return {
       ok: true,
