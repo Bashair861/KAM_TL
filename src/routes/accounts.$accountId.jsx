@@ -84,6 +84,23 @@ const TABS = [
   "Escalation",
   "Client History",
 ];
+const KYC_AUTOFILL_FIELDS = [
+  { name: "Industry Info", stateKey: "industry" },
+  { name: "Business Info", stateKey: "business" },
+  { name: "Client History", stateKey: "history" },
+  { name: "Revenue Info", stateKey: "revenue" },
+  { name: "MRR / ARR (Startups)", stateKey: "mrrArr" },
+  { name: "Person Info (Primary)", stateKey: "primary" },
+  { name: "Engagement Tenure", stateKey: "tenure" },
+  { name: "Team Size", stateKey: "team" },
+  { name: "Competitors", stateKey: "competitors" },
+  { name: "Main Business Flow", stateKey: "flow" },
+];
+const KYC_AUTOFILL_FIELD_NAMES = KYC_AUTOFILL_FIELDS.map((field) => field.name);
+const KYC_STATE_KEY_BY_FIELD_NAME = Object.fromEntries(
+  KYC_AUTOFILL_FIELDS.map((field) => [field.name, field.stateKey]),
+);
+const CHARTER_EXTRACT_URL = "http://localhost:8000/api/charter/extract";
 function hasSyncValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== "";
 }
@@ -1267,9 +1284,13 @@ function OverviewTab({ account }) {
       queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
-  // OCR file state
+  // Charter file state
   const [ocrFile, setOcrFile] = useState(null);
   const [ocrStatus, setOcrStatus] = useState("idle");
+  const [ocrError, setOcrError] = useState("");
+  const [ocrUpdatedCount, setOcrUpdatedCount] = useState(0);
+  const [charterReviewRows, setCharterReviewRows] = useState([]);
+  const [selectedCharterRows, setSelectedCharterRows] = useState({});
   const [salesforceLookup, setSalesforceLookup] = useState({
     status: "idle",
     text: "",
@@ -1443,18 +1464,79 @@ function OverviewTab({ account }) {
       );
     },
   });
-  function runOcrSimulation() {
-    if (!ocrFile) return;
+  async function extractCharterFields(file) {
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith(".xlsx")) {
+      setOcrFile(null);
+      setOcrStatus("error");
+      setOcrError("Upload a .xlsx Project Charter file.");
+      setOcrUpdatedCount(0);
+      setCharterReviewRows([]);
+      setSelectedCharterRows({});
+      return;
+    }
     setOcrStatus("processing");
-    // Front-end simulation only - real OCR will be wired later
-    setTimeout(() => {
-      setFields((f) => ({
-        ...f,
-        industry: `${account.industry} - ${account.region} (auto-filled from "${ocrFile.name}")`,
-        business: `${account.businessInfo} - extracted from uploaded document.`,
-      }));
-      setOcrStatus("done");
-    }, 1200);
+    setOcrError("");
+    setOcrUpdatedCount(0);
+    setCharterReviewRows([]);
+    setSelectedCharterRows({});
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("fields", JSON.stringify(KYC_AUTOFILL_FIELD_NAMES));
+
+      const response = await fetch(CHARTER_EXTRACT_URL, {
+        method: "POST",
+        body: formData,
+      });
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.errors?.[0] ?? "Unable to extract fields from this charter.");
+      }
+
+      const extracted = result.data ?? {};
+      const reviewRows = Object.entries(extracted)
+        .filter(([fieldName, value]) => value !== null && KYC_STATE_KEY_BY_FIELD_NAME[fieldName])
+        .map(([fieldName, value]) => {
+          const stateKey = KYC_STATE_KEY_BY_FIELD_NAME[fieldName];
+          return {
+            id: fieldName,
+            fieldName,
+            stateKey,
+            currentValue: fields[stateKey],
+            extractedValue: value,
+          };
+        });
+
+      if (reviewRows.length === 0) {
+        setOcrUpdatedCount(0);
+        setOcrStatus("done");
+        return;
+      }
+
+      setCharterReviewRows(reviewRows);
+      setSelectedCharterRows(Object.fromEntries(reviewRows.map((row) => [row.id, true])));
+      setOcrStatus("review");
+    } catch (error) {
+      setOcrStatus("error");
+      setOcrError(error.message ?? "Unable to extract fields from this charter.");
+    }
+  }
+  function applySelectedCharterRows() {
+    const selectedRows = charterReviewRows.filter((row) => selectedCharterRows[row.id]);
+    const updates = Object.fromEntries(selectedRows.map((row) => [row.stateKey, row.extractedValue]));
+
+    if (Object.keys(updates).length > 0) {
+      setFields((current) => ({ ...current, ...updates }));
+    }
+
+    setOcrUpdatedCount(Object.keys(updates).length);
+    setOcrStatus("done");
+    setCharterReviewRows([]);
+    setSelectedCharterRows({});
   }
   return (
     <div className="space-y-6">
@@ -1474,15 +1556,16 @@ function OverviewTab({ account }) {
         </span>
       </div>
 
-      {/* OCR Auto-fill upload */}
+      {/* Charter Auto-fill upload */}
       <div className="border rounded-xl p-5 bg-card">
         <div className="flex items-start gap-3 mb-3">
           <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
             <Sparkles className="size-4" />
           </span>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-bold">OCR Auto-fill from Document</h3>
+            <h3 className="text-sm font-bold">Charter Auto-fill from XLSX</h3>
             <p className="text-[11px] text-muted-foreground">
+              Upload a Project Charter workbook to fill matching KYC fields from the template.
               Upload a brief, RFP, NDA, deck or scanned card. We'll extract industry, business,
               stakeholders, revenue and auto-populate any KYC field that's empty or unverified.
               (Front-end preview - OCR engine wires up later.)
@@ -1490,32 +1573,53 @@ function OverviewTab({ account }) {
           </div>
         </div>
         <div className="flex flex-col md:flex-row md:items-center gap-2">
-          <label className="flex-1 flex items-center gap-2 border-2 border-dashed rounded-md px-3 py-2.5 cursor-pointer hover:bg-muted/40 transition-colors">
+          <label
+            className={`flex-1 flex items-center gap-2 border-2 border-dashed rounded-md px-3 py-2.5 transition-colors ${
+              !editable || ocrStatus === "processing"
+                ? "opacity-60 cursor-not-allowed"
+                : "cursor-pointer hover:bg-muted/40"
+            }`}
+          >
             <Upload className="size-4 text-muted-foreground" />
             <span className="text-xs truncate">
-              {ocrFile ? ocrFile.name : "Choose a file (PDF, PNG, JPG, DOCX)..."}
+              {ocrFile ? ocrFile.name : "Choose a .xlsx file..."}
             </span>
             <input
               type="file"
               className="hidden"
-              accept=".pdf,.png,.jpg,.jpeg,.docx"
+              accept=".xlsx"
+              disabled={!editable || ocrStatus === "processing"}
               onChange={(e) => {
-                setOcrFile(e.target.files?.[0] ?? null);
-                setOcrStatus("idle");
+                const selectedFile = e.target.files?.[0] ?? null;
+                setOcrFile(selectedFile);
+                setOcrError("");
+                if (selectedFile) {
+                  void extractCharterFields(selectedFile);
+                } else {
+                  setOcrStatus("idle");
+                  setOcrUpdatedCount(0);
+                }
               }}
             />
           </label>
           <button
-            onClick={runOcrSimulation}
+            type="button"
+            onClick={() => void extractCharterFields(ocrFile)}
             disabled={!ocrFile || !editable || ocrStatus === "processing"}
             className="px-4 py-2.5 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            <Sparkles className="size-3.5" />
+            {ocrStatus === "processing" ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="size-3.5" />
+            )}
             {ocrStatus === "processing"
               ? "Extracting..."
+              : ocrStatus === "review"
+                ? "Review fields"
               : ocrStatus === "done"
                 ? "Re-extract"
-                : "Extract & Auto-fill"}
+                : "Extract"}
           </button>
           <button
             type="button"
@@ -1585,7 +1689,19 @@ function OverviewTab({ account }) {
         {ocrStatus === "done" && (
           <p className="text-[11px] text-success mt-2 flex items-center gap-1">
             <CheckCircle2 className="size-3" />
-            Extraction complete - 2 KYC fields updated. Review highlighted fields below.
+            Extraction complete. {ocrUpdatedCount} KYC field(s) updated.
+          </p>
+        )}
+        {ocrStatus === "review" && (
+          <p className="text-[11px] text-accent mt-2 flex items-center gap-1">
+            <Sparkles className="size-3" />
+            Review extracted fields before applying them.
+          </p>
+        )}
+        {ocrStatus === "error" && (
+          <p className="text-[11px] text-crit mt-2 flex items-center gap-1">
+            <AlertTriangle className="size-3" />
+            {ocrError || "Unable to extract fields from this charter."}
           </p>
         )}
       </div>
@@ -2055,6 +2171,27 @@ function OverviewTab({ account }) {
           </table>
         </div>
       </Card>
+      {ocrStatus === "review" && charterReviewRows.length > 0 && (
+        <CharterFieldReviewModal
+          rows={charterReviewRows}
+          selectedRows={selectedCharterRows}
+          onClose={() => {
+            setCharterReviewRows([]);
+            setSelectedCharterRows({});
+            setOcrStatus("idle");
+          }}
+          onToggle={(rowId) =>
+            setSelectedCharterRows((current) => ({ ...current, [rowId]: !current[rowId] }))
+          }
+          onSelectAll={() =>
+            setSelectedCharterRows(Object.fromEntries(charterReviewRows.map((row) => [row.id, true])))
+          }
+          onClear={() =>
+            setSelectedCharterRows(Object.fromEntries(charterReviewRows.map((row) => [row.id, false])))
+          }
+          onApply={applySelectedCharterRows}
+        />
+      )}
       {salesforceMappingOpen && (
         <SalesforceMappingModal
           rows={salesforceMappingRows}
@@ -2078,6 +2215,131 @@ function OverviewTab({ account }) {
           onSync={() => syncSelectedSalesforceRows()}
         />
       )}
+    </div>
+  );
+}
+
+function CharterFieldReviewModal({
+  rows,
+  selectedRows,
+  onClose,
+  onToggle,
+  onSelectAll,
+  onClear,
+  onApply,
+}) {
+  const selectedCount = rows.filter((row) => selectedRows[row.id]).length;
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 flex items-stretch md:items-center justify-center md:p-6 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className="bg-background w-full md:max-w-5xl md:rounded-xl border shadow-2xl flex flex-col max-h-screen md:max-h-[90vh]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-widest font-bold text-accent">
+              Charter Auto-fill
+            </p>
+            <h3 className="text-lg font-bold">Select Fields to Apply</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-muted-foreground font-mono">
+              {selectedCount} selected
+            </span>
+            <button
+              type="button"
+              onClick={onSelectAll}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={onClear}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="size-8 border rounded-md flex items-center justify-center hover:bg-muted"
+              aria-label="Close charter field review"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
+                  <th className="w-12 px-5 py-2">Apply</th>
+                  <th className="px-3 py-2">KYC field</th>
+                  <th className="px-3 py-2">Current value</th>
+                  <th className="px-3 py-2">Extracted value</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {rows.map((row) => (
+                  <tr key={row.id}>
+                    <td className="px-5 py-3 align-top">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(selectedRows[row.id])}
+                        onChange={() => onToggle(row.id)}
+                        className="size-4"
+                        aria-label={`Apply ${row.fieldName}`}
+                      />
+                    </td>
+                    <td className="px-3 py-3 align-top">
+                      <p className="text-xs font-bold">{row.fieldName}</p>
+                    </td>
+                    <td className="px-3 py-3 align-top max-w-[280px]">
+                      <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono text-muted-foreground">
+                        {displaySyncValue(row.currentValue)}
+                      </pre>
+                    </td>
+                    <td className="px-3 py-3 align-top max-w-[360px]">
+                      <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono">
+                        {displaySyncValue(row.extractedValue)}
+                      </pre>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="px-5 py-4 border-t flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <p className="text-xs text-muted-foreground">
+            Only selected fields will be applied to the KYC cards.
+          </p>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 border rounded-md text-xs font-bold hover:bg-muted"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onApply}
+              disabled={selectedCount === 0}
+              className="px-4 py-2 bg-accent text-white rounded-md text-xs font-bold disabled:opacity-40"
+            >
+              Apply selected fields
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3061,49 +3323,12 @@ function ContractScoringBlock({ account, onExpand }) {
         </div>
       </div>
       {c.metrics.length > 0 && (
-        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4 border-b">
+        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
           {c.metrics.map((m) => (
             <Metric key={m.label} m={m} />
           ))}
         </div>
       )}
-      <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-        <Field label="Type" value={c.type} />
-        <Field label="Duration" value={c.duration} />
-        <Field label="Price hike" value={c.priceHike} />
-        <Field label="Renewal" value={`${account.renewalDays} days`} />
-        <Field label="Auto-renew" value={c.autoRenew ? "Yes" : "No"} ok={c.autoRenew} />
-        <Field label="Non-terminator" value={c.nonTerminator ? "Yes" : "No"} ok={c.nonTerminator} />
-        <Field label="Min 1-yr lock" value={c.minOneYear ? "Yes" : "No"} ok={c.minOneYear} />
-        <Field label="Value to us" value={formatCurrency(account.contractValue)} />
-      </div>
-      <div className="px-6 pb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="border rounded-lg p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-            SWOT
-          </p>
-          <ul className="text-xs space-y-1.5">
-            <li>
-              <span className="font-bold text-success">S:</span> {c.swot.s}
-            </li>
-            <li>
-              <span className="font-bold text-crit">W:</span> {c.swot.w}
-            </li>
-            <li>
-              <span className="font-bold text-accent">O:</span> {c.swot.o}
-            </li>
-            <li>
-              <span className="font-bold text-warn">T:</span> {c.swot.t}
-            </li>
-          </ul>
-        </div>
-        <div className="border rounded-lg p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-            Customer Feedback
-          </p>
-          <p className="text-xs italic">{c.customerFeedback}</p>
-        </div>
-      </div>
     </div>
   );
 }
@@ -3135,13 +3360,7 @@ function ResourceHealthBlock({ account, onExpand }) {
           )}
         </div>
       </div>
-      <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs mb-2">
-        <Field label="Backup exists" value={r.backupExists ? "Yes" : "No"} ok={r.backupExists} />
-        <Field label="Leaves this month" value={`${r.leavesThisMonth}`} />
-        <Field label="Critical resources" value={`${r.criticalResources}`} />
-        <Field label="Team size" value={`${r.teamSize}`} />
-      </div>
-      <div className="p-6 pt-0 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
+      <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
         {r.metrics.map((m) => (
           <Metric key={m.label} m={m} />
         ))}
