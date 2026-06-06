@@ -15,6 +15,7 @@ import {
 import { fetchFirefliesRequiredActionItems } from "@/services/fireflies-action-items.server";
 import { fetchKamAiSuggestions } from "@/services/kam-ai-suggestions.server";
 import { syncSummaryOpportunitiesServer } from "@/services/summary-opportunities.server";
+import { MeetingHistoryTab } from "@/services/meeting-history-tab";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import {
   fetchAccount,
@@ -47,6 +48,9 @@ import {
   fetchFirefliesMeetingSummaries,
   generateAccountLinkedinSummary,
   generateAccountWebsiteSummary,
+  refreshAccountRetentionGrowthScoring,
+  fetchRetentionGrowthDrafts,
+  upsertRetentionGrowthDraft,
 } from "@/services/db";
 import { upsertActivityScoreSnapshotServer } from "@/services/activity-score-snapshot.server";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
@@ -988,7 +992,7 @@ function sowSummary(fields) {
 
 function AccountDetailPage() {
   const { account } = Route.useLoaderData();
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const router = useRouter();
   const queryClient = useQueryClient();
   const sowInputRef = useRef(null);
@@ -1248,6 +1252,7 @@ function AccountDetailPage() {
               account={account}
               opportunities={accountOpportunities}
               escalations={accountEscalations}
+              session={session}
             />
           )}
           {tab === "Opportunities" && (
@@ -1266,7 +1271,9 @@ function AccountDetailPage() {
           )}
           {tab === "Educate client" && <EducateTab account={account} />}
           {tab === "Escalation" && <EscalationsTab list={accountEscalations} />}
-          {tab === "Meeting History" && <MeetingHistoryTab account={account} profile={profile} />}
+          {tab === "Meeting History" && (
+            <MeetingHistoryTab account={account} profile={profile} session={session} />
+          )}
           {tab === "Client History" && (
             <ClientHistoryTab accountId={account.id} accountName={account.name} />
           )}
@@ -1533,19 +1540,48 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
     () => buildRetentionGrowthTabModel({ account, opportunities, escalations }),
     [account, escalations, opportunities],
   );
+  const queryClient = useQueryClient();
+  const { mutate: refreshRetentionGrowthScoring } = useMutation({
+    mutationFn: () => refreshAccountRetentionGrowthScoring(account.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+    },
+  });
+  const { data: savedDrafts = [] } = useQuery({
+    queryKey: ["retention-growth-drafts", account.id],
+    queryFn: () => fetchRetentionGrowthDrafts(account.id),
+  });
   const [resolvedItems, setResolvedItems] = useState({});
-  const [draftPlans, setDraftPlans] = useState([]);
-  const [draftOffers, setDraftOffers] = useState([]);
+  const [localDrafts, setLocalDrafts] = useState([]);
+  const [draftSaveStatus, setDraftSaveStatus] = useState("");
   const [planTarget, setPlanTarget] = useState(null);
   const [planForm, setPlanForm] = useState(createInitialReviewForm(null, profile?.name));
   const [offerTarget, setOfferTarget] = useState(null);
   const [offerForm, setOfferForm] = useState(createInitialReviewForm(null, profile?.name));
   const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const scoringTriggeredForAccountRef = useRef(null);
+  const { mutate: saveRetentionGrowthDraft } = useMutation({
+    mutationFn: (draft) => upsertRetentionGrowthDraft(account.id, draft, profile?.name),
+    onSuccess: (savedDraft) => {
+      setLocalDrafts((current) => current.filter((draft) => draft.id !== savedDraft.id));
+      queryClient.setQueryData(["retention-growth-drafts", account.id], (current = []) =>
+        dedupeRetentionDrafts([savedDraft, ...current]),
+      );
+      setDraftSaveStatus("Draft saved and will survive page refresh.");
+      queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
+    },
+    onError: (error, draft) => {
+      setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
+      setDraftSaveStatus(
+        `Draft kept for this session only. Run add-retention-growth-drafts.sql to persist it. ${error.message}`,
+      );
+    },
+  });
 
   useEffect(() => {
     setResolvedItems({});
-    setDraftPlans([]);
-    setDraftOffers([]);
+    setLocalDrafts([]);
+    setDraftSaveStatus("");
     setPlanTarget(null);
     setPlanForm(createInitialReviewForm(null, profile?.name));
     setOfferTarget(null);
@@ -1553,13 +1589,32 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
     setEvidenceTarget(null);
   }, [account.id, profile?.name]);
 
-  const activeApplicableGrowth = model.applicableGrowth.filter((item) => !resolvedItems[item.id]);
-  const activeOpportunities = model.opportunities.filter((item) => !resolvedItems[item.id]);
-  const activeOffers = model.recommendedOffers.filter((item) => !resolvedItems[item.id]);
+  useEffect(() => {
+    if (scoringTriggeredForAccountRef.current === account.id) return;
+    scoringTriggeredForAccountRef.current = account.id;
+    refreshRetentionGrowthScoring();
+  }, [account.id, refreshRetentionGrowthScoring]);
+
   const draftQueue = useMemo(
-    () => sortRetentionDrafts([...draftPlans, ...draftOffers]),
-    [draftOffers, draftPlans],
+    () => sortRetentionDrafts(dedupeRetentionDrafts([...localDrafts, ...savedDrafts])),
+    [localDrafts, savedDrafts],
   );
+  const draftedItemIds = useMemo(
+    () =>
+      new Set(
+        draftQueue.map((draft) => draft.id.replace(/^draft-(plan|offer)-/, "")).filter(Boolean),
+      ),
+    [draftQueue],
+  );
+  const activeApplicableGrowth = model.applicableGrowth.filter(
+    (item) => !resolvedItems[item.id] && !draftedItemIds.has(item.id),
+  );
+  const activeOffers = model.recommendedOffers.filter(
+    (item) => !resolvedItems[item.id] && !draftedItemIds.has(item.id),
+  );
+  const dashboard = model.dashboard;
+  const actionOwner =
+    role === "KAM" && isAssignedKam ? (profile?.name ?? "Assigned KAM") : "Assigned KAM";
 
   function openPlanReview(kind, item) {
     setPlanTarget({ kind, item });
@@ -1574,7 +1629,8 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   function confirmPlanReview() {
     if (!planTarget) return;
     const draft = buildRetentionPlanDraft(planTarget, planForm, canApproveCommercial);
-    setDraftPlans((current) => [draft, ...current]);
+    setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
+    saveRetentionGrowthDraft(draft);
     setResolvedItems((current) => ({
       ...current,
       [planTarget.item.id]: {
@@ -1598,7 +1654,8 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   function confirmOfferReview() {
     if (!offerTarget) return;
     const draft = buildRetentionOfferDraft(offerTarget, offerForm, canApproveCommercial);
-    setDraftOffers((current) => [draft, ...current]);
+    setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
+    saveRetentionGrowthDraft(draft);
     setResolvedItems((current) => ({
       ...current,
       [offerTarget.id]: {
@@ -1622,24 +1679,183 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <MiniStat label="Current services" value={`${model.currentServices.length} tracked`} />
-        <MiniStat label="Whitespace" value={`${activeApplicableGrowth.length} services ready`} />
-        <MiniStat label="Recommended offers" value={`${activeOffers.length} active`} />
-        <MiniStat
-          label="Top retention signal"
-          value={model.retentionSignals[0]?.title ?? "No immediate retention alarm"}
-        />
+      <div className="bg-card border rounded-xl overflow-hidden">
+        <div className="px-6 py-5 border-b">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-accent">
+            Retention vs Growth Dashboard
+          </p>
+          <h3 className="text-base font-bold mt-1">
+            Protect existing revenue and prioritize expansion for {account.name}
+          </h3>
+          <p className="text-xs text-muted-foreground mt-1">
+            This view separates revenue-protection signals from expansion signals, then converts
+            them into the next best account action.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3 p-6">
+          {dashboard.kpis.map((kpi) => (
+            <DashboardKpiCard key={kpi.label} label={kpi.label} value={kpi.value} hint={kpi.hint} />
+          ))}
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-card border rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b">
-            <h3 className="text-sm font-bold">What we are offering & giving</h3>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              Services already live, in flight, offered, or actively delivered for {account.name}.
-            </p>
+      <div className="grid grid-cols-1 xl:grid-cols-[1.15fr,0.85fr] gap-6">
+        <RetentionGrowthDisclosure
+          title="Retention vs Growth Matrix"
+          description="Bubble placement shows whether this account should be protected, expanded, maintained, or monitored."
+          defaultOpen
+        >
+          <div className="p-6 space-y-4">
+            <div className="space-y-2">
+              <p className="text-center text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                High Growth Potential
+              </p>
+              <div className="grid grid-cols-[24px_minmax(0,1fr)_24px] items-center gap-3">
+                <div
+                  className="flex h-[320px] items-center justify-center text-[10px] font-bold uppercase tracking-widest text-muted-foreground sm:h-[360px]"
+                  style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+                >
+                  Retention Risk High
+                </div>
+                <div className="relative h-[320px] min-w-0 overflow-hidden rounded-xl border bg-muted/10 sm:h-[360px]">
+                  <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 text-xs">
+                    <div className="border-r border-b bg-warn/5 p-4 sm:p-5">
+                      <p className="font-bold">Protect & Recover</p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        High risk, high growth value
+                      </p>
+                    </div>
+                    <div className="border-b bg-success/5 p-4 sm:p-5">
+                      <p className="font-bold">Expand Aggressively</p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Healthy and high potential
+                      </p>
+                    </div>
+                    <div className="border-r bg-muted/20 p-4 sm:p-5">
+                      <p className="font-bold">Reassess / Monitor</p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        High risk, low growth
+                      </p>
+                    </div>
+                    <div className="bg-accent/5 p-4 sm:p-5">
+                      <p className="font-bold">Maintain & Nurture</p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        Stable but low expansion
+                      </p>
+                    </div>
+                  </div>
+                  <div className="absolute bottom-0 left-1/2 top-0 w-px bg-border" />
+                  <div className="absolute left-0 right-0 top-1/2 h-px bg-border" />
+                  <div
+                    className="absolute z-20 min-w-[150px] max-w-[220px] -translate-x-1/2 -translate-y-1/2 rounded-full border-4 border-background bg-primary px-4 py-3 text-center text-primary-foreground shadow-lg"
+                    style={{
+                      left: `${dashboard.matrix.x}%`,
+                      top: `${dashboard.matrix.y}%`,
+                    }}
+                  >
+                    <p className="text-xs font-bold leading-tight">{account.name}</p>
+                    <p className="mt-1 text-[10px] opacity-80">
+                      {dashboard.retentionScore}/100 retention - {dashboard.growthScore}/100 growth
+                    </p>
+                  </div>
+                </div>
+                <div
+                  className="flex h-[320px] items-center justify-center text-[10px] font-bold uppercase tracking-widest text-muted-foreground sm:h-[360px]"
+                  style={{ writingMode: "vertical-rl" }}
+                >
+                  Retention Risk Low
+                </div>
+              </div>
+              <p className="text-center text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Low Growth Potential
+              </p>
+            </div>
+            <div className="grid sm:grid-cols-3 gap-3 text-xs">
+              <MiniStat label="Quadrant" value={dashboard.matrix.quadrant} />
+              <MiniStat label="Why" value={dashboard.matrix.description} />
+              <MiniStat label="Next move" value={dashboard.matrix.recommendedAction} />
+            </div>
           </div>
+        </RetentionGrowthDisclosure>
+
+        <div className="grid gap-6">
+          <RetentionGrowthDisclosure
+            title="Retention Insights"
+            description="Renewal, churn, sentiment, escalation, and revenue-at-risk view."
+            defaultOpen
+          >
+            <div className="p-6 grid gap-3">
+              {dashboard.retentionInsights.map((item) => (
+                <MiniStat key={item.label} label={item.label} value={item.value} />
+              ))}
+            </div>
+          </RetentionGrowthDisclosure>
+
+          <RetentionGrowthDisclosure
+            title="Growth Insights"
+            description="Whitespace, offer, stakeholder, and expansion-readiness view."
+          >
+            <div className="p-6 grid gap-3">
+              {dashboard.growthInsights.map((item) => (
+                <MiniStat key={item.label} label={item.label} value={item.value} />
+              ))}
+            </div>
+          </RetentionGrowthDisclosure>
+        </div>
+      </div>
+
+      <RetentionGrowthDisclosure
+        title="Account Action Table"
+        description="Data becomes useful here: each row links the account signal to owner, revenue impact, and next action."
+        meta={`${dashboard.actionRows.length} actions`}
+        defaultOpen
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-sm">
+            <thead>
+              <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
+                <th className="px-6 py-3">Focus</th>
+                <th className="px-6 py-3">Account</th>
+                <th className="px-6 py-3">Owner</th>
+                <th className="px-6 py-3">Score</th>
+                <th className="px-6 py-3">Risk / Potential</th>
+                <th className="px-6 py-3">Revenue Impact</th>
+                <th className="px-6 py-3">Recommended Action</th>
+                <th className="px-6 py-3">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {dashboard.actionRows.map((row) => (
+                <tr key={row.id} className="align-top hover:bg-muted/20">
+                  <td className="px-6 py-4 text-xs font-semibold">{row.focus}</td>
+                  <td className="px-6 py-4 text-xs">
+                    <p className="font-semibold">{account.name}</p>
+                    <p className="text-[11px] text-muted-foreground">{account.tier}</p>
+                  </td>
+                  <td className="px-6 py-4 text-xs text-muted-foreground">{actionOwner}</td>
+                  <td className="px-6 py-4 text-xs font-semibold">{row.score}/100</td>
+                  <td className="px-6 py-4 text-xs">{row.risk}</td>
+                  <td className="px-6 py-4 text-xs font-semibold">{row.revenueImpact}</td>
+                  <td className="px-6 py-4 text-xs min-w-[260px]">{row.recommendedAction}</td>
+                  <td className="px-6 py-4 text-xs">
+                    <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                      {row.status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </RetentionGrowthDisclosure>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <RetentionGrowthDisclosure
+          title="What we are offering & giving"
+          description={`Services already live, in flight, offered, or actively delivered for ${account.name}.`}
+          meta={`${model.currentServices.length} tracked`}
+          className="h-full"
+        >
           {model.currentServices.length ? (
             <div className="divide-y">
               {model.currentServices.map((service) => (
@@ -1668,20 +1884,15 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
               No current services are mapped for this account.
             </p>
           )}
-        </div>
+        </RetentionGrowthDisclosure>
 
-        <div className="bg-card border rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold">Growth - applicable but not offered</h3>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Relevant services and whitespace opportunities that fit this client now.
-              </p>
-            </div>
-            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-              {activeApplicableGrowth.length} open
-            </span>
-          </div>
+        <RetentionGrowthDisclosure
+          title="Growth - applicable but not offered"
+          description="Relevant services and whitespace opportunities that fit this client now."
+          meta={`${activeApplicableGrowth.length} open`}
+          defaultOpen={activeApplicableGrowth.length > 0}
+          className="h-full"
+        >
           {activeApplicableGrowth.length ? (
             <div className="divide-y">
               {activeApplicableGrowth.map((item) => (
@@ -1727,85 +1938,17 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
               No applicable whitespace services are active for this account right now.
             </p>
           )}
-        </div>
-      </div>
-
-      <div className="bg-card border rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold">Opportunities related to the client</h3>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              Client-specific opportunities surfaced from current services, Fireflies notes,
-              whitespace, renewal context, and escalations.
-            </p>
-          </div>
-          <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-            {activeOpportunities.length} active
-          </span>
-        </div>
-        {activeOpportunities.length ? (
-          <div className="divide-y">
-            {activeOpportunities.map((opportunity) => (
-              <div key={opportunity.id} className="px-6 py-4 space-y-3">
-                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
-                  <div className="space-y-2 min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-semibold">{opportunity.title}</p>
-                      <PriorityBadge priority={opportunity.priority} />
-                      <ConfidenceBadge confidence={opportunity.confidence} />
-                      {opportunity.category ? <AreaBadge area={opportunity.category} /> : null}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">{opportunity.source}</p>
-                    <div className="grid sm:grid-cols-3 gap-3 text-xs">
-                      <MiniStat
-                        label="Potential value"
-                        value={getPotentialValueLabel(opportunity)}
-                      />
-                      <MiniStat label="Next step" value={opportunity.nextStep} />
-                      <MiniStat
-                        label="Priority"
-                        value={`${opportunity.priority} · ${opportunity.confidence} confidence`}
-                      />
-                    </div>
-                    <EvidencePreview
-                      evidence={opportunity.evidence}
-                      onView={() =>
-                        setEvidenceTarget({
-                          title: opportunity.title,
-                          subtitle: `${opportunity.source} · ${opportunity.category}`,
-                          evidence: opportunity.evidence,
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="shrink-0">
-                    <Button
-                      size="sm"
-                      disabled={!canAct}
-                      onClick={() => openPlanReview("opportunity", opportunity)}
-                    >
-                      {opportunity.actionLabel ?? "Pursue"}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="px-6 py-6 text-xs text-muted-foreground">
-            No client-specific opportunities are active in this planning cycle.
-          </p>
-        )}
+        </RetentionGrowthDisclosure>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <div className="bg-card border rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b">
-            <h3 className="text-sm font-bold">Retention signals</h3>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              Signals that can affect renewal confidence, recovery planning, or client risk.
-            </p>
-          </div>
+        <RetentionGrowthDisclosure
+          title="Retention signals"
+          description="Signals that can affect renewal confidence, recovery planning, or client risk."
+          meta={`${model.retentionSignals.length} signals`}
+          defaultOpen={model.retentionSignals.length > 0}
+          className="h-full"
+        >
           {model.retentionSignals.length ? (
             <div className="divide-y">
               {model.retentionSignals.map((signal) => (
@@ -1834,15 +1977,15 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
               No material retention signals are active right now.
             </p>
           )}
-        </div>
+        </RetentionGrowthDisclosure>
 
-        <div className="bg-card border rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b">
-            <h3 className="text-sm font-bold">Growth signals</h3>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              Signals that point to expansion, whitespace, budget, or stakeholder interest.
-            </p>
-          </div>
+        <RetentionGrowthDisclosure
+          title="Growth signals"
+          description="Signals that point to expansion, whitespace, budget, or stakeholder interest."
+          meta={`${model.growthSignals.length} signals`}
+          defaultOpen={model.growthSignals.length > 0}
+          className="h-full"
+        >
           {model.growthSignals.length ? (
             <div className="divide-y">
               {model.growthSignals.map((signal) => (
@@ -1871,23 +2014,17 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
               No material growth signals are active right now.
             </p>
           )}
-        </div>
+        </RetentionGrowthDisclosure>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-6">
-        <div className="bg-card border rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold">Recommended Offers</h3>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                AI-assisted offers built from whitespace, client interest, retention signals, and
-                current service context.
-              </p>
-            </div>
-            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-              {activeOffers.length} active
-            </span>
-          </div>
+        <RetentionGrowthDisclosure
+          title="Recommended Offers"
+          description="AI-assisted offers built from whitespace, client interest, retention signals, and current service context."
+          meta={`${activeOffers.length} active`}
+          defaultOpen={activeOffers.length > 0}
+          className="h-full"
+        >
           {activeOffers.length ? (
             <div className="divide-y">
               {activeOffers.map((offer) => (
@@ -1934,15 +2071,13 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
               No recommended offers are active for this account right now.
             </p>
           )}
-        </div>
+        </RetentionGrowthDisclosure>
 
-        <div className="bg-card border rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b">
-            <h3 className="text-sm font-bold">Commercial Guardrails</h3>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              What can be offered, how much is allowed, and when Head of KAM approval is needed.
-            </p>
-          </div>
+        <RetentionGrowthDisclosure
+          title="Commercial Guardrails"
+          description="What can be offered, how much is allowed, and when Head of KAM approval is needed."
+          className="h-full"
+        >
           <div className="p-6 space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <MiniStat label="POC limit" value={model.guardrails.summary.pocLimit} />
@@ -1976,51 +2111,20 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
               ))}
             </div>
           </div>
-        </div>
+        </RetentionGrowthDisclosure>
       </div>
 
-      <div className="bg-card border rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b">
-          <h3 className="text-sm font-bold">Not applicable to this client</h3>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            Services in this list are filtered out from growth opportunities, offers, and pitch
-            suggestions.
-          </p>
-        </div>
-        {model.notApplicable.length ? (
-          <div className="divide-y">
-            {model.notApplicable.map((item) => (
-              <div key={item.id} className="px-6 py-4 space-y-3">
-                <p className="text-sm font-semibold">{item.service}</p>
-                <p className="text-xs text-muted-foreground">{item.reason}</p>
-                <EvidencePreview
-                  evidence={item.evidence}
-                  onView={() =>
-                    setEvidenceTarget({
-                      title: item.service,
-                      subtitle: "Not applicable service",
-                      evidence: item.evidence,
-                    })
-                  }
-                />
-              </div>
-            ))}
+      <RetentionGrowthDisclosure
+        title="Draft Plans & Offers"
+        description="Review-ready drafts created from whitespace, opportunities, and recommended offers."
+        meta={`${draftQueue.length} drafts`}
+        defaultOpen={draftQueue.length > 0}
+      >
+        {draftSaveStatus && (
+          <div className="border-b px-6 py-3 text-[11px] font-medium text-muted-foreground">
+            {draftSaveStatus}
           </div>
-        ) : (
-          <p className="px-6 py-6 text-xs text-muted-foreground">
-            No services are currently blocked from pitching for this account.
-          </p>
         )}
-      </div>
-
-      <div className="bg-card border rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b">
-          <h3 className="text-sm font-bold">Draft Plans & Offers</h3>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            Review-ready local drafts created from whitespace, opportunities, and recommended
-            offers.
-          </p>
-        </div>
         {draftQueue.length ? (
           <div className="divide-y">
             {draftQueue.map((draft) => (
@@ -2053,10 +2157,10 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
           </div>
         ) : (
           <p className="px-6 py-6 text-xs text-muted-foreground">
-            No draft pitches or offers have been created in this session yet.
+            No draft pitches or offers have been created yet.
           </p>
         )}
-      </div>
+      </RetentionGrowthDisclosure>
 
       <RetentionPlanReviewSheet
         target={planTarget}
@@ -2076,6 +2180,40 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
 
       <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
     </div>
+  );
+}
+
+function RetentionGrowthDisclosure({
+  title,
+  description,
+  meta,
+  defaultOpen = false,
+  className = "",
+  children,
+}) {
+  return (
+    <details
+      className={`group rounded-xl border bg-card overflow-hidden ${className}`}
+      open={defaultOpen}
+    >
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-4 px-6 py-4 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <h3 className="text-sm font-bold">{title}</h3>
+          {description ? (
+            <p className="text-[11px] text-muted-foreground mt-1">{description}</p>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {meta ? (
+            <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              {meta}
+            </span>
+          ) : null}
+          <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
+        </div>
+      </summary>
+      <div className="border-t">{children}</div>
+    </details>
   );
 }
 
@@ -2159,7 +2297,14 @@ function DraftKindBadge({ kind }) {
 }
 
 function getPotentialValueLabel(item) {
-  return item.potentialValueLabel ?? `+${formatCurrency(item.potentialValue ?? 0)}`;
+  if (item.potentialValueLabel) return item.potentialValueLabel;
+  const parsed = Number(item.potentialValue);
+  return Number.isFinite(parsed) && parsed > 0 ? `+${formatCurrency(parsed)}` : "Not provided";
+}
+
+function formatOpportunityPotential(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? `+${formatCurrency(parsed)}` : "Not provided";
 }
 
 function getDraftApprovalState(item, canApproveCommercial) {
@@ -2209,6 +2354,15 @@ function sortRetentionDrafts(drafts) {
     const leftDate = new Date(left.createdAt || 0).getTime();
     const rightDate = new Date(right.createdAt || 0).getTime();
     return rightDate - leftDate;
+  });
+}
+
+function dedupeRetentionDrafts(drafts) {
+  const seen = new Set();
+  return drafts.filter((draft) => {
+    if (!draft?.id || seen.has(draft.id)) return false;
+    seen.add(draft.id);
+    return true;
   });
 }
 
@@ -4238,6 +4392,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
         ],
         editorUser,
       );
+      await refreshAccountRetentionGrowthScoring(accountId).catch(() => null);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["account-history", accountId] });
@@ -4558,7 +4713,7 @@ function ResourceHealthBlock({ account, onExpand }) {
   );
 }
 /* ============================== TAB 3: Activity to Increase Score ============================== */
-function ActivityTab({ account, opportunities, escalations }) {
+function ActivityTab({ account, opportunities, escalations, session }) {
   const { profile } = useAuth();
   if (account) {
     return (
@@ -4567,6 +4722,7 @@ function ActivityTab({ account, opportunities, escalations }) {
         opportunities={opportunities}
         escalations={escalations}
         profile={profile}
+        session={session}
       />
     );
   }
@@ -4621,7 +4777,7 @@ function ActivityTab({ account, opportunities, escalations }) {
                     {o.confidence}
                   </span>
                   <span className="text-sm font-bold text-success whitespace-nowrap">
-                    +{formatCurrency(o.potential)}
+                    {formatOpportunityPotential(o.potential)}
                   </span>
                   <button
                     disabled={!editable}
@@ -5173,8 +5329,7 @@ function PaginatedListFooter({ page, pageSize, total, onPageChange, itemLabel = 
   );
 }
 
-function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
-  const { session } = useAuth();
+function ActivityTabPlanner({ account, opportunities, escalations, profile, session }) {
   const role = profile?.role ?? "KAM";
   const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
   const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
@@ -5262,6 +5417,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
           accountId: account.id,
           limit: 5,
           daysBack: 60,
+          actorAccessToken: session?.access_token,
         },
       }),
     onSuccess: (result) => {
@@ -6091,7 +6247,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile }) {
             <Button
               size="sm"
               variant="outline"
-              disabled={!canAct || extractingFireflies}
+              disabled={!canAct || !session?.access_token || extractingFireflies}
               onClick={() => rerunFirefliesExtraction()}
             >
               {extractingFireflies && <Loader2 className="size-3.5 animate-spin mr-1" />}
@@ -7343,9 +7499,16 @@ function ScoreRuleDetails({ item }) {
   const activityScoreLogic = formatActivityScoreLogic(item.activityScoreLogic);
   const approvalSla = formatApprovalSla(item.approvalSla);
   const reviewCadence = formatReviewCadence(item.reviewCadence);
+  const knownPotential = Number(item.potentialValue);
+  const potentialLabel =
+    item.potentialValueLabel && item.potentialValueLabel !== "Not provided"
+      ? item.potentialValueLabel
+      : Number.isFinite(knownPotential) && knownPotential > 0
+        ? `+${formatCurrency(knownPotential)}`
+        : null;
   const summaryParts = [
     item.scoreBand,
-    item.potentialValue ? `+${formatCurrency(item.potentialValue)}` : null,
+    potentialLabel,
     item.currentValue && item.targetValue ? `${item.currentValue} to ${item.targetValue}` : null,
     item.threshold || item.targetScore
       ? `${item.thresholdSource ?? "Global default"} threshold`
@@ -7375,10 +7538,7 @@ function ScoreRuleDetails({ item }) {
               : null
           }
         />
-        <RuleDetailDisclosure
-          label="Potential value"
-          value={item.potentialValue ? `+${formatCurrency(item.potentialValue)}` : null}
-        />
+        <RuleDetailDisclosure label="Potential value" value={potentialLabel} />
         <RuleDetailDisclosure
           label="Priority"
           value={
@@ -7507,6 +7667,217 @@ function MiniStat({ label, value }) {
         {label}
       </p>
       <p className="text-sm font-medium leading-snug">{value}</p>
+    </div>
+  );
+}
+
+function DashboardKpiCard({ label, value, hint }) {
+  return (
+    <div className="rounded-lg border bg-muted/20 p-4 min-h-[120px] flex flex-col justify-between">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+        {label}
+      </p>
+      <div>
+        <p className="text-xl font-bold leading-tight">{value}</p>
+        {hint && <p className="text-[11px] text-muted-foreground mt-1 leading-snug">{hint}</p>}
+      </div>
+    </div>
+  );
+}
+
+function CalculationGovernancePanel({ dashboard }) {
+  const dataQuality = dashboard.dataQuality ?? {};
+  const notes = dashboard.calculationNotes ?? [];
+
+  return (
+    <details className="group rounded-xl border bg-card overflow-hidden">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-6 py-4 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <h3 className="text-sm font-bold">Calculation & Data Sources</h3>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Data source map, score-weight rationale, matrix rules, and missing/stale data handling.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <DataQualityBadge status={dataQuality.status} />
+          <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
+        </div>
+      </summary>
+
+      <div className="border-t">
+        <div className="grid gap-6 p-6 xl:grid-cols-[0.9fr,1.1fr]">
+          <div className="space-y-4">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Data Readiness
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">{dataQuality.summary}</p>
+            </div>
+            <div className="space-y-2">
+              {(dataQuality.checks ?? []).map((check) => (
+                <div
+                  key={check.label}
+                  className="flex items-start justify-between gap-3 rounded-lg border bg-muted/20 p-3"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold">{check.label}</p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">{check.source}</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                      {check.handling}
+                    </p>
+                  </div>
+                  <DataQualityBadge status={check.status} compact />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Calculation Notes
+              </p>
+              <div className="mt-2 space-y-2">
+                {notes.map((note) => (
+                  <p key={note} className="rounded-lg border bg-muted/20 p-3 text-xs">
+                    {note}
+                  </p>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                Matrix Rules
+              </p>
+              <div className="mt-2 grid gap-2">
+                {(dashboard.matrixSpec ?? []).map((entry) => (
+                  <div key={entry.item} className="rounded-lg border bg-muted/20 p-3">
+                    <p className="text-xs font-semibold">{entry.item}</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                      {entry.rule}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t p-6">
+          <ScoreWeightTable
+            title="Retention Score Weights"
+            rows={dashboard.scoringWeights?.retention}
+          />
+        </div>
+        <div className="border-t p-6">
+          <ScoreWeightTable title="Growth Score Weights" rows={dashboard.scoringWeights?.growth} />
+        </div>
+        <div className="border-t p-6">
+          <DataSourceTable rows={dashboard.dataSourceMap} />
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function DataQualityBadge({ status = "Ready", compact = false }) {
+  const styles = {
+    Ready: "bg-success/10 text-success",
+    "Needs data": "bg-crit/10 text-crit",
+    "Stale review": "bg-warn/10 text-warn",
+    Missing: "bg-crit/10 text-crit",
+    Stale: "bg-warn/10 text-warn",
+  };
+
+  return (
+    <span
+      className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-wide ${
+        compact ? "whitespace-nowrap" : ""
+      } ${styles[status] ?? "bg-muted text-muted-foreground"}`}
+    >
+      {status}
+    </span>
+  );
+}
+
+function ScoreWeightTable({ title, rows = [] }) {
+  return (
+    <div>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-bold">{title}</h4>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Each weight has a business rationale so the scoring model is explainable.
+          </p>
+        </div>
+        <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+          {rows.reduce((total, row) => total + row.weight, 0)}%
+        </span>
+      </div>
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full min-w-[760px] text-left text-xs">
+          <thead>
+            <tr className="border-b bg-muted/30 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              <th className="px-4 py-3">Metric</th>
+              <th className="px-4 py-3">Weight</th>
+              <th className="px-4 py-3">Source</th>
+              <th className="px-4 py-3">Why this weight</th>
+              <th className="px-4 py-3">Missing rule</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {rows.map((row) => (
+              <tr key={row.metric} className="align-top">
+                <td className="px-4 py-3 font-semibold">{row.metric}</td>
+                <td className="px-4 py-3 font-semibold">{row.weight}%</td>
+                <td className="px-4 py-3 text-muted-foreground">{row.systemOfRecord}</td>
+                <td className="px-4 py-3 text-muted-foreground">{row.rationale}</td>
+                <td className="px-4 py-3 text-muted-foreground">{row.missingHandling}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function DataSourceTable({ rows = [] }) {
+  return (
+    <div>
+      <div className="mb-3">
+        <h4 className="text-sm font-bold">Metric Source Map</h4>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          This is the build-level answer to where every visible KPI comes from.
+        </p>
+      </div>
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full min-w-[920px] text-left text-xs">
+          <thead>
+            <tr className="border-b bg-muted/30 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              <th className="px-4 py-3">Metric</th>
+              <th className="px-4 py-3">Object / Fields</th>
+              <th className="px-4 py-3">Usage</th>
+              <th className="px-4 py-3">Missing Handling</th>
+              <th className="px-4 py-3">Freshness Rule</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {rows.map((row) => (
+              <tr key={row.metric} className="align-top">
+                <td className="px-4 py-3 font-semibold">{row.metric}</td>
+                <td className="px-4 py-3 text-muted-foreground">
+                  <p className="font-medium text-foreground">{row.systemOfRecord}</p>
+                  <p className="mt-1">{row.fields}</p>
+                </td>
+                <td className="px-4 py-3 text-muted-foreground">{row.usage}</td>
+                <td className="px-4 py-3 text-muted-foreground">{row.missingHandling}</td>
+                <td className="px-4 py-3 text-muted-foreground">{row.freshness}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -7807,7 +8178,7 @@ function buildActivityRuleActivityInput({ accountId, target, form }) {
     weakSignal: item.weakSignal ?? item.reason ?? item.sourceExcerpt ?? form.nextStep.trim(),
     currentValue: item.currentValue ?? null,
     targetValue: item.targetValue ?? null,
-    expectedLift: item.expectedLift ?? `+${formatCurrency(item.potentialValue ?? 0)} potential`,
+    expectedLift: item.expectedLift ?? getPotentialValueLabel(item),
     successCriteria: item.successCriteria ?? "Complete the activity and review score impact.",
     evidenceRequired: item.evidenceRequired ?? ["Activity evidence"],
     triggerLogic: item.triggerLogic ?? null,
@@ -8326,7 +8697,6 @@ function RetentionGrowthTab({ account, opportunities, escalations }) {
   const delivered = account.retentionGrowth.filter((s) => s.delivered);
   const offeredNotDelivered = account.retentionGrowth.filter((s) => s.offered && !s.delivered);
   const whiteSpace = account.retentionGrowth.filter((s) => !s.offered && s.applicable);
-  const notApplicable = account.retentionGrowth.filter((s) => !s.applicable);
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -8392,20 +8762,6 @@ function RetentionGrowthTab({ account, opportunities, escalations }) {
           </ul>
         </Card>
       </div>
-
-      <Card title="Not applicable to this client">
-        <p className="text-[11px] text-muted-foreground mb-3">
-          Track explicitly so the team doesn't pitch the wrong thing.
-        </p>
-        <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
-          {notApplicable.map((s) => (
-            <li key={s.service} className="border rounded-lg p-3">
-              <p className="font-semibold">{s.service}</p>
-              <p className="text-[11px] text-muted-foreground">{s.trackingNote}</p>
-            </li>
-          ))}
-        </ul>
-      </Card>
 
       <Card title="Project Tracking & Client Updates">
         <p className="text-[11px] text-muted-foreground mb-3">
@@ -8703,272 +9059,6 @@ function EscalationsTab({ list }) {
       ))}
     </div>
   );
-}
-
-function MeetingHistoryTab({ account, profile }) {
-  const queryClient = useQueryClient();
-  const role = profile?.role ?? "KAM";
-  const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
-  const canSync = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
-  const [syncStatus, setSyncStatus] = useState("");
-  const { data: meetings = [], isLoading } = useQuery({
-    queryKey: ["fireflies-meeting-summaries", account.id],
-    queryFn: () => fetchFirefliesMeetingSummaries(account.id),
-    enabled: Boolean(account.id),
-  });
-  const { mutate: syncFirefliesMeetings, isPending: syncingMeetings } = useMutation({
-    mutationFn: () =>
-      fetchFirefliesRequiredActionItems({
-        data: {
-          accountId: account.id,
-          limit: 10,
-          daysBack: 60,
-        },
-      }),
-    onSuccess: (result) => {
-      setSyncStatus(result.status ?? "Fireflies meetings synced.");
-      queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
-      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
-      queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
-    },
-    onError: (error) => {
-      setSyncStatus(error?.message ?? "Fireflies meeting sync failed.");
-    },
-  });
-
-  const actionCount = meetings.reduce(
-    (total, meeting) => total + (meeting.derivedActionItems?.length ?? 0),
-    0,
-  );
-  const opportunityCount = meetings.reduce(
-    (total, meeting) => total + (meeting.derivedOpportunities?.length ?? 0),
-    0,
-  );
-  const summaryDerivedCount = meetings.reduce(
-    (total, meeting) =>
-      total +
-      (meeting.derivedActionItems ?? []).filter((item) => item.actionSource === "summary_derived")
-        .length,
-    0,
-  );
-
-  return (
-    <div className="space-y-6">
-      <div className="bg-card border rounded-xl p-6 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-        <div className="space-y-2">
-          <h3 className="text-sm font-bold">Fireflies Meeting History</h3>
-          <p className="text-xs text-muted-foreground max-w-3xl">
-            Each synced meeting stores its Fireflies summary, raw action items, agent-derived action
-            items, and guardrail diagnostics for {account.name}.
-          </p>
-          <p
-            className={`text-[11px] ${
-              syncStatus.includes("failed") || syncStatus.includes("Missing")
-                ? "text-crit"
-                : "text-muted-foreground"
-            }`}
-          >
-            {syncStatus || "Latest saved meetings appear below after Fireflies sync runs."}
-          </p>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={!canSync || syncingMeetings}
-          onClick={() => syncFirefliesMeetings()}
-        >
-          {syncingMeetings && <Loader2 className="size-3.5 animate-spin mr-1" />}
-          Sync Fireflies
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <MiniStat label="Meetings saved" value={isLoading ? "Loading" : `${meetings.length}`} />
-        <MiniStat label="Action items detected" value={`${actionCount}`} />
-        <MiniStat label="Opportunities detected" value={`${opportunityCount}`} />
-        <MiniStat label="Summary-derived actions" value={`${summaryDerivedCount}`} />
-      </div>
-
-      {isLoading ? (
-        <div className="py-16 text-center text-xs text-muted-foreground">
-          Loading meeting history...
-        </div>
-      ) : meetings.length ? (
-        <div className="space-y-4">
-          {meetings.map((meeting) => (
-            <div key={meeting.id} className="bg-card border rounded-xl overflow-hidden">
-              <div className="px-6 py-4 border-b flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
-                <div className="space-y-1 min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm font-bold leading-snug">{meeting.title}</h3>
-                    {meeting.agentDiagnostics?.summaryFallbackUsed && (
-                      <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-accent/10 text-accent px-2 py-1">
-                        Summary derived
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {formatMeetingHistoryDate(meeting.meetingDate)} · synced{" "}
-                    {formatMeetingHistoryDate(meeting.syncedAt)}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <span className="text-[10px] font-bold uppercase rounded-full bg-muted text-muted-foreground px-2 py-1">
-                    {(meeting.derivedActionItems ?? []).length} actions
-                  </span>
-                  <span className="text-[10px] font-bold uppercase rounded-full bg-success/10 text-success px-2 py-1">
-                    {(meeting.derivedOpportunities ?? []).length} opportunities
-                  </span>
-                  {meeting.transcriptUrl && (
-                    <a
-                      href={meeting.transcriptUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[10px] font-bold uppercase tracking-wide text-accent"
-                    >
-                      Transcript
-                    </a>
-                  )}
-                </div>
-              </div>
-
-              <div className="p-6 space-y-4">
-                <div className="space-y-2">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                    Summary
-                  </p>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {meeting.overview || meeting.shortSummary || "No summary text available."}
-                  </p>
-                </div>
-
-                {(meeting.derivedActionItems ?? []).length ? (
-                  <div className="space-y-3">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                      Agent action items
-                    </p>
-                    <div className="grid gap-3">
-                      {meeting.derivedActionItems.map((item) => (
-                        <div key={item.id} className="rounded-lg border bg-muted/20 p-3 space-y-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <AreaBadge area={item.healthArea} />
-                            <RuleBadge ruleId={item.ruleId} />
-                            <ConfidenceBadge confidence={item.confidence} />
-                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
-                              {formatMeetingActionSource(item.actionSource)}
-                            </span>
-                          </div>
-                          <p className="text-sm font-semibold">{item.title}</p>
-                          <p className="text-xs text-muted-foreground">{item.expectedLift}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    No action item passed the guarded activity rules for this meeting.
-                  </p>
-                )}
-
-                {(meeting.derivedOpportunities ?? []).length ? (
-                  <div className="space-y-3">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                      Agent opportunities
-                    </p>
-                    <div className="grid gap-3">
-                      {meeting.derivedOpportunities.map((opportunity) => (
-                        <div
-                          key={opportunity.id}
-                          className="rounded-lg border bg-success/5 p-3 space-y-2"
-                        >
-                          <div className="flex flex-wrap items-center gap-2">
-                            <AreaBadge area={opportunity.category} />
-                            <ConfidenceBadge confidence={opportunity.confidence} />
-                            <span className="text-[10px] font-bold uppercase tracking-wide rounded-full bg-muted text-muted-foreground px-2 py-1">
-                              {formatMeetingActionSource(opportunity.sourceType)}
-                            </span>
-                          </div>
-                          <p className="text-sm font-semibold">{opportunity.title}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {formatCurrency(opportunity.potential ?? 0)} · {opportunity.nextStep}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    No commercial or retention opportunity passed the guarded opportunity rules.
-                  </p>
-                )}
-
-                <details className="group rounded-lg border bg-muted/20 text-xs">
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
-                    <span className="font-bold uppercase tracking-widest text-muted-foreground">
-                      Meeting details
-                    </span>
-                    <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
-                  </summary>
-                  <div className="border-t p-3 space-y-3">
-                    <MiniStat
-                      label="Participants"
-                      value={
-                        meeting.participants?.length
-                          ? meeting.participants.join(", ")
-                          : "Not available"
-                      }
-                    />
-                    <MiniStat
-                      label="Raw Fireflies action items"
-                      value={meeting.actionItems || "No explicit action items from Fireflies."}
-                    />
-                    <MiniStat
-                      label="Agent diagnostics"
-                      value={`Source: ${formatMeetingActionSource(
-                        meeting.agentDiagnostics?.actionSource,
-                      )}; candidates: ${meeting.agentDiagnostics?.candidateCount ?? 0}; accepted: ${
-                        meeting.agentDiagnostics?.acceptedCount ?? 0
-                      }; opportunity candidates: ${
-                        meeting.agentDiagnostics?.opportunity?.candidateCount ?? 0
-                      }; opportunities: ${
-                        meeting.agentDiagnostics?.opportunity?.acceptedCount ?? 0
-                      }`}
-                    />
-                  </div>
-                </details>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="bg-card border rounded-xl p-12 text-center">
-          <Clock className="size-6 text-muted-foreground mx-auto mb-2" />
-          <p className="text-sm text-muted-foreground">No Fireflies meetings saved yet.</p>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            Sync Fireflies to save meeting summaries and auto-create guarded activity items.
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function formatMeetingHistoryDate(value) {
-  if (!value) return "Recent";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function formatMeetingActionSource(source) {
-  if (source === "llm_fallback") return "LLM fallback";
-  if (source === "summary_derived") return "Summary derived";
-  if (source === "explicit_action_items") return "Fireflies action item";
-  return "Meeting agent";
 }
 
 /* ============================== TAB 7: Client History ============================== */

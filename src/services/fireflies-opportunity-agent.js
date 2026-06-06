@@ -1,3 +1,11 @@
+import {
+  getAccountEmailDomains,
+  getTranscriptDisplayDate as getTranscriptDate,
+  getTranscriptEmailDomains,
+  normalize,
+  toFirefliesId,
+} from "@/services/fireflies-utils";
+
 const DEFAULT_GLOBAL_OPPORTUNITY_LIMIT = 12;
 const DEFAULT_PER_TRANSCRIPT_OPPORTUNITY_LIMIT = 3;
 const MIN_OPPORTUNITY_TEXT_LENGTH = 12;
@@ -15,15 +23,8 @@ const RETENTION_SIGNAL_PATTERN =
 const GROWTH_SIGNAL_PATTERN =
   /\b(proposal|pilot|poc|upsell|cross-sell|cross sell|expansion|expand|additional|new region|new team|new module|license|licenses|seats|users|interested|evaluate|evaluating|purchase|buy|scope)\b/i;
 
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
 function toId(value = "") {
-  return normalize(value).replace(/\s+/g, "-").slice(0, 80) || "opportunity";
+  return toFirefliesId(value, "opportunity");
 }
 
 function splitCandidates(raw = "") {
@@ -36,15 +37,6 @@ function splitCandidates(raw = "") {
         .trim(),
     )
     .filter((item) => item.length >= MIN_OPPORTUNITY_TEXT_LENGTH);
-}
-
-function getTranscriptDate(transcript) {
-  if (!transcript.date) return "Recent";
-  const numericDate = new Date(Number(transcript.date));
-  if (!Number.isNaN(numericDate.getTime())) return numericDate.toLocaleDateString("en-US");
-  const parsedDate = new Date(transcript.date);
-  if (!Number.isNaN(parsedDate.getTime())) return parsedDate.toLocaleDateString("en-US");
-  return String(transcript.date);
 }
 
 function getAccountKeywords(account) {
@@ -71,13 +63,20 @@ function getAccountRelevance(account, transcript, text) {
     ].join(" "),
   );
   const keywords = getAccountKeywords(account);
-  if (!keywords.length) return { relevant: false, matchStrength: "none" };
+  const matchedDomains = getAccountEmailDomains(account).filter((domain) =>
+    getTranscriptEmailDomains(transcript).includes(domain),
+  );
+  if (!keywords.length && !matchedDomains.length) {
+    return { relevant: false, matchStrength: "none" };
+  }
 
   const matches = keywords.filter((keyword) => haystack.includes(keyword));
-  if (!matches.length) return { relevant: false, matchStrength: "none" };
+  if (!matches.length && !matchedDomains.length) {
+    return { relevant: false, matchStrength: "none" };
+  }
   return {
     relevant: true,
-    matchStrength: matches.length >= 2 ? "strong" : "partial",
+    matchStrength: matches.length >= 2 || matchedDomains.length ? "strong" : "partial",
   };
 }
 
@@ -118,18 +117,9 @@ function parsePotentialAmount(text) {
   return Math.round(base);
 }
 
-function estimatePotential(account, category, text) {
+function getExplicitPotential(text) {
   const explicitAmount = parsePotentialAmount(text);
-  if (explicitAmount && explicitAmount >= 10_000) return explicitAmount;
-
-  if (category === "Retention") {
-    return Math.max(Math.round((account.arr ?? account.contractValue ?? 0) * 0.08), 50_000);
-  }
-
-  const whiteSpaceCount = Math.max(account.whiteSpaceCount ?? 1, 1);
-  const accountUpside = account.growthUpside ?? 0;
-  if (accountUpside > 0) return Math.max(Math.round(accountUpside / whiteSpaceCount), 25_000);
-  return Math.max(Math.round((account.arr ?? account.contractValue ?? 0) * 0.05), 50_000);
+  return explicitAmount && explicitAmount >= 10_000 ? explicitAmount : null;
 }
 
 function getConfidence({ text, sourceType, relevance, category }) {
@@ -137,9 +127,8 @@ function getConfidence({ text, sourceType, relevance, category }) {
     text,
   );
   const hasDecisionMaker = /\b(sponsor|cto|cfo|vp|director|procurement|executive)\b/i.test(text);
-  const hasNextStep = /\b(proposal|pilot|poc|scope|schedule|follow up|follow-up|draft|validate)\b/i.test(
-    text,
-  );
+  const hasNextStep =
+    /\b(proposal|pilot|poc|scope|schedule|follow up|follow-up|draft|validate)\b/i.test(text);
 
   if (category === "Retention" && hasNextStep) return "High";
   if (sourceType === "explicit_action_items" && (hasBudget || hasDecisionMaker || hasNextStep)) {
@@ -183,7 +172,7 @@ function buildOpportunity({ account, transcript, text, sourceType, index }) {
 
   const { category, service } = classification;
   const confidence = getConfidence({ text, sourceType, relevance, category });
-  const potential = estimatePotential(account, category, text);
+  const potential = getExplicitPotential(text);
   const meetingDate = getTranscriptDate(transcript);
   const titlePrefix = category === "Retention" ? "Retention opportunity" : "Growth opportunity";
   const title = service
@@ -195,9 +184,7 @@ function buildOpportunity({ account, transcript, text, sourceType, index }) {
     title,
     category,
     source:
-      category === "Retention"
-        ? "Escalation + Fireflies meeting notes"
-        : "Fireflies meeting notes",
+      category === "Retention" ? "Escalation + Fireflies meeting notes" : "Fireflies meeting notes",
     signalDate: meetingDate,
     potential,
     confidence,

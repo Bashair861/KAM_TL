@@ -1,8 +1,15 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatCurrency } from "@/data/kam-data";
-import { fetchAccounts, fetchKamUsers, updateAccountKam, createAccount, deleteAccount } from "@/services/db";
+import {
+  fetchAccounts,
+  fetchKamUsers,
+  updateAccountKam,
+  createAccount,
+  deleteAccount,
+  refreshAllAccountRetentionGrowthScoring,
+} from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
 import { TrendingDown, TrendingUp, X, Loader2, Building2, Trash2, AlertTriangle } from "lucide-react";
 
@@ -49,6 +56,7 @@ function AccountsListPage() {
   const [showNewModal, setShowNewModal] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [deleteError, setDeleteError] = useState("");
+  const scoringTriggeredRef = useRef(false);
 
   const { data: accounts = [], isLoading } = useQuery({
     queryKey: ["accounts", userId, role],
@@ -75,6 +83,17 @@ function AccountsListPage() {
     },
     onError: (err) => setDeleteError(err.message ?? "Delete failed. Make sure the RLS policy is applied in Supabase."),
   });
+
+  const { mutate: refreshPortfolioScoring } = useMutation({
+    mutationFn: () => refreshAllAccountRetentionGrowthScoring({ role, userId }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+
+  useEffect(() => {
+    if (isLoading || !accounts.length || scoringTriggeredRef.current) return;
+    scoringTriggeredRef.current = true;
+    refreshPortfolioScoring();
+  }, [accounts.length, isLoading, refreshPortfolioScoring]);
 
   return (
     <div className="flex flex-col">

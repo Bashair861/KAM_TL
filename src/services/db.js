@@ -5,6 +5,7 @@ import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
 import { applySowFieldsServer } from "@/services/sow-upload";
+import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -25,6 +26,16 @@ function mapFlatAccount(r) {
     retentionRisk: r.retention_risk,
     growthUpside: r.growth_upside,
     whiteSpaceCount: r.white_space_count,
+    retentionHealthScore: r.retention_health_score ?? 0,
+    calculatedRetentionRisk: r.calculated_retention_risk ?? r.retention_risk ?? "Low",
+    growthPotentialScore: r.growth_potential_score ?? 0,
+    growthPotentialLevel: r.growth_potential_level ?? "Low",
+    revenueAtRisk: r.revenue_at_risk ?? 0,
+    growthPipelineValue: r.growth_pipeline_value ?? 0,
+    retentionGrowthQuadrant: r.retention_growth_quadrant ?? null,
+    retentionGrowthNextAction: r.retention_growth_next_action ?? null,
+    retentionGrowthCalculatedAt: r.retention_growth_calculated_at ?? null,
+    retentionGrowthCalculationReason: r.retention_growth_calculation_reason ?? {},
     cooperation: r.cooperation,
     serviceConsumption: r.service_consumption,
     meetingsPerMonth: r.meetings_per_month,
@@ -428,6 +439,25 @@ function mapTask(row, accountLookup = new Map(), healthMetricLookup = new Map())
     healthScoreId: healthMetric?.healthScoreId ?? null,
     healthArea: healthMetric?.area ?? "",
     importanceScore: isEscalation ? 100 : row.health_metric_id ? 70 : 20,
+  };
+}
+function mapRetentionGrowthDraft(row) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    kind: row.kind,
+    title: row.title,
+    owner: row.owner ?? "",
+    dueDate: row.due_date ?? "",
+    nextStep: row.next_step ?? "",
+    potentialValueLabel: row.potential_value_label ?? "Not provided",
+    reason: row.reason ?? "",
+    evidence: row.evidence ?? [],
+    offerType: row.offer_type ?? null,
+    approvalState: row.approval_state ?? "",
+    createdBy: row.created_by ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 // --- fetch accounts (flat) ----------------------------------------------------
@@ -1575,7 +1605,7 @@ export async function fetchOpportunities(accountId) {
     title: o.title,
     source: o.source ?? "",
     signalDate: o.signal_date ?? "",
-    potential: o.potential ?? 0,
+    potential: o.potential ?? null,
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
   }));
@@ -1590,7 +1620,7 @@ export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportuni
     title: opportunity.title,
     source: opportunity.source,
     signal_date: opportunity.signalDate,
-    potential: opportunity.potential ?? 0,
+    potential: opportunity.potential ?? null,
     confidence: opportunity.confidence ?? "Medium",
     next_step: opportunity.nextStep,
   }));
@@ -1606,7 +1636,7 @@ export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportuni
     title: o.title,
     source: o.source ?? "",
     signalDate: o.signal_date ?? "",
-    potential: o.potential ?? 0,
+    potential: o.potential ?? null,
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
   }));
@@ -1617,6 +1647,106 @@ function firstRelatedRow(value) {
   return value ?? null;
 }
 
+function buildRetentionGrowthReasonPayload({ model, opportunities, escalations }) {
+  return {
+    trigger: "account_retention_growth_recalculation",
+    rules: {
+      retention:
+        "Health, renewal proximity, CSAT, risk score, financial score, relationship score, escalations, competitor pressure, and churn/renewal signals.",
+      growth:
+        "Whitespace count, growth upside, applicable-but-not-offered services, meeting cadence, current service proof, and opportunity pipeline.",
+    },
+    signals: {
+      retention: model.retentionSignals.map((signal) => ({
+        id: signal.id,
+        level: signal.level,
+        title: signal.title,
+      })),
+      growth: model.growthSignals.map((signal) => ({
+        id: signal.id,
+        level: signal.level,
+        title: signal.title,
+      })),
+    },
+    counts: {
+      opportunities: opportunities.length,
+      escalations: escalations.length,
+      applicableGrowth: model.applicableGrowth.length,
+      recommendedOffers: model.recommendedOffers.length,
+    },
+  };
+}
+
+function buildAccountRetentionGrowthUpdate({ model, opportunities, escalations }) {
+  const dashboard = model.dashboard;
+  const nextAction =
+    dashboard.actionRows[0]?.recommendedAction ||
+    dashboard.matrix?.recommendedAction ||
+    "Maintain account engagement and monitor for new signals.";
+
+  return {
+    retention_health_score: dashboard.retentionScore,
+    calculated_retention_risk: dashboard.riskLevel,
+    retention_risk: dashboard.riskLevel,
+    growth_potential_score: dashboard.growthScore,
+    growth_potential_level: dashboard.growthLevel,
+    revenue_at_risk: dashboard.revenueAtRisk,
+    growth_pipeline_value: dashboard.growthPipeline,
+    retention_growth_quadrant: dashboard.matrix?.quadrant ?? null,
+    retention_growth_next_action: nextAction,
+    retention_growth_calculated_at: new Date().toISOString(),
+    retention_growth_calculation_reason: buildRetentionGrowthReasonPayload({
+      model,
+      opportunities,
+      escalations,
+    }),
+  };
+}
+
+export async function refreshAccountRetentionGrowthScoring(accountId) {
+  const [account, opportunities, escalations] = await Promise.all([
+    fetchAccount(accountId),
+    fetchOpportunities(accountId),
+    fetchEscalations(accountId),
+  ]);
+
+  if (!account) throw new Error("Account not found for retention/growth scoring.");
+
+  const model = buildRetentionGrowthTabModel({ account, opportunities, escalations });
+  const update = buildAccountRetentionGrowthUpdate({ model, opportunities, escalations });
+  const { data, error } = await supabase
+    .from("accounts")
+    .update(update)
+    .eq("id", accountId)
+    .select("*")
+    .single();
+  if (error) throw error;
+
+  return {
+    account: mapFlatAccount(data),
+    dashboard: model.dashboard,
+    update,
+  };
+}
+
+export async function refreshAllAccountRetentionGrowthScoring(opts) {
+  const accounts = await fetchAccounts(opts);
+  const results = [];
+
+  for (const account of accounts) {
+    try {
+      results.push(await refreshAccountRetentionGrowthScoring(account.id));
+    } catch (error) {
+      results.push({
+        accountId: account.id,
+        failed: true,
+        error: error?.message ?? "Unknown scoring error",
+      });
+    }
+  }
+
+  return results;
+}
 export async function fetchContracts(opts) {
   let q = supabase
     .from("accounts")
@@ -1786,6 +1916,155 @@ export async function upsertFirefliesMeetingSummaries(accountId, meetings) {
   return (data ?? []).map(mapFirefliesMeetingSummary);
 }
 
+export async function logFirefliesWebhookEvent(input = {}) {
+  const row = {
+    fireflies_transcript_id: input.transcriptId ?? null,
+    event_type: input.eventType ?? "meeting_ready",
+    status: input.status ?? "received",
+    matched_account_id: input.accountId ?? null,
+    match_score: input.matchScore ?? null,
+    title: input.title ?? null,
+    payload: input.payload ?? {},
+    diagnostics: input.diagnostics ?? {},
+    error_message: input.errorMessage ?? null,
+  };
+
+  const { data, error } = await supabase
+    .from("fireflies_webhook_events")
+    .insert(row)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "42P01") {
+      console.warn(
+        "Fireflies webhook event log table is missing. Run src/db/add-fireflies-webhook-events.sql.",
+      );
+      return null;
+    }
+    throw error;
+  }
+
+  return data ?? null;
+}
+
+export async function fetchRetentionGrowthDrafts(accountId) {
+  if (!accountId) return [];
+  const { data, error } = await supabase
+    .from("retention_growth_drafts")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    if (error.code === "42P01") return [];
+    throw error;
+  }
+
+  return (data ?? []).map(mapRetentionGrowthDraft);
+}
+
+export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "Unknown") {
+  if (!accountId) throw new Error("Account id is required to save a retention/growth draft.");
+  if (!draft?.id) throw new Error("Draft id is required.");
+
+  const now = new Date().toISOString();
+  const row = {
+    id: draft.id,
+    account_id: accountId,
+    kind: draft.kind,
+    title: draft.title,
+    owner: draft.owner,
+    due_date: draft.dueDate,
+    next_step: draft.nextStep,
+    potential_value_label: draft.potentialValueLabel,
+    reason: draft.reason,
+    evidence: draft.evidence ?? [],
+    offer_type: draft.offerType,
+    approval_state: draft.approvalState,
+    created_by: createdBy,
+    created_at: draft.createdAt ?? now,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabase
+    .from("retention_growth_drafts")
+    .upsert(row, { onConflict: "id" })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapRetentionGrowthDraft(data);
+}
+
+export async function deleteFirefliesMeetingHistory({
+  accountId,
+  meetingIds,
+  deleteActionItems = false,
+  deleteOpportunities = false,
+}) {
+  if (!accountId) throw new Error("Account id is required to delete meeting history.");
+
+  let query = supabase.from("fireflies_meeting_summaries").select("*").eq("account_id", accountId);
+  if (meetingIds?.length) query = query.in("id", meetingIds);
+
+  const { data: meetingRows, error: meetingFetchError } = await query;
+  if (meetingFetchError) throw meetingFetchError;
+
+  const meetings = meetingRows ?? [];
+  const idsToDelete = meetings.map((meeting) => meeting.id).filter(Boolean);
+  if (!idsToDelete.length) {
+    return { meetingsDeleted: 0, actionItemsDeleted: 0, opportunitiesDeleted: 0 };
+  }
+
+  const actionRefs = meetings
+    .flatMap((meeting) => meeting.derived_action_items ?? [])
+    .map((item) => item.id)
+    .filter(Boolean);
+  const opportunityIds = meetings
+    .flatMap((meeting) => meeting.derived_opportunities ?? [])
+    .map((item) => item.id)
+    .filter(Boolean);
+
+  let actionItemsDeleted = 0;
+  let opportunitiesDeleted = 0;
+
+  if (deleteActionItems && actionRefs.length) {
+    const { data, error } = await supabase
+      .from("activity_rule_activities")
+      .delete()
+      .eq("account_id", accountId)
+      .in("source_ref", actionRefs)
+      .select("id");
+    if (error) throw error;
+    actionItemsDeleted = data?.length ?? 0;
+  }
+
+  if (deleteOpportunities && opportunityIds.length) {
+    const { data, error } = await supabase
+      .from("opportunities")
+      .delete()
+      .eq("account_id", accountId)
+      .in("id", opportunityIds)
+      .select("id");
+    if (error) throw error;
+    opportunitiesDeleted = data?.length ?? 0;
+  }
+
+  const { data: deletedMeetings, error: deleteMeetingsError } = await supabase
+    .from("fireflies_meeting_summaries")
+    .delete()
+    .eq("account_id", accountId)
+    .in("id", idsToDelete)
+    .select("id");
+  if (deleteMeetingsError) throw deleteMeetingsError;
+
+  return {
+    meetingsDeleted: deletedMeetings?.length ?? 0,
+    actionItemsDeleted,
+    opportunitiesDeleted,
+  };
+}
+
 export async function fetchActivityRuleActivities(accountId) {
   const { data: rows, error } = await supabase
     .from("activity_rule_activities")
@@ -1951,10 +2230,7 @@ export async function createActivityRuleActivitiesFromMeetingActions({ accountId
 
   if (!rows.length) return [];
 
-  const { data, error } = await supabase
-    .from("activity_rule_activities")
-    .insert(rows)
-    .select("*");
+  const { data, error } = await supabase.from("activity_rule_activities").insert(rows).select("*");
   if (error) throw error;
   return (data ?? []).map((row) => mapActivityRuleActivity(row));
 }

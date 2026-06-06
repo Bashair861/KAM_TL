@@ -1,4 +1,12 @@
 import { createServerFn } from "@tanstack/react-start";
+import { createClient } from "@supabase/supabase-js";
+import {
+  getEmailDomain,
+  getTranscriptEmailDomains,
+  getTranscriptEmails,
+  normalizeEmail,
+  normalizeSearchText as normalize,
+} from "@/services/fireflies-utils";
 
 const DEFAULT_SYNC_LIMIT = 5;
 const DEFAULT_SYNC_DAYS_BACK = 60;
@@ -15,27 +23,106 @@ function validateInput(input = {}) {
     accountId: input.accountId,
     limit: Math.min(Math.max(Number(input.limit ?? DEFAULT_SYNC_LIMIT), 1), 10),
     daysBack: Math.min(Math.max(Number(input.daysBack ?? DEFAULT_SYNC_DAYS_BACK), 1), 180),
+    actorAccessToken:
+      typeof input.actorAccessToken === "string" ? input.actorAccessToken.trim() : "",
   };
 }
 
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9@.]+/g, " ")
-    .trim();
+function getRuntimeEnvValue(key) {
+  const metaEnv =
+    typeof import.meta !== "undefined" && import.meta.env ? import.meta.env : undefined;
+  return (
+    metaEnv?.[key] ??
+    globalThis?.process?.env?.[key] ??
+    globalThis?.__env?.[key] ??
+    globalThis?.[key]
+  );
 }
 
-function normalizeEmail(value = "") {
-  return value.trim().toLowerCase();
+function createActorSupabaseClient(accessToken) {
+  const url = getRuntimeEnvValue("VITE_SUPABASE_URL");
+  const anonKey = getRuntimeEnvValue("VITE_SUPABASE_ANON_KEY");
+  if (!url || !anonKey) {
+    throw new Error("Supabase environment is not configured for Fireflies authorization.");
+  }
+
+  return createClient(url, anonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
 }
 
-function getTranscriptEmails(transcript) {
-  return [
-    ...(transcript.participants ?? []),
-    ...(transcript.attendees ?? []).map((attendee) => attendee.email),
-  ]
-    .map((email) => normalizeEmail(email ?? ""))
-    .filter(Boolean);
+async function fetchActorProfile(actorClient, user) {
+  const { data: byId, error: byIdError } = await actorClient
+    .from("profiles")
+    .select("id, name, role, email")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (byIdError) throw byIdError;
+  if (byId) return byId;
+
+  if (!user.email) return null;
+
+  const { data: byEmail, error: byEmailError } = await actorClient
+    .from("profiles")
+    .select("id, name, role, email")
+    .eq("email", user.email)
+    .maybeSingle();
+  if (byEmailError) throw byEmailError;
+  return byEmail;
+}
+
+async function assertCanRunManualFirefliesSync({ accountId, actorAccessToken }) {
+  if (!actorAccessToken) {
+    throw new Error("Please sign in before running Fireflies extraction.");
+  }
+
+  const actorClient = createActorSupabaseClient(actorAccessToken);
+  const {
+    data: { user },
+    error: userError,
+  } = await actorClient.auth.getUser(actorAccessToken);
+
+  if (userError || !user) {
+    throw new Error("Your session could not be verified for Fireflies extraction.");
+  }
+
+  const profile = await fetchActorProfile(actorClient, user);
+  if (!profile) {
+    throw new Error("No KAM profile is linked to the signed-in user.");
+  }
+
+  if (profile.role === "CEO") {
+    throw new Error("CEO can view Fireflies meeting history but cannot run extraction.");
+  }
+
+  if (profile.role === "Head of KAM") {
+    return profile;
+  }
+
+  if (profile.role !== "KAM") {
+    throw new Error("Only Head of KAM or the assigned KAM can run Fireflies extraction.");
+  }
+
+  const { data: account, error: accountError } = await actorClient
+    .from("accounts")
+    .select("id, assigned_kam_id")
+    .eq("id", accountId)
+    .maybeSingle();
+  if (accountError) throw accountError;
+
+  if (!account || account.assigned_kam_id !== profile.id) {
+    throw new Error("Only the assigned KAM can run Fireflies extraction for this account.");
+  }
+
+  return profile;
 }
 
 function getTranscriptSearchText(transcript) {
@@ -53,14 +140,36 @@ function getTranscriptSearchText(transcript) {
   );
 }
 
+function getWebhookEventType(payload = {}) {
+  return (
+    payload.event ?? payload.event_type ?? payload.eventType ?? payload.type ?? "meeting_ready"
+  );
+}
+
+function buildWebhookPayloadSummary(payload = {}, transcriptId) {
+  return {
+    event: getWebhookEventType(payload),
+    transcriptId:
+      payload.transcript_id ??
+      payload.transcriptId ??
+      payload.fireflies_transcript_id ??
+      transcriptId ??
+      null,
+    payloadKeys: Object.keys(payload).slice(0, 20),
+  };
+}
+
 function scoreAccountTranscriptMatch(account, transcript) {
   const transcriptEmails = new Set(getTranscriptEmails(transcript));
+  const transcriptDomains = new Set(getTranscriptEmailDomains(transcript));
   const transcriptText = getTranscriptSearchText(transcript);
   let score = 0;
 
   for (const stakeholder of account.stakeholders ?? []) {
     const email = normalizeEmail(stakeholder.email ?? "");
     if (email && transcriptEmails.has(email)) score += 100;
+    const domain = getEmailDomain(email);
+    if (domain && transcriptDomains.has(domain)) score += 45;
     const name = normalize(stakeholder.name ?? "");
     if (name.length >= 4 && transcriptText.includes(name)) score += 20;
   }
@@ -82,17 +191,28 @@ async function findAccountForFirefliesTranscript(transcript, { fetchAccounts, fe
   const detailedAccounts = await Promise.all(
     accounts.map((account) => fetchAccount(account.id).catch(() => null)),
   );
-  const bestMatch = detailedAccounts
+  const scoredMatches = detailedAccounts
     .filter(Boolean)
     .map((account) => ({
       account,
       score: scoreAccountTranscriptMatch(account, transcript),
     }))
-    .sort((left, right) => right.score - left.score)[0];
+    .sort((left, right) => right.score - left.score);
+  const bestMatch = scoredMatches[0];
 
   if (!bestMatch || bestMatch.score <= 0) {
     const error = new Error("No matching account was found for this Fireflies meeting.");
     error.statusCode = 202;
+    error.matchDiagnostics = {
+      transcriptTitle: transcript.title ?? "",
+      transcriptEmailDomains: getTranscriptEmailDomains(transcript),
+      transcriptEmailsSeen: getTranscriptEmails(transcript).slice(0, 10),
+      topCandidates: scoredMatches.slice(0, 5).map(({ account, score }) => ({
+        accountId: account.id,
+        accountName: account.name,
+        score,
+      })),
+    };
     throw error;
   }
 
@@ -109,6 +229,7 @@ function buildSavedMeetingFallback({ account, data, error, savedMeetings }) {
       daysBack: data.daysBack,
       mode: "fallback_saved_meetings",
       participantCount: account.stakeholders?.length ?? 0,
+      requestedBy: "system_or_authorized_user",
     },
     savedMeetings,
     fallbackItems: savedMeetings.flatMap((meeting) => meeting.derivedActionItems ?? []),
@@ -120,10 +241,18 @@ export async function syncFirefliesForAccount({
   accountId,
   limit = DEFAULT_SYNC_LIMIT,
   daysBack = DEFAULT_SYNC_DAYS_BACK,
+  actorAccessToken = "",
+  systemSync = false,
   queryOverride = null,
   transcriptsOverride = null,
 }) {
   const data = validateInput({ accountId, limit, daysBack });
+  const actorProfile = systemSync
+    ? null
+    : await assertCanRunManualFirefliesSync({
+        accountId: data.accountId,
+        actorAccessToken,
+      });
   const [
     {
       fetchAccount,
@@ -132,6 +261,7 @@ export async function syncFirefliesForAccount({
       upsertFirefliesMeetingSummaries,
       createActivityRuleActivitiesFromMeetingActions,
       upsertOpportunitiesFromMeetingAgent,
+      refreshAccountRetentionGrowthScoring,
     },
     { fetchFirefliesTranscriptsForAccount },
     { runFirefliesMeetingAgent },
@@ -155,6 +285,7 @@ export async function syncFirefliesForAccount({
           daysBack: null,
           mode: "webhook_transcript",
           participantCount: account.stakeholders?.length ?? 0,
+          requestedBy: actorProfile?.id ?? "system",
         },
       }
     : await fetchFirefliesTranscriptsForAccount(account, {
@@ -196,10 +327,8 @@ export async function syncFirefliesForAccount({
     opportunityGlobalMaxItems: Math.max(data.limit * 2, 12),
     opportunityPerTranscriptLimit: 3,
   });
-  const allActions = result.transcriptResults.flatMap((transcript) => transcript.actions);
-  const allOpportunities = result.opportunityTranscriptResults.flatMap(
-    (transcript) => transcript.opportunities,
-  );
+  const allActions = result.items;
+  const allOpportunities = result.opportunities;
   const savedMeetings = await upsertFirefliesMeetingSummaries(account.id, result.meetings);
   const savedActivities = await createActivityRuleActivitiesFromMeetingActions({
     accountId: account.id,
@@ -209,16 +338,24 @@ export async function syncFirefliesForAccount({
     accountId: account.id,
     opportunities: allOpportunities,
   });
+  const retentionGrowthScoring = await refreshAccountRetentionGrowthScoring(account.id).catch(
+    (error) => ({
+      failed: true,
+      error: error?.message ?? "Retention/growth scoring failed after Fireflies sync.",
+    }),
+  );
 
   return {
     ...result,
     accountId: account.id,
     accountName: account.name,
+    requestedBy: actorProfile?.id ?? "system",
     items: allActions,
     opportunities: allOpportunities,
     savedMeetings,
     savedActivities,
     savedOpportunities,
+    retentionGrowthScoring,
     query,
     status:
       allActions.length > 0 || allOpportunities.length > 0
@@ -236,6 +373,7 @@ export async function syncFirefliesTranscriptForAccount({ accountId, transcript,
     accountId,
     limit: 1,
     daysBack: DEFAULT_SYNC_DAYS_BACK,
+    systemSync: true,
     transcriptsOverride: [transcript],
     queryOverride: {
       mode: "webhook_transcript",
@@ -246,24 +384,45 @@ export async function syncFirefliesTranscriptForAccount({ accountId, transcript,
 }
 
 export async function syncFirefliesWebhookMeeting({ transcriptId, payload = {} }) {
-  const [{ fetchAccounts, fetchAccount }, { fetchFirefliesTranscriptById }] = await Promise.all([
-    import("@/services/db"),
-    import("@/services/fireflies-client"),
-  ]);
+  const [
+    { fetchAccounts, fetchAccount, logFirefliesWebhookEvent },
+    { fetchFirefliesTranscriptById },
+  ] = await Promise.all([import("@/services/db"), import("@/services/fireflies-client")]);
+  const webhookEvent = getWebhookEventType(payload);
+  const payloadSummary = buildWebhookPayloadSummary(payload, transcriptId);
 
   const transcript = await fetchFirefliesTranscriptById(transcriptId);
-  const account = await findAccountForFirefliesTranscript(transcript, {
-    fetchAccounts,
-    fetchAccount,
-  });
+  let account;
+  try {
+    account = await findAccountForFirefliesTranscript(transcript, {
+      fetchAccounts,
+      fetchAccount,
+    });
+  } catch (error) {
+    if (error.statusCode === 202) {
+      await logFirefliesWebhookEvent({
+        transcriptId,
+        eventType: webhookEvent,
+        status: "unmatched",
+        title: transcript.title,
+        payload: payloadSummary,
+        diagnostics: error.matchDiagnostics ?? {},
+        errorMessage: error.message,
+      }).catch((logError) => {
+        console.warn(
+          `Failed to log unmatched Fireflies transcript ${transcriptId}: ${logError.message}`,
+        );
+      });
+    }
+    throw error;
+  }
 
   return syncFirefliesTranscriptForAccount({
     accountId: account.id,
     transcript,
     query: {
       source: "fireflies_webhook",
-      webhookEvent:
-        payload.event ?? payload.event_type ?? payload.eventType ?? payload.type ?? "meeting_ready",
+      webhookEvent,
     },
   });
 }
@@ -285,6 +444,7 @@ export async function syncFirefliesRecentForAllAccounts({
           accountId: account.id,
           limit,
           daysBack,
+          systemSync: true,
         }),
       });
     } catch (error) {
