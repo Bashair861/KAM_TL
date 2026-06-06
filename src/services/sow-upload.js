@@ -91,7 +91,6 @@ function normalizeExtractedFields(fields) {
     contractValue: Number.isFinite(Number(fields.contractValue))
       ? Number(fields.contractValue)
       : null,
-    renewalDays: Number.isFinite(Number(fields.renewalDays)) ? Number(fields.renewalDays) : null,
     renewalDate: fields.renewalDate || null,
     contractType: fields.contractType || null,
     contractDuration: fields.contractDuration || null,

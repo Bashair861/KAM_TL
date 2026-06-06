@@ -15,6 +15,16 @@ export const Route = createFileRoute("/strategy")({
   }),
   component: StrategyPage,
 });
+function formatRenewalDate(value) {
+  if (!value) return "No renewal date";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
 function StrategyPage() {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
@@ -41,7 +51,7 @@ function StrategyPage() {
             .filter((a) => a.health < 75)
             .map((a) => ({
               name: a.name,
-              detail: `${a.renewalDays}d to renewal · ${formatCurrency(a.arr)} ARR`,
+              detail: `Renewal ${formatRenewalDate(a.contractRenewalDate)} · ${formatCurrency(a.arr)} ARR`,
               tag: a.retentionRisk,
             }))}
         />

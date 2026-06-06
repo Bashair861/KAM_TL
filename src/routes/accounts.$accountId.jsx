@@ -22,6 +22,7 @@ import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { extractSowFields } from "@/services/sow-upload";
 import { fetchEducationArticles } from "@/services/education";
 import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
 import { askAccountAi } from "@/services/ai";
 import {
   ArrowLeft,
@@ -226,6 +227,58 @@ function formatSalesforceMoney(value) {
     maximumFractionDigits: 0,
   });
 }
+function normalizeDateValue(value) {
+  if (!hasSyncValue(value)) return "";
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return date.toISOString().slice(0, 10);
+}
+function normalizeMoneySyncValue(value) {
+  if (!hasSyncValue(value)) return "";
+  const amount = Number(String(value).replace(/[$,\s]/g, ""));
+  return Number.isFinite(amount) ? Math.round(amount) : "";
+}
+function normalizeIntegerSyncValue(value) {
+  if (!hasSyncValue(value)) return "";
+  const amount = Number(String(value).replace(/[,\s]/g, ""));
+  return Number.isFinite(amount) ? Math.round(amount) : "";
+}
+function normalizeBooleanSyncValue(value) {
+  if (typeof value === "boolean") return value;
+  if (!hasSyncValue(value)) return "";
+  const text = String(value).trim().toLowerCase();
+  if (["true", "yes", "y", "1"].includes(text)) return true;
+  if (["false", "no", "n", "0"].includes(text)) return false;
+  return "";
+}
+function normalizeContractTypeValue(value) {
+  if (!hasSyncValue(value)) return "";
+  const text = String(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const contractTypeMap = new Map([
+    ["staff augmented", "Staff Augmented"],
+    ["staff augmentation", "Staff Augmented"],
+    ["time based", "Time Based"],
+    ["time basis", "Time Based"],
+    ["time material", "Time Based"],
+    ["time and material", "Time Based"],
+    ["retainer", "Retainer"],
+    ["project", "Project"],
+  ]);
+  return contractTypeMap.get(text) ?? "";
+}
+function formatDisplayDate(value) {
+  const dateText = normalizeDateValue(value);
+  if (!dateText) return "—";
+  const date = new Date(`${dateText}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return dateText;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
 function formatSalesforceRegion(account) {
   return [account?.BillingCity, account?.BillingStateCode, account?.BillingCountryCode]
     .filter(hasSyncValue)
@@ -262,10 +315,20 @@ function findStakeholderForContact(stakeholders, contact) {
     null
   );
 }
+function retentionServiceKey(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+function findRetentionGrowthService(retentionGrowth, serviceName) {
+  const key = retentionServiceKey(serviceName);
+  if (!key) return null;
+  return retentionGrowth.find((service) => retentionServiceKey(service.service) === key) ?? null;
+}
 function finalizeSalesforceRows(rows) {
   return rows.map((row) => {
     const dbValue = row.dbValue ?? row.nextValue;
-    const canSync = hasSyncValue(dbValue);
+    const missingRetentionService =
+      row.kind === "retentionGrowth" && row.dbColumn !== "service" && !hasSyncValue(row.serviceValue);
+    const canSync = hasSyncValue(dbValue) && !missingRetentionService;
     const changed = displaySyncValue(row.destinationValue) !== displaySyncValue(row.nextValue);
     return {
       ...row,
@@ -280,6 +343,11 @@ function buildSalesforceMappingRows(bundle, account, fields) {
   const sfAccount = bundle.account;
   const contacts = bundle.contacts ?? [];
   const primaryContact = getPrimarySalesforceContact(contacts);
+  const primaryContactName = sfAccount.Primary_Contact_Name__c || primaryContact?.Name;
+  const primaryContactRole = sfAccount.Primary_Contact_Role__c || primaryContact?.Title;
+  const contractType = normalizeContractTypeValue(sfAccount.Contract_Type__c);
+  const retentionService = String(sfAccount.Retention_Service__c ?? "").trim();
+  const existingRetentionService = findRetentionGrowthService(account.retentionGrowth ?? [], retentionService);
   const rows = [
     {
       id: "account.industry",
@@ -342,6 +410,77 @@ function buildSalesforceMappingRows(bundle, account, fields) {
       fieldKey: "websiteUrl",
     },
     {
+      id: "account.contractValue",
+      kind: "account",
+      group: "Contract Details",
+      destinationLabel: "Contract Value",
+      destinationValue: formatCurrency(account.contractValue),
+      sourceLabel: "Account.Contract_Value__c",
+      sourceValue: formatSalesforceMoney(sfAccount.Contract_Value__c),
+      nextValue: formatSalesforceMoney(sfAccount.Contract_Value__c),
+      dbColumn: "contract_value",
+      dbValue: normalizeMoneySyncValue(sfAccount.Contract_Value__c),
+    },
+    {
+      id: "account.arr",
+      kind: "account",
+      group: "Account Details",
+      destinationLabel: "ARR",
+      destinationValue: formatCurrency(account.arr),
+      sourceLabel: "Account.ARR__c",
+      sourceValue: formatSalesforceMoney(sfAccount.ARR__c),
+      nextValue: formatSalesforceMoney(sfAccount.ARR__c),
+      dbColumn: "arr",
+      dbValue: normalizeMoneySyncValue(sfAccount.ARR__c),
+    },
+    {
+      id: "account.contractRenewalDate",
+      kind: "account",
+      group: "Contract Details",
+      destinationLabel: "Contract Renewal Date",
+      destinationValue: fields.contractRenewalDate,
+      sourceLabel: "Account.Contract_Renewal_Date__c",
+      sourceValue: normalizeDateValue(sfAccount.Contract_Renewal_Date__c),
+      nextValue: normalizeDateValue(sfAccount.Contract_Renewal_Date__c),
+      dbColumn: "renewal_date",
+      fieldKey: "contractRenewalDate",
+    },
+    {
+      id: "account.contractDuration",
+      kind: "account",
+      group: "Contract Details",
+      destinationLabel: "Contract Duration",
+      destinationValue: fields.contractDuration,
+      sourceLabel: "Account.Contract_Duration__c",
+      sourceValue: sfAccount.Contract_Duration__c,
+      nextValue: sfAccount.Contract_Duration__c,
+      dbColumn: "contract_duration",
+      fieldKey: "contractDuration",
+    },
+    {
+      id: "account.contractType",
+      kind: "account",
+      group: "Contract Details",
+      destinationLabel: "Contract Type",
+      destinationValue: account.contractType,
+      sourceLabel: "Account.Contract_Type__c",
+      sourceValue: sfAccount.Contract_Type__c,
+      nextValue: contractType,
+      dbColumn: "contract_type",
+      dbValue: contractType,
+    },
+    {
+      id: "account.lastTouch",
+      kind: "account",
+      group: "Account Details",
+      destinationLabel: "Last Touch",
+      destinationValue: account.lastTouch,
+      sourceLabel: "Account.Last_Touch__c",
+      sourceValue: sfAccount.Last_Touch__c,
+      nextValue: sfAccount.Last_Touch__c,
+      dbColumn: "last_touch",
+    },
+    {
       id: "account.history",
       kind: "account",
       group: "Account / KYC",
@@ -387,9 +526,9 @@ function buildSalesforceMappingRows(bundle, account, fields) {
       group: "Account / KYC",
       destinationLabel: "Primary Contact",
       destinationValue: fields.primary,
-      sourceLabel: "Primary Contact.Name",
-      sourceValue: primaryContact?.Name,
-      nextValue: primaryContact?.Name,
+      sourceLabel: "Account.Primary_Contact_Name__c / Primary Contact.Name",
+      sourceValue: primaryContactName,
+      nextValue: primaryContactName,
       dbColumn: "primary_contact_name",
       fieldKey: "primary",
     },
@@ -399,9 +538,9 @@ function buildSalesforceMappingRows(bundle, account, fields) {
       group: "Account / KYC",
       destinationLabel: "Primary Contact Role",
       destinationValue: account.primaryContact.role,
-      sourceLabel: "Primary Contact.Title",
-      sourceValue: primaryContact?.Title,
-      nextValue: primaryContact?.Title,
+      sourceLabel: "Account.Primary_Contact_Role__c / Primary Contact.Title",
+      sourceValue: primaryContactRole,
+      nextValue: primaryContactRole,
       dbColumn: "primary_contact_role",
     },
     {
@@ -448,6 +587,126 @@ function buildSalesforceMappingRows(bundle, account, fields) {
       ]),
       dbColumn: "main_business_flow",
       fieldKey: "flow",
+    },
+    {
+      id: "contract.autoRenew",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Auto Renew",
+      destinationValue: account.contractScoring?.autoRenew,
+      sourceLabel: "Account.Auto_Renew__c",
+      sourceValue: sfAccount.Auto_Renew__c,
+      nextValue: normalizeBooleanSyncValue(sfAccount.Auto_Renew__c),
+      dbColumn: "auto_renew",
+      dbValue: normalizeBooleanSyncValue(sfAccount.Auto_Renew__c),
+    },
+    {
+      id: "contract.nonTerminator",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Non Terminator",
+      destinationValue: account.contractScoring?.nonTerminator,
+      sourceLabel: "Account.Non_Terminator__c",
+      sourceValue: sfAccount.Non_Terminator__c,
+      nextValue: normalizeBooleanSyncValue(sfAccount.Non_Terminator__c),
+      dbColumn: "non_terminator",
+      dbValue: normalizeBooleanSyncValue(sfAccount.Non_Terminator__c),
+    },
+    {
+      id: "contract.minOneYear",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Minimum One Year",
+      destinationValue: account.contractScoring?.minOneYear,
+      sourceLabel: "Account.Min_One_Year__c",
+      sourceValue: sfAccount.Min_One_Year__c,
+      nextValue: normalizeBooleanSyncValue(sfAccount.Min_One_Year__c),
+      dbColumn: "min_one_year",
+      dbValue: normalizeBooleanSyncValue(sfAccount.Min_One_Year__c),
+    },
+    {
+      id: "contract.priceHike",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Price Hike",
+      destinationValue: account.contractScoring?.priceHike,
+      sourceLabel: "Account.Price_Hike__c",
+      sourceValue: sfAccount.Price_Hike__c,
+      nextValue: sfAccount.Price_Hike__c,
+      dbColumn: "price_hike",
+    },
+    {
+      id: "contract.customerFeedback",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Customer Feedback",
+      destinationValue: account.contractScoring?.customerFeedback,
+      sourceLabel: "Account.Customer_Feedback__c",
+      sourceValue: sfAccount.Customer_Feedback__c,
+      nextValue: sfAccount.Customer_Feedback__c,
+      dbColumn: "customer_feedback",
+    },
+    {
+      id: "contract.backupExists",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Backup Exists",
+      destinationValue: account.resourceHealth?.backupExists,
+      sourceLabel: "Account.Backup_Exists__c",
+      sourceValue: sfAccount.Backup_Exists__c,
+      nextValue: normalizeBooleanSyncValue(sfAccount.Backup_Exists__c),
+      dbColumn: "backup_exists",
+      dbValue: normalizeBooleanSyncValue(sfAccount.Backup_Exists__c),
+    },
+    {
+      id: "contract.criticalResources",
+      kind: "contract",
+      group: "Contract Details",
+      destinationLabel: "Critical Resources",
+      destinationValue: account.resourceHealth?.criticalResources,
+      sourceLabel: "Account.Critical_Resources__c",
+      sourceValue: sfAccount.Critical_Resources__c,
+      nextValue: normalizeIntegerSyncValue(sfAccount.Critical_Resources__c),
+      dbColumn: "critical_resources",
+      dbValue: normalizeIntegerSyncValue(sfAccount.Critical_Resources__c),
+    },
+    {
+      id: "retention.service",
+      kind: "retentionGrowth",
+      group: "Retention / Growth",
+      destinationLabel: "Service",
+      destinationValue: existingRetentionService?.service ?? "",
+      sourceLabel: "Account.Retention_Service__c",
+      sourceValue: retentionService,
+      nextValue: retentionService,
+      dbColumn: "service",
+      serviceValue: retentionService,
+    },
+    {
+      id: "retention.offered",
+      kind: "retentionGrowth",
+      group: "Retention / Growth",
+      destinationLabel: "Offered",
+      destinationValue: existingRetentionService?.offered,
+      sourceLabel: "Account.Retention_Service_Offered__c",
+      sourceValue: sfAccount.Retention_Service_Offered__c,
+      nextValue: normalizeBooleanSyncValue(sfAccount.Retention_Service_Offered__c),
+      dbColumn: "offered",
+      dbValue: normalizeBooleanSyncValue(sfAccount.Retention_Service_Offered__c),
+      serviceValue: retentionService,
+    },
+    {
+      id: "retention.delivered",
+      kind: "retentionGrowth",
+      group: "Retention / Growth",
+      destinationLabel: "Delivered",
+      destinationValue: existingRetentionService?.delivered,
+      sourceLabel: "Account.Retention_Service_Delivered__c",
+      sourceValue: sfAccount.Retention_Service_Delivered__c,
+      nextValue: normalizeBooleanSyncValue(sfAccount.Retention_Service_Delivered__c),
+      dbColumn: "delivered",
+      dbValue: normalizeBooleanSyncValue(sfAccount.Retention_Service_Delivered__c),
+      serviceValue: retentionService,
     },
   ];
 
@@ -526,10 +785,31 @@ function defaultSalesforceSelection(rows) {
 }
 function buildSalesforceSyncPayload(rows) {
   const accountUpdates = {};
+  const contractUpdates = {};
+  const retentionGrowthMap = new Map();
   const stakeholderMap = new Map();
   rows.forEach((row) => {
     if (row.kind === "account") {
       accountUpdates[row.dbColumn] = row.dbValue;
+      return;
+    }
+    if (row.kind === "contract") {
+      contractUpdates[row.dbColumn] = row.dbValue;
+      return;
+    }
+    if (row.kind === "retentionGrowth") {
+      const serviceValue = row.dbColumn === "service" ? row.dbValue : row.serviceValue;
+      if (!hasSyncValue(serviceValue)) return;
+      const update = retentionGrowthMap.get(serviceValue) ?? {
+        service: serviceValue,
+        fields: {},
+      };
+      if (row.dbColumn === "service") {
+        update.service = row.dbValue;
+      } else {
+        update.fields[row.dbColumn] = row.dbValue;
+      }
+      retentionGrowthMap.set(update.service, update);
       return;
     }
     const existing = stakeholderMap.get(row.contactKey) ?? {
@@ -542,6 +822,8 @@ function buildSalesforceSyncPayload(rows) {
   });
   return {
     accountUpdates,
+    contractUpdates,
+    retentionGrowthUpdates: Array.from(retentionGrowthMap.values()),
     stakeholderUpdates: Array.from(stakeholderMap.values()),
   };
 }
@@ -551,6 +833,26 @@ function buildSalesforceHistoryRows(rows) {
     oldValue: displaySyncValue(row.destinationValue),
     newValue: displaySyncValue(row.nextValue),
   }));
+}
+
+async function getFreshAccessTokenForSalesforceLookup() {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  const expiresAtMs = session?.expires_at ? session.expires_at * 1000 : 0;
+  const shouldRefresh =
+    !session?.access_token || (expiresAtMs > 0 && expiresAtMs - Date.now() < 60_000);
+
+  if (!shouldRefresh) return session.access_token;
+
+  const {
+    data: { session: refreshedSession },
+    error,
+  } = await supabase.auth.refreshSession();
+  if (error || !refreshedSession?.access_token) {
+    throw new Error("Please sign in again before searching Salesforce.");
+  }
+  return refreshedSession.access_token;
 }
 
 function fileToBase64(file) {
@@ -592,11 +894,11 @@ function buildSowChanges(account, fields) {
       newValue: moneyLabel(fields.contractValue),
     });
   }
-  if (Number.isFinite(fields.renewalDays) && fields.renewalDays !== account.renewalDays) {
+  if (fields.renewalDate && fields.renewalDate !== account.contractRenewalDate) {
     changes.push({
-      field: "SOW Renewal Days",
-      oldValue: String(account.renewalDays),
-      newValue: String(fields.renewalDays),
+      field: "SOW Contract Renewal Date",
+      oldValue: formatDisplayDate(account.contractRenewalDate),
+      newValue: formatDisplayDate(fields.renewalDate),
     });
   }
   if (fields.contractType && fields.contractType !== account.contractType) {
@@ -606,10 +908,13 @@ function buildSowChanges(account, fields) {
       newValue: fields.contractType,
     });
   }
-  if (fields.contractDuration && fields.contractDuration !== account.contractScoring?.duration) {
+  if (
+    fields.contractDuration &&
+    fields.contractDuration !== (account.contractDuration || account.contractScoring?.duration)
+  ) {
     changes.push({
       field: "SOW Contract Duration",
-      oldValue: account.contractScoring?.duration ?? "",
+      oldValue: account.contractDuration || account.contractScoring?.duration || "",
       newValue: fields.contractDuration,
     });
   }
@@ -621,7 +926,7 @@ function sowSummary(fields) {
   if (fields.accountName) labels.push("Account name");
   if (Number.isFinite(fields.arr)) labels.push("ARR");
   if (Number.isFinite(fields.contractValue)) labels.push("Contract value");
-  if (Number.isFinite(fields.renewalDays)) labels.push("Renewal");
+  if (fields.renewalDate) labels.push("Renewal date");
   if (fields.contractType) labels.push("Contract type");
   if (fields.contractDuration) labels.push("Duration");
   return labels.length ? labels.join(", ") : "No supported fields";
@@ -828,7 +1133,9 @@ function AccountDetailPage() {
             </p>
             <span className="text-3xl font-bold">{formatCurrency(account.contractValue)}</span>
             <p className="text-xs text-muted-foreground mt-2">
-              Renews in {account.renewalDays} days
+              {account.contractRenewalDate
+                ? `Renews ${formatDisplayDate(account.contractRenewalDate)}`
+                : "Renewal date not set"}
             </p>
             <p className="text-[11px] text-muted-foreground mt-1">{account.contractType}</p>
           </div>
@@ -1186,6 +1493,8 @@ function OverviewTab({ account }) {
       team: String(account.teamSize),
       competitors: account.competitors.join(", "),
       flow: account.mainBusinessFlow,
+      contractRenewalDate: normalizeDateValue(account.contractRenewalDate),
+      contractDuration: account.contractDuration || account.contractScoring?.duration || "",
       linkedinUrl: account.linkedinUrl ?? "",
       websiteUrl: account.websiteUrl ?? "",
     }),
@@ -1196,6 +1505,9 @@ function OverviewTab({ account }) {
       account.engagementTenure,
       account.industry,
       account.isStartup,
+      account.contractRenewalDate,
+      account.contractDuration,
+      account.contractScoring?.duration,
       account.linkedinUrl,
       account.mainBusinessFlow,
       account.mrrArr,
@@ -1229,6 +1541,8 @@ function OverviewTab({ account }) {
     team: "Team Size",
     competitors: "Competitors",
     flow: "Main Business Flow",
+    contractRenewalDate: "Contract Renewal Date",
+    contractDuration: "Contract Duration",
     linkedinUrl: "LinkedIn URL",
     websiteUrl: "Website URL",
   };
@@ -1249,6 +1563,8 @@ function OverviewTab({ account }) {
           .map((s) => s.trim())
           .filter(Boolean),
         main_business_flow: fields.flow,
+        renewal_date: fields.contractRenewalDate || null,
+        contract_duration: fields.contractDuration || null,
         linkedin_url: fields.linkedinUrl || null,
         website_url: fields.websiteUrl || null,
       });
@@ -1264,6 +1580,8 @@ function OverviewTab({ account }) {
     onSuccess: () => {
       setSavedSnapshot({ ...fields });
       setShowSaved(true);
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["contracts"] });
       queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
@@ -1294,13 +1612,15 @@ function OverviewTab({ account }) {
     [salesforceLookup.bundle, account, fields],
   );
   const { mutate: checkSalesforceAccount, isPending: checkingSalesforce } = useMutation({
-    mutationFn: () =>
-      lookupSalesforceAccountBundle({
+    mutationFn: async () => {
+      const accessToken = await getFreshAccessTokenForSalesforceLookup();
+      return lookupSalesforceAccountBundle({
         data: {
           accountName: account.name,
-          accessToken: session?.access_token,
+          accessToken,
         },
-      }),
+      });
+    },
     onSuccess: (result) => {
       const rows = buildSalesforceMappingRows(result, account, fields);
       setSalesforceLookup({
@@ -1362,6 +1682,7 @@ function OverviewTab({ account }) {
         text: `${current.text}\n\nSynced ${syncedRows.length} selected field(s) into this account.`,
       }));
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["contracts"] });
       queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
     },
@@ -1760,6 +2081,67 @@ function OverviewTab({ account }) {
           <div className="border rounded-lg p-4">
             <div className="flex items-center gap-2 mb-2">
               <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <Calendar className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Contract Renewal Date
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Account field also referenced by Contract details.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <input
+                type="date"
+                value={fields.contractRenewalDate}
+                onChange={(event) =>
+                  setFields((current) => ({
+                    ...current,
+                    contractRenewalDate: event.target.value,
+                  }))
+                }
+                className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            ) : fields.contractRenewalDate ? (
+              <p className="text-xs font-semibold">{formatDisplayDate(fields.contractRenewalDate)}</p>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No renewal date saved.</p>
+            )}
+          </div>
+          <div className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <Clock className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Contract Duration
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Account field also referenced by Contract details.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <input
+                value={fields.contractDuration}
+                onChange={(event) =>
+                  setFields((current) => ({ ...current, contractDuration: event.target.value }))
+                }
+                placeholder="e.g. 24 months"
+                className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            ) : fields.contractDuration ? (
+              <p className="text-xs font-semibold">{fields.contractDuration}</p>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No contract duration saved.</p>
+            )}
+          </div>
+          <div className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
                 <ExternalLink className="size-3.5" />
               </span>
               <div>
@@ -2151,25 +2533,29 @@ function SalesforceMappingModal({
         </div>
 
         <div className="flex-1 overflow-auto">
-          {Object.entries(groupedRows).map(([group, groupRows]) => (
-            <div key={group} className="border-b">
-              <div className="px-5 py-2 bg-muted/40">
-                <p className="text-[11px] font-bold uppercase tracking-wider">{group}</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[880px] text-left">
-                  <thead>
-                    <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
-                      <th className="w-12 px-5 py-2">Sync</th>
-                      <th className="px-3 py-2">Our field</th>
-                      <th className="px-3 py-2">Current value</th>
-                      <th className="px-3 py-2">Salesforce field</th>
-                      <th className="px-3 py-2">Salesforce value</th>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left border-collapse">
+              {/* Single thead — columns align across all sections */}
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
+                  <th className="w-12 px-5 py-2">Sync</th>
+                  <th className="w-44 px-3 py-2">Our field</th>
+                  <th className="w-64 px-3 py-2">Current value</th>
+                  <th className="w-48 px-3 py-2">Salesforce field</th>
+                  <th className="px-3 py-2">Salesforce value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(groupedRows).map(([group, groupRows]) => (
+                  <>
+                    {/* Section header row spanning all columns */}
+                    <tr key={`header-${group}`}>
+                      <td colSpan={5} className="px-5 py-2 bg-muted/40 border-y">
+                        <p className="text-[11px] font-bold uppercase tracking-wider">{group}</p>
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y">
                     {groupRows.map((row) => (
-                      <tr key={row.id} className={!row.canSync ? "opacity-50" : ""}>
+                      <tr key={row.id} className={`border-b ${!row.canSync ? "opacity-50" : ""}`}>
                         <td className="px-5 py-3 align-top">
                           <input
                             type="checkbox"
@@ -2183,29 +2569,26 @@ function SalesforceMappingModal({
                         <td className="px-3 py-3 align-top">
                           <p className="text-xs font-bold">{row.destinationLabel}</p>
                         </td>
-                        <td className="px-3 py-3 align-top max-w-[250px]">
+                        <td className="px-3 py-3 align-top">
                           <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono text-muted-foreground">
                             {displaySyncValue(row.destinationValue)}
                           </pre>
                         </td>
                         <td className="px-3 py-3 align-top">
                           <p className="text-xs font-semibold">{row.sourceLabel}</p>
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            Sync value: {displaySyncValue(row.nextValue)}
-                          </p>
                         </td>
-                        <td className="px-3 py-3 align-top max-w-[320px]">
+                        <td className="px-3 py-3 align-top">
                           <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono">
                             {displaySyncValue(row.sourceValue)}
                           </pre>
                         </td>
                       </tr>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ))}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div className="px-5 py-4 border-t flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -3060,50 +3443,29 @@ function ContractScoringBlock({ account, onExpand }) {
           )}
         </div>
       </div>
+      <div className="px-4 md:px-6 py-4 border-b grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        <ContractFact label="Type" value={c.type || account.contractType} />
+        <ContractFact label="Duration" value={c.duration} />
+        <ContractFact label="Renewal Date" value={formatDisplayDate(c.renewalDate)} />
+      </div>
       {c.metrics.length > 0 && (
-        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4 border-b">
+        <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
           {c.metrics.map((m) => (
             <Metric key={m.label} m={m} />
           ))}
         </div>
       )}
-      <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-        <Field label="Type" value={c.type} />
-        <Field label="Duration" value={c.duration} />
-        <Field label="Price hike" value={c.priceHike} />
-        <Field label="Renewal" value={`${account.renewalDays} days`} />
-        <Field label="Auto-renew" value={c.autoRenew ? "Yes" : "No"} ok={c.autoRenew} />
-        <Field label="Non-terminator" value={c.nonTerminator ? "Yes" : "No"} ok={c.nonTerminator} />
-        <Field label="Min 1-yr lock" value={c.minOneYear ? "Yes" : "No"} ok={c.minOneYear} />
-        <Field label="Value to us" value={formatCurrency(account.contractValue)} />
-      </div>
-      <div className="px-6 pb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="border rounded-lg p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-            SWOT
-          </p>
-          <ul className="text-xs space-y-1.5">
-            <li>
-              <span className="font-bold text-success">S:</span> {c.swot.s}
-            </li>
-            <li>
-              <span className="font-bold text-crit">W:</span> {c.swot.w}
-            </li>
-            <li>
-              <span className="font-bold text-accent">O:</span> {c.swot.o}
-            </li>
-            <li>
-              <span className="font-bold text-warn">T:</span> {c.swot.t}
-            </li>
-          </ul>
-        </div>
-        <div className="border rounded-lg p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-            Customer Feedback
-          </p>
-          <p className="text-xs italic">{c.customerFeedback}</p>
-        </div>
-      </div>
+    </div>
+  );
+}
+function ContractFact({ label, value }) {
+  const displayValue = hasSyncValue(value) && value !== "—" ? value : "—";
+  return (
+    <div>
+      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+        {label}
+      </p>
+      <p className="mt-1 font-semibold">{displayValue}</p>
     </div>
   );
 }
@@ -3135,13 +3497,7 @@ function ResourceHealthBlock({ account, onExpand }) {
           )}
         </div>
       </div>
-      <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs mb-2">
-        <Field label="Backup exists" value={r.backupExists ? "Yes" : "No"} ok={r.backupExists} />
-        <Field label="Leaves this month" value={`${r.leavesThisMonth}`} />
-        <Field label="Critical resources" value={`${r.criticalResources}`} />
-        <Field label="Team size" value={`${r.teamSize}`} />
-      </div>
-      <div className="p-6 pt-0 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
+      <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
         {r.metrics.map((m) => (
           <Metric key={m.label} m={m} />
         ))}

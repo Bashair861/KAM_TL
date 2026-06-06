@@ -17,7 +17,8 @@ function mapFlatAccount(r) {
     trend: r.trend,
     contractValue: r.contract_value,
     arr: r.arr,
-    renewalDays: r.renewal_days,
+    contractRenewalDate: r.renewal_date ?? r.contract_renewal_date ?? null,
+    contractDuration: r.contract_duration ?? "",
     contractType: r.contract_type,
     lastTouch: r.last_touch,
     status: r.status,
@@ -750,41 +751,52 @@ const HEALTH_AREAS = [
 
 // --- create new account -------------------------------------------------------
 export async function createAccount(data) {
-  const { error } = await supabase.from("accounts").insert([
-    {
-      id: data.id,
-      name: data.name,
-      short_code: data.shortCode,
-      industry: data.industry,
-      tier: data.tier,
-      health: 50,
-      trend: 0,
-      contract_value: data.contractValue,
-      arr: data.arr,
-      renewal_days: data.renewalDays,
-      contract_type: data.contractType,
-      last_touch: "Just now",
-      status: "healthy",
-      retention_risk: "Low",
-      growth_upside: 0,
-      white_space_count: 0,
-      is_startup: false,
-      region: data.region || null,
-      primary_contact_name: data.primaryContactName || null,
-      linkedin_url: data.linkedinUrl || null,
-      linkedin_summary: data.linkedinSummary || null,
-      ...(data.linkedinSummaryUpdatedAt
-        ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
-        : {}),
-      ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
-      ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
-      ...(data.websiteSummaryUpdatedAt
-        ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
-        : {}),
-      assigned_kam_id: data.assignedKamId || null,
-    },
-  ]);
+  const { error } = await supabase.from("accounts").insert([{
+    id: data.id,
+    name: data.name,
+    short_code: data.shortCode,
+    industry: data.industry,
+    tier: data.tier,
+    health: 50,
+    trend: 0,
+    contract_value: data.contractValue,
+    arr: data.arr,
+    renewal_days: data.renewalDays || null,
+    renewal_date: data.contractRenewalDate || null,
+    contract_duration: data.contractDuration || null,
+    contract_type: data.contractType,
+    last_touch: "Just now",
+    status: "healthy",
+    retention_risk: "Low",
+    growth_upside: 0,
+    white_space_count: 0,
+    is_startup: false,
+    region: data.region || null,
+    primary_contact_name: data.primaryContactName || null,
+    linkedin_url: data.linkedinUrl || null,
+    linkedin_summary: data.linkedinSummary || null,
+    ...(data.linkedinSummaryUpdatedAt
+      ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
+      : {}),
+    ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
+    ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
+    ...(data.websiteSummaryUpdatedAt
+      ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
+      : {}),
+    assigned_kam_id: data.assignedKamId || null,
+  }]);
   if (error) throw error;
+
+  const { error: contractError } = await supabase.from("contract_details").upsert(
+    {
+      account_id: data.id,
+      type: data.contractType,
+      duration: data.contractDuration || null,
+      renewal_date: data.contractRenewalDate || null,
+    },
+    { onConflict: "account_id" },
+  );
+  if (contractError) throw contractError;
 
   // Pre-populate health_scores for all 8 areas so KPI sections show immediately
   const { error: hsError } = await supabase.from("health_scores").insert(
@@ -802,6 +814,23 @@ export async function createAccount(data) {
 export async function updateAccountKyc(accountId, updates) {
   const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
   if (error) throw error;
+
+  const contractUpdates = { account_id: accountId };
+  if (Object.prototype.hasOwnProperty.call(updates, "contract_duration")) {
+    contractUpdates.duration = updates.contract_duration;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(updates, "renewal_date") ||
+    Object.prototype.hasOwnProperty.call(updates, "contract_renewal_date")
+  ) {
+    contractUpdates.renewal_date = updates.renewal_date ?? updates.contract_renewal_date;
+  }
+  if (Object.keys(contractUpdates).length > 1) {
+    const { error: contractError } = await supabase
+      .from("contract_details")
+      .upsert(contractUpdates, { onConflict: "account_id" });
+    if (contractError) throw contractError;
+  }
 }
 export async function applySowFields(accountId, fields) {
   const {
@@ -922,8 +951,9 @@ export async function fetchAccount(id) {
     whiteSpace: block("white_space"),
     contractScoring: {
       ...block("contract"),
-      type: cd?.type ?? "",
-      duration: cd?.duration ?? "",
+      type: cd?.type ?? flat.contractType ?? "",
+      duration: flat.contractDuration || cd?.duration || "",
+      renewalDate: flat.contractRenewalDate ?? cd?.renewal_date ?? null,
       autoRenew: cd?.auto_renew ?? false,
       nonTerminator: cd?.non_terminator ?? false,
       minOneYear: cd?.min_one_year ?? false,
@@ -1019,7 +1049,7 @@ function firstRelatedRow(value) {
 export async function fetchContracts(opts) {
   let q = supabase
     .from("accounts")
-    .select("*, contract_details(duration, auto_renew, non_terminator, price_hike)");
+    .select("*, contract_details(duration, renewal_date, auto_renew, non_terminator, price_hike)");
   if (opts?.role === "KAM" && opts.userId) {
     q = q.eq("assigned_kam_id", opts.userId);
   }
@@ -1029,7 +1059,8 @@ export async function fetchContracts(opts) {
     const cd = firstRelatedRow(row.contract_details);
     return {
       ...mapFlatAccount(row),
-      duration: cd?.duration ?? "-",
+      duration: row.contract_duration ?? cd?.duration ?? "—",
+      renewalDate: row.renewal_date ?? row.contract_renewal_date ?? cd?.renewal_date ?? null,
       autoRenew: Boolean(cd?.auto_renew),
       nonTerminator: Boolean(cd?.non_terminator),
       priceHike: cd?.price_hike ?? "-",

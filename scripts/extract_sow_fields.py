@@ -12,7 +12,7 @@ import json
 import re
 import sys
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -157,10 +157,10 @@ def parse_date(value: str | None) -> date | None:
     return None
 
 
-def parse_renewal_days(text: str) -> tuple[int | None, str | None]:
+def parse_renewal_date(text: str) -> str | None:
     direct = first_match(text, [r"renews?\s+in\s+(\d{1,4})\s+days?", r"renewal\s+days?\s*[:\-]\s*(\d{1,4})"])
     if direct:
-        return int(direct), None
+        return (date.today() + timedelta(days=int(direct))).isoformat()
 
     raw_date = first_match(
         text,
@@ -174,8 +174,8 @@ def parse_renewal_days(text: str) -> tuple[int | None, str | None]:
     )
     parsed = parse_date(raw_date)
     if not parsed:
-        return None, raw_date
-    return max((parsed - date.today()).days, 0), parsed.isoformat()
+        return raw_date
+    return parsed.isoformat()
 
 
 def extract_fields(text: str) -> dict[str, Any]:
@@ -212,7 +212,7 @@ def extract_fields(text: str) -> dict[str, Any]:
             ],
         )
     )
-    renewal_days, renewal_date = parse_renewal_days(normalized)
+    renewal_date = parse_renewal_date(normalized)
     contract_duration = first_match(
         normalized,
         [
@@ -226,7 +226,6 @@ def extract_fields(text: str) -> dict[str, Any]:
         "accountName": account_name,
         "arr": arr,
         "contractValue": contract_value,
-        "renewalDays": renewal_days,
         "renewalDate": renewal_date,
         "contractType": parse_contract_type(normalized),
         "contractDuration": contract_duration,

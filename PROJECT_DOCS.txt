@@ -185,6 +185,8 @@ health_scores additional column (added by migration):
 
 accounts additional column (added by migration):
   assigned_kam_id  text  REFERENCES profiles(id)  ← which KAM owns this account
+  renewal_date          date Salesforce Account Contract_Renewal_Date__c
+  contract_duration     text Salesforce Account Contract_Duration__c, mirrored to contract_details.duration
   linkedin_url     text  Salesforce Account Company_LinkedIn__c mapped into Aether KAM
   linkedin_summary text  AI-generated Account's Linkedin Summary
   linkedin_summary_updated_at timestamptz  Last successful summary generation time
@@ -195,6 +197,9 @@ accounts additional column (added by migration):
 profiles additional column (added by add-user-management.sql and now in schema):
   is_active  boolean  DEFAULT true
   Inactive users are signed out by AuthContext and excluded from KAM assignment.
+
+contract_details additional reference column:
+  renewal_date date Mirrors accounts.renewal_date for contract views
 
 ENUMS (PostgreSQL custom types):
   account_status    → 'healthy' | 'at-risk' | 'critical'
@@ -238,6 +243,7 @@ Write policies are added by the migration scripts:
   add-account-history.sql             → SELECT + INSERT policies on account_history
   add-account-insert-policy.sql       → INSERT policy on accounts
   add-health-scores-insert-policy.sql → INSERT policy on health_scores
+  add-account-contract-fields.sql     → account contract duration/date + contract_details reference fields/policies
 
 Additional Phase 4 scripts:
   add-user-management.sql             -> profile user-management RPCs and RLS
@@ -362,7 +368,7 @@ READ functions:
 
   fetchContracts(opts?)
     → Returns ContractRow[] — accounts joined with contract_details
-    → Adds: duration, autoRenew, nonTerminator, priceHike fields
+    → Adds: duration, renewalDate, autoRenew, nonTerminator, priceHike fields
     → Role filtering same as fetchAccounts
     → Used on: contracts page
 
@@ -412,7 +418,7 @@ WRITE functions:
   createAccount(data)
     → INSERTs a new row into accounts table
     → Required fields: id (slug), name, shortCode, industry, region, tier,
-      contractType, contractValue, arr, renewalDays
+      contractType, contractValue, arr, renewalDate
     → Optional: primaryContactName, assignedKamId
     → Auto-set defaults: health=50, trend=0, status='healthy', retention_risk='Low',
       growth_upside=0, white_space_count=0, is_startup=false, last_touch='Just now'
@@ -539,7 +545,7 @@ Tab 7: Client History  ← NEW
 10. CONTRACTS PAGE (contracts.jsx)
 ────────────────────────────────────────────────────────────────────────────────
 Fetches data via fetchContracts() which joins:
-  accounts (name, tier, contractType, contractValue, renewalDays, contractCompliance)
+  accounts (name, tier, contractType, contractValue, renewalDate, contractCompliance)
   + contract_details (duration)
 fetchContracts() accepts contract_details as either a Supabase nested array or
 single object, then maps contract_details.duration to the Contracts table.
@@ -664,6 +670,7 @@ For FRESH Supabase setup (first time only):
   14. SQL Editor: add-linkedin-summary.sql
   15. SQL Editor: add-linkedin-summary-updated-at.sql
   16. SQL Editor: add-account-website-summary.sql
+  17. SQL Editor: add-account-contract-fields.sql
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -734,8 +741,8 @@ What gets fetched (salesforce.js):
 What gets written (salesforce-sync.js):
   Account fields whitelist (ACCOUNT_SYNC_COLUMNS):
     industry, business_info, client_history, revenue, primary_contact_name,
-    primary_contact_role, region, employees, main_business_flow, linkedin_url,
-    website_url
+    primary_contact_role, region, employees, main_business_flow,
+    renewal_date, contract_duration, linkedin_url, website_url
   Stakeholder fields whitelist (STAKEHOLDER_SYNC_COLUMNS):
     name, role, email, influence, last_contact
   Stakeholder matching: email first → name → insert as new row if no match.
