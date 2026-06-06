@@ -1184,8 +1184,6 @@ function OverviewTab({ account }) {
       );
     },
   });
-  function runOcrSimulation() {
-    if (!ocrFile) return;
   async function extractCharterFields(file) {
     if (!file) return;
 
@@ -1939,6 +1937,7 @@ function OverviewTab({ account }) {
     </div>
   );
 }
+
 function CharterFieldReviewModal({
   rows,
   selectedRows,
