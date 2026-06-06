@@ -19,6 +19,24 @@ function slaHours(priority) {
   return 120;
 }
 
+function compactHistoryParts(parts) {
+  return parts
+    .map((part) => (part === null || part === undefined ? "" : String(part).trim()))
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function summarizeEscalationHistory(issue = {}) {
+  return compactHistoryParts([
+    issue.title ? `Title: ${issue.title}` : null,
+    issue.priority ? `Priority: ${issue.priority}` : null,
+    issue.slaRemainingHours !== undefined ? `SLA remaining: ${issue.slaRemainingHours}h` : null,
+    issue.openedAt ? `Opened: ${String(issue.openedAt).slice(0, 10)}` : null,
+    issue.description ? `Description: ${issue.description}` : null,
+    issue.actionItems?.length ? `Action items: ${issue.actionItems.length}` : null,
+  ]);
+}
+
 function extractText(doc) {
   if (!doc) return "";
   if (typeof doc === "string") return doc;
@@ -91,7 +109,7 @@ export const fetchJiraIssues = createServerFn({ method: "GET" }).handler(async (
 export const saveJiraEscalations = createServerFn({ method: "POST" })
   .inputValidator((data) => data)
   .handler(async ({ data }) => {
-    const { issues, accountId } = data;
+    const { issues, accountId, editedBy = "Unknown" } = data;
 
     if (!issues?.length) throw new Error("No issues to save.");
     if (!accountId) throw new Error("Account is required.");
@@ -142,6 +160,15 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
         );
         if (taskErr) throw taskErr;
       }
+
+      const { error: historyError } = await supabase.from("account_history").insert({
+        account_id: accountId,
+        field_name: "Escalation saved from Jira",
+        old_value: null,
+        new_value: summarizeEscalationHistory(issue),
+        edited_by: editedBy,
+      });
+      if (historyError) throw historyError;
     }
 
     return { saved: issues.length };

@@ -1542,9 +1542,10 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   );
   const queryClient = useQueryClient();
   const { mutate: refreshRetentionGrowthScoring } = useMutation({
-    mutationFn: () => refreshAccountRetentionGrowthScoring(account.id),
+    mutationFn: () => refreshAccountRetentionGrowthScoring(account.id, profile?.name ?? "System"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
   const { data: savedDrafts = [] } = useQuery({
@@ -1569,6 +1570,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
       );
       setDraftSaveStatus("Draft saved and will survive page refresh.");
       queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error, draft) => {
       setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
@@ -4276,6 +4278,125 @@ function buildDefaultSections(area, existingMetrics) {
     })),
   }));
 }
+
+function getKpiBaseSections(area, block) {
+  return block.kpiData ?? buildDefaultSections(area, block.metrics);
+}
+
+function mapKpiSectionsById(sections) {
+  return new Map((sections ?? []).map((section) => [section.id, section]));
+}
+
+function mapKpiFieldsById(section) {
+  return new Map((section?.fields ?? []).map((field) => [field.id, field]));
+}
+
+function kpiSectionValue(section = {}) {
+  return compactHistoryParts([
+    section.name ? `Section: ${section.name}` : null,
+    Array.isArray(section.fields) ? `Fields: ${section.fields.length}` : null,
+  ]);
+}
+
+function kpiFieldValue(field = {}) {
+  return compactHistoryParts([
+    field.label ? `Criterion: ${field.label}` : null,
+    field.weight !== undefined ? `Weight: ${field.weight}%` : null,
+    `Status: ${field.checked ? "Checked" : "Open"}`,
+  ]);
+}
+
+function buildScoreMatrixHistoryChanges({ title, oldScore, newScore, beforeSections, afterSections }) {
+  const changes = [
+    {
+      field: `Score: ${title}`,
+      oldValue: oldScore,
+      newValue: newScore,
+    },
+  ];
+  const beforeById = mapKpiSectionsById(beforeSections);
+  const afterById = mapKpiSectionsById(afterSections);
+
+  for (const [sectionId, section] of beforeById.entries()) {
+    if (!afterById.has(sectionId)) {
+      changes.push({
+        field: `Score matrix section removed: ${title}`,
+        oldValue: kpiSectionValue(section),
+        newValue: null,
+      });
+    }
+  }
+
+  for (const [sectionId, section] of afterById.entries()) {
+    const previousSection = beforeById.get(sectionId);
+    if (!previousSection) {
+      changes.push({
+        field: `Score matrix section added: ${title}`,
+        oldValue: null,
+        newValue: kpiSectionValue(section),
+      });
+      for (const field of section.fields ?? []) {
+        changes.push({
+          field: `Score matrix criterion added: ${section.name}`,
+          oldValue: null,
+          newValue: kpiFieldValue(field),
+        });
+      }
+      continue;
+    }
+
+    changes.push({
+      field: `Score matrix section name: ${title}`,
+      oldValue: previousSection.name,
+      newValue: section.name,
+    });
+
+    const previousFields = mapKpiFieldsById(previousSection);
+    const currentFields = mapKpiFieldsById(section);
+
+    for (const [fieldId, field] of previousFields.entries()) {
+      if (!currentFields.has(fieldId)) {
+        changes.push({
+          field: `Score matrix criterion removed: ${previousSection.name}`,
+          oldValue: kpiFieldValue(field),
+          newValue: null,
+        });
+      }
+    }
+
+    for (const [fieldId, field] of currentFields.entries()) {
+      const previousField = previousFields.get(fieldId);
+      if (!previousField) {
+        changes.push({
+          field: `Score matrix criterion added: ${section.name}`,
+          oldValue: null,
+          newValue: kpiFieldValue(field),
+        });
+        continue;
+      }
+      changes.push(
+        {
+          field: `Score matrix criterion label: ${section.name}`,
+          oldValue: previousField.label,
+          newValue: field.label,
+        },
+        {
+          field: `Score matrix criterion weight: ${section.name} / ${field.label}`,
+          oldValue: `${previousField.weight}%`,
+          newValue: `${field.weight}%`,
+        },
+        {
+          field: `Score matrix criterion status: ${section.name} / ${field.label}`,
+          oldValue: previousField.checked ? "Checked" : "Open",
+          newValue: field.checked ? "Checked" : "Open",
+        },
+      );
+    }
+  }
+
+  return changes;
+}
+
 function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const { profile, session } = useAuth();
   const editable = getRolePermissions(profile?.role).write;
@@ -4285,8 +4406,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const saveActivityScoreSnapshot = useServerFn(upsertActivityScoreSnapshotServer);
 
   const [sections, setSections] = useState(() => {
-    if (block.kpiData) return block.kpiData;
-    return buildDefaultSections(area, block.metrics);
+    return getKpiBaseSections(area, block);
   });
 
   function addSection() {
@@ -4383,16 +4503,16 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       });
       await logAccountChanges(
         accountId,
-        [
-          {
-            field: `Score: ${title}`,
-            oldValue: block.score.toFixed(1),
-            newValue: newScore.toFixed(1),
-          },
-        ],
+        buildScoreMatrixHistoryChanges({
+          title,
+          oldScore: block.score.toFixed(1),
+          newScore: newScore.toFixed(1),
+          beforeSections: getKpiBaseSections(area, block),
+          afterSections: sections,
+        }),
         editorUser,
       );
-      await refreshAccountRetentionGrowthScoring(accountId).catch(() => null);
+      await refreshAccountRetentionGrowthScoring(accountId, editorUser).catch(() => null);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["account-history", accountId] });
@@ -5095,6 +5215,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         healthArea: opportunity.healthArea,
         expectedLift:
           opportunity.expectedLift ?? `+${formatCurrency(opportunity.potentialValue ?? 0)} potential`,
+        editedBy: profile?.name ?? "Unknown",
       }),
     onMutate: (opportunity) => {
       setPursuingOpportunityId(opportunity.id);
@@ -5115,6 +5236,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
       setOpportunityStatus(`Added "${opportunity.title}" to My Open Action Items.`);
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setOpportunityStatus(error?.message ?? "Could not add this opportunity to action items.");
@@ -5440,6 +5562,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
       queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
       queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setFirefliesStatus(error?.message ?? "Fireflies extraction failed.");
@@ -5650,6 +5773,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         source: suggestion.sourceSummary,
         healthArea: suggestion.healthArea,
         expectedLift: suggestion.expectedLift,
+        editedBy: profile?.name ?? "Unknown",
       });
       await updateStagedAiRecommendationStatus({
         id: suggestion.id,
@@ -5676,6 +5800,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         });
       }
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setAiSuggestionError(error?.message ?? "AI recommendation could not be added.");
@@ -5686,12 +5811,25 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: stageAiRecommendation } = useMutation({
-    mutationFn: (suggestion) =>
-      stageAccountAiRecommendation({
+    mutationFn: async (suggestion) => {
+      const stagedRecommendation = await stageAccountAiRecommendation({
         accountId: account.id,
         requestedBy: profile?.id,
         suggestion,
-      }),
+      });
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "AI activity recommendation selected",
+            oldValue: null,
+            newValue: buildAiRecommendationHistoryValue(stagedRecommendation),
+          },
+        ],
+      });
+      return stagedRecommendation;
+    },
     onMutate: (suggestion) => {
       setAddingAiSuggestionId(suggestion.id);
       setAiSuggestionError("");
@@ -5720,6 +5858,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           queryKey: ["staged-ai-recommendations", account.id],
         });
       }
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setAiSuggestionError(error?.message ?? "AI recommendation could not be staged.");
@@ -5730,11 +5869,24 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: dismissStagedAiRecommendation } = useMutation({
-    mutationFn: (suggestion) =>
-      updateStagedAiRecommendationStatus({
+    mutationFn: async (suggestion) => {
+      const result = await updateStagedAiRecommendationStatus({
         id: suggestion.id,
         status: "dismissed",
-      }),
+      });
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "AI activity recommendation removed",
+            oldValue: buildAiRecommendationHistoryValue(suggestion),
+            newValue: "Dismissed",
+          },
+        ],
+      });
+      return result;
+    },
     onMutate: (suggestion) => {
       setAddingAiSuggestionId(suggestion.id);
       setAiSuggestionError("");
@@ -5750,6 +5902,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           queryKey: ["staged-ai-recommendations", account.id],
         });
       }
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setAiSuggestionError(error?.message ?? "AI recommendation could not be removed.");
@@ -5769,6 +5922,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         source: item.meetingTitle ? `Meeting Insight: ${item.meetingTitle}` : "Meeting Insight",
         healthArea: item.healthArea,
         expectedLift: item.expectedLift,
+        editedBy: profile?.name ?? "Unknown",
       });
       await markMeetingInsightActionItemState({
         accountId: account.id,
@@ -5798,6 +5952,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
       queryClient.invalidateQueries({ queryKey: ["meeting-insight-action-states", account.id] });
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setFirefliesStatus(error?.message ?? "Meeting insight could not be added.");
@@ -8395,6 +8550,17 @@ function buildActivityEvidenceHistoryValue(row, evidence = {}) {
     evidence.reviewer ? `Reviewer: ${evidence.reviewer}` : null,
     evidence.notes ? `Notes: ${evidence.notes}` : null,
     evidence.artifactUrl ? `Artifact: ${evidence.artifactUrl}` : null,
+  ]);
+}
+
+function buildAiRecommendationHistoryValue(suggestion = {}) {
+  return compactHistoryParts([
+    suggestion.title ? `Title: ${suggestion.title}` : null,
+    suggestion.healthArea ? `Area: ${suggestion.healthArea}` : null,
+    suggestion.expectedLift ? `Expected lift: ${suggestion.expectedLift}` : null,
+    suggestion.reason ? `Reason: ${suggestion.reason}` : null,
+    suggestion.description ? `Description: ${suggestion.description}` : null,
+    suggestion.sourceSummary ? `Source: ${suggestion.sourceSummary}` : null,
   ]);
 }
 

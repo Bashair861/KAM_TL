@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { fetchAccounts } from "@/services/db";
 import { analyzeJiraIssue } from "@/services/jiraInsights";
 import { saveJiraEscalations } from "@/services/jira";
+import { useAuth } from "@/context/AuthContext";
 import { Loader2, Search, Zap, Plus, X } from "lucide-react";
 
 export const Route = createFileRoute("/escalations")({
@@ -20,6 +21,7 @@ export const Route = createFileRoute("/escalations")({
 });
 
 function EscalationsPage() {
+  const { profile } = useAuth();
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [issueKey, setIssueKey] = useState("SCRUM-1");
@@ -78,6 +80,7 @@ function EscalationsPage() {
         data: {
           issues: [{ ...result.issue, priority, actionItems }],
           accountId,
+          editedBy: profile?.name ?? "Unknown",
         },
       });
     },

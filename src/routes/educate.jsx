@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { fetchAccounts, fetchAccount, fetchEducationLog, saveEducationSession } from "@/services/db";
 import { fetchEducationArticles } from "@/services/education";
+import { useAuth } from "@/context/AuthContext";
 import {
   ExternalLink, BookOpen, Sparkles, Loader2, RefreshCw,
   Plus, CheckCircle2, Share2, X,
@@ -29,6 +30,7 @@ const ARTICLE_TABS = [
 ];
 
 function EducatePage() {
+  const { profile } = useAuth();
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [activeTab, setActiveTab] = useState("account");
@@ -89,9 +91,10 @@ function EducatePage() {
 
   // Log session mutation
   const logMutation = useMutation({
-    mutationFn: () => saveEducationSession(form),
+    mutationFn: () => saveEducationSession({ ...form, editedBy: profile?.name ?? "Unknown" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["education-log"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", form.accountId] });
       setLogOpen(false);
       setForm((f) => ({ ...f, date: "", topic: "", approach: "", outcome: "" }));
       setFormError("");
@@ -108,10 +111,12 @@ function EducatePage() {
         topic: article.title,
         approach: `Article shared from ${article.source}`,
         outcome: "",
+        editedBy: profile?.name ?? "Unknown",
       }),
     onSuccess: (_, article) => {
       setSharedIds((prev) => [...prev, article.id]);
       queryClient.invalidateQueries({ queryKey: ["education-log"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", selectedAccountId] });
     },
   });
 
