@@ -1,5 +1,12 @@
 import { createServerFn } from "@tanstack/react-start";
 import { createClient } from "@supabase/supabase-js";
+import {
+  getEmailDomain,
+  getTranscriptEmailDomains,
+  getTranscriptEmails,
+  normalizeEmail,
+  normalizeSearchText as normalize,
+} from "@/services/fireflies-utils";
 
 const DEFAULT_SYNC_LIMIT = 5;
 const DEFAULT_SYNC_DAYS_BACK = 60;
@@ -50,47 +57,6 @@ function createActorSupabaseClient(accessToken) {
       },
     },
   });
-}
-
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9@.]+/g, " ")
-    .trim();
-}
-
-function normalizeEmail(value = "") {
-  return value.trim().toLowerCase();
-}
-
-const PUBLIC_EMAIL_DOMAINS = new Set([
-  "gmail.com",
-  "yahoo.com",
-  "hotmail.com",
-  "outlook.com",
-  "live.com",
-  "icloud.com",
-  "aol.com",
-  "proton.me",
-  "protonmail.com",
-]);
-
-function getEmailDomain(value = "") {
-  const domain = normalizeEmail(value).split("@")[1] ?? "";
-  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
-}
-
-function getTranscriptEmails(transcript) {
-  return [
-    ...(transcript.participants ?? []),
-    ...(transcript.attendees ?? []).map((attendee) => attendee.email),
-  ]
-    .map((email) => normalizeEmail(email ?? ""))
-    .filter(Boolean);
-}
-
-function getTranscriptEmailDomains(transcript) {
-  return getTranscriptEmails(transcript).map(getEmailDomain).filter(Boolean);
 }
 
 async function fetchActorProfile(actorClient, user) {
@@ -174,6 +140,25 @@ function getTranscriptSearchText(transcript) {
   );
 }
 
+function getWebhookEventType(payload = {}) {
+  return (
+    payload.event ?? payload.event_type ?? payload.eventType ?? payload.type ?? "meeting_ready"
+  );
+}
+
+function buildWebhookPayloadSummary(payload = {}, transcriptId) {
+  return {
+    event: getWebhookEventType(payload),
+    transcriptId:
+      payload.transcript_id ??
+      payload.transcriptId ??
+      payload.fireflies_transcript_id ??
+      transcriptId ??
+      null,
+    payloadKeys: Object.keys(payload).slice(0, 20),
+  };
+}
+
 function scoreAccountTranscriptMatch(account, transcript) {
   const transcriptEmails = new Set(getTranscriptEmails(transcript));
   const transcriptDomains = new Set(getTranscriptEmailDomains(transcript));
@@ -206,17 +191,28 @@ async function findAccountForFirefliesTranscript(transcript, { fetchAccounts, fe
   const detailedAccounts = await Promise.all(
     accounts.map((account) => fetchAccount(account.id).catch(() => null)),
   );
-  const bestMatch = detailedAccounts
+  const scoredMatches = detailedAccounts
     .filter(Boolean)
     .map((account) => ({
       account,
       score: scoreAccountTranscriptMatch(account, transcript),
     }))
-    .sort((left, right) => right.score - left.score)[0];
+    .sort((left, right) => right.score - left.score);
+  const bestMatch = scoredMatches[0];
 
   if (!bestMatch || bestMatch.score <= 0) {
     const error = new Error("No matching account was found for this Fireflies meeting.");
     error.statusCode = 202;
+    error.matchDiagnostics = {
+      transcriptTitle: transcript.title ?? "",
+      transcriptEmailDomains: getTranscriptEmailDomains(transcript),
+      transcriptEmailsSeen: getTranscriptEmails(transcript).slice(0, 10),
+      topCandidates: scoredMatches.slice(0, 5).map(({ account, score }) => ({
+        accountId: account.id,
+        accountName: account.name,
+        score,
+      })),
+    };
     throw error;
   }
 
@@ -388,24 +384,45 @@ export async function syncFirefliesTranscriptForAccount({ accountId, transcript,
 }
 
 export async function syncFirefliesWebhookMeeting({ transcriptId, payload = {} }) {
-  const [{ fetchAccounts, fetchAccount }, { fetchFirefliesTranscriptById }] = await Promise.all([
-    import("@/services/db"),
-    import("@/services/fireflies-client"),
-  ]);
+  const [
+    { fetchAccounts, fetchAccount, logFirefliesWebhookEvent },
+    { fetchFirefliesTranscriptById },
+  ] = await Promise.all([import("@/services/db"), import("@/services/fireflies-client")]);
+  const webhookEvent = getWebhookEventType(payload);
+  const payloadSummary = buildWebhookPayloadSummary(payload, transcriptId);
 
   const transcript = await fetchFirefliesTranscriptById(transcriptId);
-  const account = await findAccountForFirefliesTranscript(transcript, {
-    fetchAccounts,
-    fetchAccount,
-  });
+  let account;
+  try {
+    account = await findAccountForFirefliesTranscript(transcript, {
+      fetchAccounts,
+      fetchAccount,
+    });
+  } catch (error) {
+    if (error.statusCode === 202) {
+      await logFirefliesWebhookEvent({
+        transcriptId,
+        eventType: webhookEvent,
+        status: "unmatched",
+        title: transcript.title,
+        payload: payloadSummary,
+        diagnostics: error.matchDiagnostics ?? {},
+        errorMessage: error.message,
+      }).catch((logError) => {
+        console.warn(
+          `Failed to log unmatched Fireflies transcript ${transcriptId}: ${logError.message}`,
+        );
+      });
+    }
+    throw error;
+  }
 
   return syncFirefliesTranscriptForAccount({
     accountId: account.id,
     transcript,
     query: {
       source: "fireflies_webhook",
-      webhookEvent:
-        payload.event ?? payload.event_type ?? payload.eventType ?? payload.type ?? "meeting_ready",
+      webhookEvent,
     },
   });
 }

@@ -1,6 +1,7 @@
 import { runFirefliesMeetingActionAgent } from "@/services/fireflies-action-agent";
 import { runFirefliesLlmFallbackAgent } from "@/services/fireflies-llm-fallback-agent";
 import { runFirefliesOpportunityAgent } from "@/services/fireflies-opportunity-agent";
+import { normalize } from "@/services/fireflies-utils";
 
 const ACTION_CAP_BYPASS_RULE_IDS = new Set(["ESC-01"]);
 
@@ -15,13 +16,6 @@ function normalizeMeetingDate(value) {
 
 function indexTranscriptResults(results = []) {
   return new Map(results.map((result) => [result.transcriptId, result]));
-}
-
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
 }
 
 function dedupeItems(items, getKey) {

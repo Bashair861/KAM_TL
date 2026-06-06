@@ -1,3 +1,11 @@
+import {
+  getAccountEmailDomains,
+  getTranscriptDisplayDate as getTranscriptDate,
+  getTranscriptEmailDomains,
+  normalize,
+  toFirefliesId,
+} from "@/services/fireflies-utils";
+
 const MAX_ACTION_TEXT_LENGTH = 260;
 const MIN_ACTION_TEXT_LENGTH = 8;
 const SUMMARY_ACTION_LIMIT = 5;
@@ -99,58 +107,12 @@ const CLASSIFIERS = [
   },
 ];
 
-const PUBLIC_EMAIL_DOMAINS = new Set([
-  "gmail.com",
-  "yahoo.com",
-  "hotmail.com",
-  "outlook.com",
-  "live.com",
-  "icloud.com",
-  "aol.com",
-  "proton.me",
-  "protonmail.com",
-]);
-
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function normalizeEmail(value = "") {
-  return String(value).trim().toLowerCase();
-}
-
-function getEmailDomain(value = "") {
-  const domain = normalizeEmail(value).split("@")[1] ?? "";
-  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
-}
-
-function getAccountEmailDomains(account) {
-  return [
-    account.primaryContact?.email,
-    ...(account.stakeholders ?? []).map((stakeholder) => stakeholder.email),
-  ]
-    .map(getEmailDomain)
-    .filter(Boolean);
-}
-
-function getTranscriptEmailDomains(transcript) {
-  return [
-    ...(transcript.participants ?? []),
-    ...(transcript.attendees ?? []).map((attendee) => attendee.email),
-  ]
-    .map(getEmailDomain)
-    .filter(Boolean);
-}
-
 function normalizeHistoryKey(value = "") {
   return normalize(value).replace(/\s+/g, "");
 }
 
 function toId(value = "") {
-  return normalize(value).replace(/\s+/g, "-").slice(0, 80) || "action";
+  return toFirefliesId(value, "action");
 }
 
 function splitActionItems(raw = "") {
@@ -202,15 +164,6 @@ function getTranscriptCandidateActions(transcript) {
     summaryFallbackUsed: explicitItems.length === 0 && summaryCandidates.length > 0,
     summarySupplementUsed: explicitItems.length > 0 && summaryCandidates.length > 0,
   };
-}
-
-function getTranscriptDate(transcript) {
-  if (!transcript.date) return "Recent";
-  const date = new Date(Number(transcript.date));
-  if (!Number.isNaN(date.getTime())) return date.toLocaleDateString("en-US");
-  const parsed = new Date(transcript.date);
-  if (!Number.isNaN(parsed.getTime())) return parsed.toLocaleDateString("en-US");
-  return String(transcript.date);
 }
 
 function getAccountKeywords(account) {

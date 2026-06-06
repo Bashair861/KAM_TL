@@ -1,3 +1,9 @@
+import {
+  getTranscriptDisplayDate as getTranscriptDate,
+  normalize,
+  toFirefliesId,
+} from "@/services/fireflies-utils";
+
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
 const DEFAULT_OPENAI_RETRY_COUNT = 2;
@@ -169,13 +175,6 @@ function getOpenAiModel() {
   );
 }
 
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
 function normalizeForExcerptVerification(value = "") {
   return String(value)
     .toLowerCase()
@@ -186,16 +185,7 @@ function normalizeForExcerptVerification(value = "") {
 }
 
 function toId(value = "") {
-  return normalize(value).replace(/\s+/g, "-").slice(0, 80) || "llm";
-}
-
-function getTranscriptDate(transcript) {
-  if (!transcript.date) return "Recent";
-  const numericDate = new Date(Number(transcript.date));
-  if (!Number.isNaN(numericDate.getTime())) return numericDate.toLocaleDateString("en-US");
-  const parsedDate = new Date(transcript.date);
-  if (!Number.isNaN(parsedDate.getTime())) return parsedDate.toLocaleDateString("en-US");
-  return String(transcript.date);
+  return toFirefliesId(value, "llm");
 }
 
 function getOutputText(payload) {

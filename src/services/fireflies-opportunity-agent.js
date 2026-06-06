@@ -1,3 +1,11 @@
+import {
+  getAccountEmailDomains,
+  getTranscriptDisplayDate as getTranscriptDate,
+  getTranscriptEmailDomains,
+  normalize,
+  toFirefliesId,
+} from "@/services/fireflies-utils";
+
 const DEFAULT_GLOBAL_OPPORTUNITY_LIMIT = 12;
 const DEFAULT_PER_TRANSCRIPT_OPPORTUNITY_LIMIT = 3;
 const MIN_OPPORTUNITY_TEXT_LENGTH = 12;
@@ -15,36 +23,8 @@ const RETENTION_SIGNAL_PATTERN =
 const GROWTH_SIGNAL_PATTERN =
   /\b(proposal|pilot|poc|upsell|cross-sell|cross sell|expansion|expand|additional|new region|new team|new module|license|licenses|seats|users|interested|evaluate|evaluating|purchase|buy|scope)\b/i;
 
-const PUBLIC_EMAIL_DOMAINS = new Set([
-  "gmail.com",
-  "yahoo.com",
-  "hotmail.com",
-  "outlook.com",
-  "live.com",
-  "icloud.com",
-  "aol.com",
-  "proton.me",
-  "protonmail.com",
-]);
-
-function normalize(value = "") {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function normalizeEmail(value = "") {
-  return String(value).trim().toLowerCase();
-}
-
-function getEmailDomain(value = "") {
-  const domain = normalizeEmail(value).split("@")[1] ?? "";
-  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
-}
-
 function toId(value = "") {
-  return normalize(value).replace(/\s+/g, "-").slice(0, 80) || "opportunity";
+  return toFirefliesId(value, "opportunity");
 }
 
 function splitCandidates(raw = "") {
@@ -59,15 +39,6 @@ function splitCandidates(raw = "") {
     .filter((item) => item.length >= MIN_OPPORTUNITY_TEXT_LENGTH);
 }
 
-function getTranscriptDate(transcript) {
-  if (!transcript.date) return "Recent";
-  const numericDate = new Date(Number(transcript.date));
-  if (!Number.isNaN(numericDate.getTime())) return numericDate.toLocaleDateString("en-US");
-  const parsedDate = new Date(transcript.date);
-  if (!Number.isNaN(parsedDate.getTime())) return parsedDate.toLocaleDateString("en-US");
-  return String(transcript.date);
-}
-
 function getAccountKeywords(account) {
   return [
     account.name,
@@ -78,24 +49,6 @@ function getAccountKeywords(account) {
   ]
     .map(normalize)
     .filter((value) => value.length >= 3);
-}
-
-function getAccountEmailDomains(account) {
-  return [
-    account.primaryContact?.email,
-    ...(account.stakeholders ?? []).map((stakeholder) => stakeholder.email),
-  ]
-    .map(getEmailDomain)
-    .filter(Boolean);
-}
-
-function getTranscriptEmailDomains(transcript) {
-  return [
-    ...(transcript.participants ?? []),
-    ...(transcript.attendees ?? []).map((attendee) => attendee.email),
-  ]
-    .map(getEmailDomain)
-    .filter(Boolean);
 }
 
 function getAccountRelevance(account, transcript, text) {

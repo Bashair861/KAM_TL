@@ -1,19 +1,10 @@
+import { getEmailDomain, normalizeEmail, normalizeKeyword } from "@/services/fireflies-utils";
+
 const FIREFLIES_GRAPHQL_URL = "https://api.fireflies.ai/graphql";
 const DEFAULT_DAYS_BACK = 60;
 const DEFAULT_LIMIT = 5;
 const DEFAULT_RETRY_COUNT = 2;
 const DEFAULT_RETRY_DELAY_MS = 600;
-const PUBLIC_EMAIL_DOMAINS = new Set([
-  "gmail.com",
-  "yahoo.com",
-  "hotmail.com",
-  "outlook.com",
-  "live.com",
-  "icloud.com",
-  "aol.com",
-  "proton.me",
-  "protonmail.com",
-]);
 
 const TRANSCRIPTS_QUERY = `
   query Transcripts(
@@ -96,19 +87,6 @@ function asIsoDate(daysBack = DEFAULT_DAYS_BACK) {
   const date = new Date();
   date.setDate(date.getDate() - daysBack);
   return date.toISOString();
-}
-
-function normalizeEmail(value = "") {
-  return value.trim().toLowerCase();
-}
-
-function normalizeKeyword(value = "") {
-  return String(value).replace(/\s+/g, " ").trim();
-}
-
-function getEmailDomain(value = "") {
-  const domain = normalizeEmail(value).split("@")[1] ?? "";
-  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
 }
 
 function getAccountParticipantEmails(account) {

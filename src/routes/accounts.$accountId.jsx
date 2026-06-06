@@ -29,6 +29,8 @@ import {
   submitActivityRuleEvidence,
   reviewActivityRuleEvidence,
   refreshAccountRetentionGrowthScoring,
+  fetchRetentionGrowthDrafts,
+  upsertRetentionGrowthDraft,
 } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -327,20 +329,41 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
     },
   });
+  const { data: savedDrafts = [] } = useQuery({
+    queryKey: ["retention-growth-drafts", account.id],
+    queryFn: () => fetchRetentionGrowthDrafts(account.id),
+  });
   const [resolvedItems, setResolvedItems] = useState({});
-  const [draftPlans, setDraftPlans] = useState([]);
-  const [draftOffers, setDraftOffers] = useState([]);
+  const [localDrafts, setLocalDrafts] = useState([]);
+  const [draftSaveStatus, setDraftSaveStatus] = useState("");
   const [planTarget, setPlanTarget] = useState(null);
   const [planForm, setPlanForm] = useState(createInitialReviewForm(null, profile?.name));
   const [offerTarget, setOfferTarget] = useState(null);
   const [offerForm, setOfferForm] = useState(createInitialReviewForm(null, profile?.name));
   const [evidenceTarget, setEvidenceTarget] = useState(null);
   const scoringTriggeredForAccountRef = useRef(null);
+  const { mutate: saveRetentionGrowthDraft } = useMutation({
+    mutationFn: (draft) => upsertRetentionGrowthDraft(account.id, draft, profile?.name),
+    onSuccess: (savedDraft) => {
+      setLocalDrafts((current) => current.filter((draft) => draft.id !== savedDraft.id));
+      queryClient.setQueryData(["retention-growth-drafts", account.id], (current = []) =>
+        dedupeRetentionDrafts([savedDraft, ...current]),
+      );
+      setDraftSaveStatus("Draft saved and will survive page refresh.");
+      queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
+    },
+    onError: (error, draft) => {
+      setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
+      setDraftSaveStatus(
+        `Draft kept for this session only. Run add-retention-growth-drafts.sql to persist it. ${error.message}`,
+      );
+    },
+  });
 
   useEffect(() => {
     setResolvedItems({});
-    setDraftPlans([]);
-    setDraftOffers([]);
+    setLocalDrafts([]);
+    setDraftSaveStatus("");
     setPlanTarget(null);
     setPlanForm(createInitialReviewForm(null, profile?.name));
     setOfferTarget(null);
@@ -354,15 +377,26 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
     refreshRetentionGrowthScoring();
   }, [account.id, refreshRetentionGrowthScoring]);
 
-  const activeApplicableGrowth = model.applicableGrowth.filter((item) => !resolvedItems[item.id]);
-  const activeOffers = model.recommendedOffers.filter((item) => !resolvedItems[item.id]);
+  const draftQueue = useMemo(
+    () => sortRetentionDrafts(dedupeRetentionDrafts([...localDrafts, ...savedDrafts])),
+    [localDrafts, savedDrafts],
+  );
+  const draftedItemIds = useMemo(
+    () =>
+      new Set(
+        draftQueue.map((draft) => draft.id.replace(/^draft-(plan|offer)-/, "")).filter(Boolean),
+      ),
+    [draftQueue],
+  );
+  const activeApplicableGrowth = model.applicableGrowth.filter(
+    (item) => !resolvedItems[item.id] && !draftedItemIds.has(item.id),
+  );
+  const activeOffers = model.recommendedOffers.filter(
+    (item) => !resolvedItems[item.id] && !draftedItemIds.has(item.id),
+  );
   const dashboard = model.dashboard;
   const actionOwner =
     role === "KAM" && isAssignedKam ? (profile?.name ?? "Assigned KAM") : "Assigned KAM";
-  const draftQueue = useMemo(
-    () => sortRetentionDrafts([...draftPlans, ...draftOffers]),
-    [draftOffers, draftPlans],
-  );
 
   function openPlanReview(kind, item) {
     setPlanTarget({ kind, item });
@@ -377,7 +411,8 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   function confirmPlanReview() {
     if (!planTarget) return;
     const draft = buildRetentionPlanDraft(planTarget, planForm, canApproveCommercial);
-    setDraftPlans((current) => [draft, ...current]);
+    setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
+    saveRetentionGrowthDraft(draft);
     setResolvedItems((current) => ({
       ...current,
       [planTarget.item.id]: {
@@ -401,7 +436,8 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   function confirmOfferReview() {
     if (!offerTarget) return;
     const draft = buildRetentionOfferDraft(offerTarget, offerForm, canApproveCommercial);
-    setDraftOffers((current) => [draft, ...current]);
+    setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
+    saveRetentionGrowthDraft(draft);
     setResolvedItems((current) => ({
       ...current,
       [offerTarget.id]: {
@@ -549,8 +585,6 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
           </RetentionGrowthDisclosure>
         </div>
       </div>
-
-      <CalculationGovernancePanel dashboard={dashboard} />
 
       <RetentionGrowthDisclosure
         title="Account Action Table"
@@ -864,10 +898,15 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
 
       <RetentionGrowthDisclosure
         title="Draft Plans & Offers"
-        description="Review-ready local drafts created from whitespace, opportunities, and recommended offers."
+        description="Review-ready drafts created from whitespace, opportunities, and recommended offers."
         meta={`${draftQueue.length} drafts`}
         defaultOpen={draftQueue.length > 0}
       >
+        {draftSaveStatus && (
+          <div className="border-b px-6 py-3 text-[11px] font-medium text-muted-foreground">
+            {draftSaveStatus}
+          </div>
+        )}
         {draftQueue.length ? (
           <div className="divide-y">
             {draftQueue.map((draft) => (
@@ -900,7 +939,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
           </div>
         ) : (
           <p className="px-6 py-6 text-xs text-muted-foreground">
-            No draft pitches or offers have been created in this session yet.
+            No draft pitches or offers have been created yet.
           </p>
         )}
       </RetentionGrowthDisclosure>
@@ -1097,6 +1136,15 @@ function sortRetentionDrafts(drafts) {
     const leftDate = new Date(left.createdAt || 0).getTime();
     const rightDate = new Date(right.createdAt || 0).getTime();
     return rightDate - leftDate;
+  });
+}
+
+function dedupeRetentionDrafts(drafts) {
+  const seen = new Set();
+  return drafts.filter((draft) => {
+    if (!draft?.id || seen.has(draft.id)) return false;
+    seen.add(draft.id);
+    return true;
   });
 }
 

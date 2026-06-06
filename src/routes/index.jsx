@@ -9,6 +9,7 @@ import {
   globalCalendar,
 } from "@/data/kam-data";
 import { fetchAccounts, fetchEscalations } from "@/services/db";
+import { buildPortfolioRevenueMetrics } from "@/services/portfolio-metrics";
 import { StatCard } from "@/components/shared/StatCard";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -50,10 +51,14 @@ function DashboardPage() {
     queryKey: ["escalations"],
     queryFn: () => fetchEscalations(),
   });
+  const revenueMetrics = buildPortfolioRevenueMetrics(accounts);
   const portfolioTotals = {
-    totalARR: accounts.reduce((s, a) => s + a.arr, 0),
-    atRiskARR: accounts.filter((a) => a.status !== "healthy").reduce((s, a) => s + a.arr, 0),
-    growthUpside: accounts.reduce((s, a) => s + a.growthUpside, 0),
+    totalARR: revenueMetrics.totalARR,
+    atRiskARR: revenueMetrics.revenueAtRisk,
+    growthUpside: revenueMetrics.growthPipeline,
+    forecastGRR: revenueMetrics.forecastGRR,
+    forecastNRR: revenueMetrics.forecastNRR,
+    atRiskAccountCount: revenueMetrics.atRiskAccountCount,
     avgHealth: accounts.length
       ? Math.round(accounts.reduce((s, a) => s + a.health, 0) / accounts.length)
       : 0,
@@ -82,11 +87,11 @@ function DashboardPage() {
       </header>
 
       <div className="p-4 md:p-8 max-w-7xl w-full mx-auto space-y-6 md:space-y-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-6">
           <StatCard
             label="Avg Health Score"
             value={portfolioTotals.avgHealth}
-            hint="Across 5 active accounts"
+            hint={`Across ${accounts.length} active accounts`}
             accent="success"
             bar={portfolioTotals.avgHealth}
             info="Weighted average of each account's composite Health Score (0–100). Composed of 8 sub-scores: Relationship, Project, White-space, Contract, CSAT, Risk, Resources, and Financial health — each on a 0–10 scale and scaled to 100."
@@ -99,18 +104,34 @@ function DashboardPage() {
             info="Sum of Annual Recurring Revenue across every active key account. Calculated as Σ (account.arr) — billed contract value normalised to a 12-month run-rate, excluding one-off services."
           />
           <StatCard
-            label="At-Risk ARR"
-            value={formatCurrency(portfolioTotals.atRiskARR)}
-            hint="2 accounts in watch"
-            accent="warn"
-            info="ARR of accounts whose Health Score is below 60 OR whose Retention Risk is rated Medium/High. Formula: Σ (arr where health < 60 OR retentionRisk ∈ {Medium, High})."
+            label="Forecast GRR"
+            value={`${portfolioTotals.forecastGRR}%`}
+            hint="Retained ARR / current ARR"
+            accent={portfolioTotals.forecastGRR >= 90 ? "success" : "warn"}
+            bar={portfolioTotals.forecastGRR}
+            info="Gross Revenue Retention forecast. Formula: ((Portfolio ARR - Revenue at Risk) / Portfolio ARR) x 100. It uses Retention VS Growth revenue-at-risk and does not invent churn."
           />
           <StatCard
-            label="Growth Upside"
+            label="Forecast NRR"
+            value={`${portfolioTotals.forecastNRR}%`}
+            hint="Retained ARR + growth pipeline"
+            accent={portfolioTotals.forecastNRR >= 105 ? "success" : "accent"}
+            bar={Math.min(portfolioTotals.forecastNRR, 100)}
+            info="Net Revenue Retention forecast. Formula: ((Portfolio ARR - Revenue at Risk + Growth Pipeline) / Portfolio ARR) x 100. Pipeline uses explicit growth pipeline/upside values."
+          />
+          <StatCard
+            label="At-Risk ARR"
+            value={formatCurrency(portfolioTotals.atRiskARR)}
+            hint={`${portfolioTotals.atRiskAccountCount} accounts in watch`}
+            accent="warn"
+            info="Sum of account revenue_at_risk from Retention VS Growth scoring. The system shows only known ARR at risk; it does not estimate partial churn."
+          />
+          <StatCard
+            label="Growth Pipeline"
             value={formatCurrency(portfolioTotals.growthUpside)}
-            hint="15 whitespace items"
+            hint={`${revenueMetrics.expansionAccountCount} accounts with expansion signal`}
             accent="accent"
-            info="Estimated incremental ARR from white-space opportunities (services applicable to the client but not yet sold). Sum of pipeline-weighted growthUpside values across accounts."
+            info="Known expansion pipeline across accounts. Uses persisted growth_pipeline_value when available, otherwise account growth_upside. Unknown potential remains excluded."
           />
         </div>
 

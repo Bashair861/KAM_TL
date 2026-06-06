@@ -182,6 +182,26 @@ function mapFirefliesMeetingSummary(row) {
   };
 }
 
+function mapRetentionGrowthDraft(row) {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    kind: row.kind,
+    title: row.title,
+    owner: row.owner ?? "",
+    dueDate: row.due_date ?? "",
+    nextStep: row.next_step ?? "",
+    potentialValueLabel: row.potential_value_label ?? "Not provided",
+    reason: row.reason ?? "",
+    evidence: row.evidence ?? [],
+    offerType: row.offer_type ?? null,
+    approvalState: row.approval_state ?? "",
+    createdBy: row.created_by ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export async function fetchAccounts(opts) {
   let q = supabase.from("accounts").select("*");
   // KAMs only see accounts assigned to them
@@ -642,6 +662,86 @@ export async function upsertFirefliesMeetingSummaries(accountId, meetings) {
     .select("*");
   if (error) throw error;
   return (data ?? []).map(mapFirefliesMeetingSummary);
+}
+
+export async function logFirefliesWebhookEvent(input = {}) {
+  const row = {
+    fireflies_transcript_id: input.transcriptId ?? null,
+    event_type: input.eventType ?? "meeting_ready",
+    status: input.status ?? "received",
+    matched_account_id: input.accountId ?? null,
+    match_score: input.matchScore ?? null,
+    title: input.title ?? null,
+    payload: input.payload ?? {},
+    diagnostics: input.diagnostics ?? {},
+    error_message: input.errorMessage ?? null,
+  };
+
+  const { data, error } = await supabase
+    .from("fireflies_webhook_events")
+    .insert(row)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "42P01") {
+      console.warn(
+        "Fireflies webhook event log table is missing. Run src/db/add-fireflies-webhook-events.sql.",
+      );
+      return null;
+    }
+    throw error;
+  }
+
+  return data ?? null;
+}
+
+export async function fetchRetentionGrowthDrafts(accountId) {
+  if (!accountId) return [];
+  const { data, error } = await supabase
+    .from("retention_growth_drafts")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    if (error.code === "42P01") return [];
+    throw error;
+  }
+
+  return (data ?? []).map(mapRetentionGrowthDraft);
+}
+
+export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "Unknown") {
+  if (!accountId) throw new Error("Account id is required to save a retention/growth draft.");
+  if (!draft?.id) throw new Error("Draft id is required.");
+
+  const now = new Date().toISOString();
+  const row = {
+    id: draft.id,
+    account_id: accountId,
+    kind: draft.kind,
+    title: draft.title,
+    owner: draft.owner,
+    due_date: draft.dueDate,
+    next_step: draft.nextStep,
+    potential_value_label: draft.potentialValueLabel,
+    reason: draft.reason,
+    evidence: draft.evidence ?? [],
+    offer_type: draft.offerType,
+    approval_state: draft.approvalState,
+    created_by: createdBy,
+    created_at: draft.createdAt ?? now,
+    updated_at: now,
+  };
+
+  const { data, error } = await supabase
+    .from("retention_growth_drafts")
+    .upsert(row, { onConflict: "id" })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapRetentionGrowthDraft(data);
 }
 
 export async function deleteFirefliesMeetingHistory({
