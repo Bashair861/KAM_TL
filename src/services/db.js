@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -18,6 +19,16 @@ function mapFlatAccount(r) {
     retentionRisk: r.retention_risk,
     growthUpside: r.growth_upside,
     whiteSpaceCount: r.white_space_count,
+    retentionHealthScore: r.retention_health_score ?? 0,
+    calculatedRetentionRisk: r.calculated_retention_risk ?? r.retention_risk ?? "Low",
+    growthPotentialScore: r.growth_potential_score ?? 0,
+    growthPotentialLevel: r.growth_potential_level ?? "Low",
+    revenueAtRisk: r.revenue_at_risk ?? 0,
+    growthPipelineValue: r.growth_pipeline_value ?? 0,
+    retentionGrowthQuadrant: r.retention_growth_quadrant ?? null,
+    retentionGrowthNextAction: r.retention_growth_next_action ?? null,
+    retentionGrowthCalculatedAt: r.retention_growth_calculated_at ?? null,
+    retentionGrowthCalculationReason: r.retention_growth_calculation_reason ?? {},
     cooperation: r.cooperation,
     serviceConsumption: r.service_consumption,
     meetingsPerMonth: r.meetings_per_month,
@@ -347,7 +358,7 @@ export async function fetchOpportunities(accountId) {
     title: o.title,
     source: o.source ?? "",
     signalDate: o.signal_date ?? "",
-    potential: o.potential ?? 0,
+    potential: o.potential ?? null,
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
   }));
@@ -362,7 +373,7 @@ export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportuni
     title: opportunity.title,
     source: opportunity.source,
     signal_date: opportunity.signalDate,
-    potential: opportunity.potential ?? 0,
+    potential: opportunity.potential ?? null,
     confidence: opportunity.confidence ?? "Medium",
     next_step: opportunity.nextStep,
   }));
@@ -378,10 +389,111 @@ export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportuni
     title: o.title,
     source: o.source ?? "",
     signalDate: o.signal_date ?? "",
-    potential: o.potential ?? 0,
+    potential: o.potential ?? null,
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
   }));
+}
+
+function buildRetentionGrowthReasonPayload({ model, opportunities, escalations }) {
+  return {
+    trigger: "account_retention_growth_recalculation",
+    rules: {
+      retention:
+        "Health, renewal proximity, CSAT, risk score, financial score, relationship score, escalations, competitor pressure, and churn/renewal signals.",
+      growth:
+        "Whitespace count, growth upside, applicable-but-not-offered services, meeting cadence, current service proof, and opportunity pipeline.",
+    },
+    signals: {
+      retention: model.retentionSignals.map((signal) => ({
+        id: signal.id,
+        level: signal.level,
+        title: signal.title,
+      })),
+      growth: model.growthSignals.map((signal) => ({
+        id: signal.id,
+        level: signal.level,
+        title: signal.title,
+      })),
+    },
+    counts: {
+      opportunities: opportunities.length,
+      escalations: escalations.length,
+      applicableGrowth: model.applicableGrowth.length,
+      recommendedOffers: model.recommendedOffers.length,
+    },
+  };
+}
+
+function buildAccountRetentionGrowthUpdate({ model, opportunities, escalations }) {
+  const dashboard = model.dashboard;
+  const nextAction =
+    dashboard.actionRows[0]?.recommendedAction ||
+    dashboard.matrix?.recommendedAction ||
+    "Maintain account engagement and monitor for new signals.";
+
+  return {
+    retention_health_score: dashboard.retentionScore,
+    calculated_retention_risk: dashboard.riskLevel,
+    retention_risk: dashboard.riskLevel,
+    growth_potential_score: dashboard.growthScore,
+    growth_potential_level: dashboard.growthLevel,
+    revenue_at_risk: dashboard.revenueAtRisk,
+    growth_pipeline_value: dashboard.growthPipeline,
+    retention_growth_quadrant: dashboard.matrix?.quadrant ?? null,
+    retention_growth_next_action: nextAction,
+    retention_growth_calculated_at: new Date().toISOString(),
+    retention_growth_calculation_reason: buildRetentionGrowthReasonPayload({
+      model,
+      opportunities,
+      escalations,
+    }),
+  };
+}
+
+export async function refreshAccountRetentionGrowthScoring(accountId) {
+  const [account, opportunities, escalations] = await Promise.all([
+    fetchAccount(accountId),
+    fetchOpportunities(accountId),
+    fetchEscalations(accountId),
+  ]);
+
+  if (!account) throw new Error("Account not found for retention/growth scoring.");
+
+  const model = buildRetentionGrowthTabModel({ account, opportunities, escalations });
+  const update = buildAccountRetentionGrowthUpdate({ model, opportunities, escalations });
+  const { data, error } = await supabase
+    .from("accounts")
+    .update(update)
+    .eq("id", accountId)
+    .select("*")
+    .single();
+  if (error) throw error;
+
+  return {
+    account: mapFlatAccount(data),
+    dashboard: model.dashboard,
+    update,
+  };
+}
+
+export async function refreshAllAccountRetentionGrowthScoring(opts) {
+  const accounts = await fetchAccounts(opts);
+  const results = [];
+
+  for (const account of accounts) {
+    try {
+      results.push(await refreshAccountRetentionGrowthScoring(account.id));
+    } catch (error) {
+      results.push({
+        accountId: account.id,
+        failed: true,
+        error: error?.message ?? "Unknown scoring error",
+      });
+    }
+  }
+
+  return results;
 }
 export async function fetchContracts(opts) {
   let q = supabase
@@ -532,6 +644,75 @@ export async function upsertFirefliesMeetingSummaries(accountId, meetings) {
   return (data ?? []).map(mapFirefliesMeetingSummary);
 }
 
+export async function deleteFirefliesMeetingHistory({
+  accountId,
+  meetingIds,
+  deleteActionItems = false,
+  deleteOpportunities = false,
+}) {
+  if (!accountId) throw new Error("Account id is required to delete meeting history.");
+
+  let query = supabase.from("fireflies_meeting_summaries").select("*").eq("account_id", accountId);
+  if (meetingIds?.length) query = query.in("id", meetingIds);
+
+  const { data: meetingRows, error: meetingFetchError } = await query;
+  if (meetingFetchError) throw meetingFetchError;
+
+  const meetings = meetingRows ?? [];
+  const idsToDelete = meetings.map((meeting) => meeting.id).filter(Boolean);
+  if (!idsToDelete.length) {
+    return { meetingsDeleted: 0, actionItemsDeleted: 0, opportunitiesDeleted: 0 };
+  }
+
+  const actionRefs = meetings
+    .flatMap((meeting) => meeting.derived_action_items ?? [])
+    .map((item) => item.id)
+    .filter(Boolean);
+  const opportunityIds = meetings
+    .flatMap((meeting) => meeting.derived_opportunities ?? [])
+    .map((item) => item.id)
+    .filter(Boolean);
+
+  let actionItemsDeleted = 0;
+  let opportunitiesDeleted = 0;
+
+  if (deleteActionItems && actionRefs.length) {
+    const { data, error } = await supabase
+      .from("activity_rule_activities")
+      .delete()
+      .eq("account_id", accountId)
+      .in("source_ref", actionRefs)
+      .select("id");
+    if (error) throw error;
+    actionItemsDeleted = data?.length ?? 0;
+  }
+
+  if (deleteOpportunities && opportunityIds.length) {
+    const { data, error } = await supabase
+      .from("opportunities")
+      .delete()
+      .eq("account_id", accountId)
+      .in("id", opportunityIds)
+      .select("id");
+    if (error) throw error;
+    opportunitiesDeleted = data?.length ?? 0;
+  }
+
+  const { data: deletedMeetings, error: deleteMeetingsError } = await supabase
+    .from("fireflies_meeting_summaries")
+    .delete()
+    .eq("account_id", accountId)
+    .in("id", idsToDelete)
+    .select("id");
+  if (deleteMeetingsError) throw deleteMeetingsError;
+
+  return {
+    meetingsDeleted: deletedMeetings?.length ?? 0,
+    actionItemsDeleted,
+    opportunitiesDeleted,
+  };
+}
+
 export async function fetchActivityRuleActivities(accountId) {
   const { data: rows, error } = await supabase
     .from("activity_rule_activities")
@@ -660,10 +841,7 @@ export async function createActivityRuleActivitiesFromMeetingActions({ accountId
 
   if (!rows.length) return [];
 
-  const { data, error } = await supabase
-    .from("activity_rule_activities")
-    .insert(rows)
-    .select("*");
+  const { data, error } = await supabase.from("activity_rule_activities").insert(rows).select("*");
   if (error) throw error;
   return (data ?? []).map((row) => mapActivityRuleActivity(row));
 }

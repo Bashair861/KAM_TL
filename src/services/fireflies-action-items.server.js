@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { createClient } from "@supabase/supabase-js";
 
 const DEFAULT_SYNC_LIMIT = 5;
 const DEFAULT_SYNC_DAYS_BACK = 60;
@@ -15,7 +16,40 @@ function validateInput(input = {}) {
     accountId: input.accountId,
     limit: Math.min(Math.max(Number(input.limit ?? DEFAULT_SYNC_LIMIT), 1), 10),
     daysBack: Math.min(Math.max(Number(input.daysBack ?? DEFAULT_SYNC_DAYS_BACK), 1), 180),
+    actorAccessToken:
+      typeof input.actorAccessToken === "string" ? input.actorAccessToken.trim() : "",
   };
+}
+
+function getRuntimeEnvValue(key) {
+  const metaEnv =
+    typeof import.meta !== "undefined" && import.meta.env ? import.meta.env : undefined;
+  return (
+    metaEnv?.[key] ??
+    globalThis?.process?.env?.[key] ??
+    globalThis?.__env?.[key] ??
+    globalThis?.[key]
+  );
+}
+
+function createActorSupabaseClient(accessToken) {
+  const url = getRuntimeEnvValue("VITE_SUPABASE_URL");
+  const anonKey = getRuntimeEnvValue("VITE_SUPABASE_ANON_KEY");
+  if (!url || !anonKey) {
+    throw new Error("Supabase environment is not configured for Fireflies authorization.");
+  }
+
+  return createClient(url, anonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
 }
 
 function normalize(value = "") {
@@ -29,6 +63,23 @@ function normalizeEmail(value = "") {
   return value.trim().toLowerCase();
 }
 
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "yahoo.com",
+  "hotmail.com",
+  "outlook.com",
+  "live.com",
+  "icloud.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+]);
+
+function getEmailDomain(value = "") {
+  const domain = normalizeEmail(value).split("@")[1] ?? "";
+  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
+}
+
 function getTranscriptEmails(transcript) {
   return [
     ...(transcript.participants ?? []),
@@ -36,6 +87,76 @@ function getTranscriptEmails(transcript) {
   ]
     .map((email) => normalizeEmail(email ?? ""))
     .filter(Boolean);
+}
+
+function getTranscriptEmailDomains(transcript) {
+  return getTranscriptEmails(transcript).map(getEmailDomain).filter(Boolean);
+}
+
+async function fetchActorProfile(actorClient, user) {
+  const { data: byId, error: byIdError } = await actorClient
+    .from("profiles")
+    .select("id, name, role, email")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (byIdError) throw byIdError;
+  if (byId) return byId;
+
+  if (!user.email) return null;
+
+  const { data: byEmail, error: byEmailError } = await actorClient
+    .from("profiles")
+    .select("id, name, role, email")
+    .eq("email", user.email)
+    .maybeSingle();
+  if (byEmailError) throw byEmailError;
+  return byEmail;
+}
+
+async function assertCanRunManualFirefliesSync({ accountId, actorAccessToken }) {
+  if (!actorAccessToken) {
+    throw new Error("Please sign in before running Fireflies extraction.");
+  }
+
+  const actorClient = createActorSupabaseClient(actorAccessToken);
+  const {
+    data: { user },
+    error: userError,
+  } = await actorClient.auth.getUser(actorAccessToken);
+
+  if (userError || !user) {
+    throw new Error("Your session could not be verified for Fireflies extraction.");
+  }
+
+  const profile = await fetchActorProfile(actorClient, user);
+  if (!profile) {
+    throw new Error("No KAM profile is linked to the signed-in user.");
+  }
+
+  if (profile.role === "CEO") {
+    throw new Error("CEO can view Fireflies meeting history but cannot run extraction.");
+  }
+
+  if (profile.role === "Head of KAM") {
+    return profile;
+  }
+
+  if (profile.role !== "KAM") {
+    throw new Error("Only Head of KAM or the assigned KAM can run Fireflies extraction.");
+  }
+
+  const { data: account, error: accountError } = await actorClient
+    .from("accounts")
+    .select("id, assigned_kam_id")
+    .eq("id", accountId)
+    .maybeSingle();
+  if (accountError) throw accountError;
+
+  if (!account || account.assigned_kam_id !== profile.id) {
+    throw new Error("Only the assigned KAM can run Fireflies extraction for this account.");
+  }
+
+  return profile;
 }
 
 function getTranscriptSearchText(transcript) {
@@ -55,12 +176,15 @@ function getTranscriptSearchText(transcript) {
 
 function scoreAccountTranscriptMatch(account, transcript) {
   const transcriptEmails = new Set(getTranscriptEmails(transcript));
+  const transcriptDomains = new Set(getTranscriptEmailDomains(transcript));
   const transcriptText = getTranscriptSearchText(transcript);
   let score = 0;
 
   for (const stakeholder of account.stakeholders ?? []) {
     const email = normalizeEmail(stakeholder.email ?? "");
     if (email && transcriptEmails.has(email)) score += 100;
+    const domain = getEmailDomain(email);
+    if (domain && transcriptDomains.has(domain)) score += 45;
     const name = normalize(stakeholder.name ?? "");
     if (name.length >= 4 && transcriptText.includes(name)) score += 20;
   }
@@ -109,6 +233,7 @@ function buildSavedMeetingFallback({ account, data, error, savedMeetings }) {
       daysBack: data.daysBack,
       mode: "fallback_saved_meetings",
       participantCount: account.stakeholders?.length ?? 0,
+      requestedBy: "system_or_authorized_user",
     },
     savedMeetings,
     fallbackItems: savedMeetings.flatMap((meeting) => meeting.derivedActionItems ?? []),
@@ -120,10 +245,18 @@ export async function syncFirefliesForAccount({
   accountId,
   limit = DEFAULT_SYNC_LIMIT,
   daysBack = DEFAULT_SYNC_DAYS_BACK,
+  actorAccessToken = "",
+  systemSync = false,
   queryOverride = null,
   transcriptsOverride = null,
 }) {
   const data = validateInput({ accountId, limit, daysBack });
+  const actorProfile = systemSync
+    ? null
+    : await assertCanRunManualFirefliesSync({
+        accountId: data.accountId,
+        actorAccessToken,
+      });
   const [
     {
       fetchAccount,
@@ -132,6 +265,7 @@ export async function syncFirefliesForAccount({
       upsertFirefliesMeetingSummaries,
       createActivityRuleActivitiesFromMeetingActions,
       upsertOpportunitiesFromMeetingAgent,
+      refreshAccountRetentionGrowthScoring,
     },
     { fetchFirefliesTranscriptsForAccount },
     { runFirefliesMeetingAgent },
@@ -155,6 +289,7 @@ export async function syncFirefliesForAccount({
           daysBack: null,
           mode: "webhook_transcript",
           participantCount: account.stakeholders?.length ?? 0,
+          requestedBy: actorProfile?.id ?? "system",
         },
       }
     : await fetchFirefliesTranscriptsForAccount(account, {
@@ -196,10 +331,8 @@ export async function syncFirefliesForAccount({
     opportunityGlobalMaxItems: Math.max(data.limit * 2, 12),
     opportunityPerTranscriptLimit: 3,
   });
-  const allActions = result.transcriptResults.flatMap((transcript) => transcript.actions);
-  const allOpportunities = result.opportunityTranscriptResults.flatMap(
-    (transcript) => transcript.opportunities,
-  );
+  const allActions = result.items;
+  const allOpportunities = result.opportunities;
   const savedMeetings = await upsertFirefliesMeetingSummaries(account.id, result.meetings);
   const savedActivities = await createActivityRuleActivitiesFromMeetingActions({
     accountId: account.id,
@@ -209,16 +342,24 @@ export async function syncFirefliesForAccount({
     accountId: account.id,
     opportunities: allOpportunities,
   });
+  const retentionGrowthScoring = await refreshAccountRetentionGrowthScoring(account.id).catch(
+    (error) => ({
+      failed: true,
+      error: error?.message ?? "Retention/growth scoring failed after Fireflies sync.",
+    }),
+  );
 
   return {
     ...result,
     accountId: account.id,
     accountName: account.name,
+    requestedBy: actorProfile?.id ?? "system",
     items: allActions,
     opportunities: allOpportunities,
     savedMeetings,
     savedActivities,
     savedOpportunities,
+    retentionGrowthScoring,
     query,
     status:
       allActions.length > 0 || allOpportunities.length > 0
@@ -236,6 +377,7 @@ export async function syncFirefliesTranscriptForAccount({ accountId, transcript,
     accountId,
     limit: 1,
     daysBack: DEFAULT_SYNC_DAYS_BACK,
+    systemSync: true,
     transcriptsOverride: [transcript],
     queryOverride: {
       mode: "webhook_transcript",
@@ -285,6 +427,7 @@ export async function syncFirefliesRecentForAllAccounts({
           accountId: account.id,
           limit,
           daysBack,
+          systemSync: true,
         }),
       });
     } catch (error) {

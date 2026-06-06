@@ -3,6 +3,17 @@ const DEFAULT_DAYS_BACK = 60;
 const DEFAULT_LIMIT = 5;
 const DEFAULT_RETRY_COUNT = 2;
 const DEFAULT_RETRY_DELAY_MS = 600;
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "yahoo.com",
+  "hotmail.com",
+  "outlook.com",
+  "live.com",
+  "icloud.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+]);
 
 const TRANSCRIPTS_QUERY = `
   query Transcripts(
@@ -91,11 +102,33 @@ function normalizeEmail(value = "") {
   return value.trim().toLowerCase();
 }
 
+function normalizeKeyword(value = "") {
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function getEmailDomain(value = "") {
+  const domain = normalizeEmail(value).split("@")[1] ?? "";
+  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
+}
+
 function getAccountParticipantEmails(account) {
   return (account.stakeholders ?? [])
     .map((stakeholder) => normalizeEmail(stakeholder.email ?? ""))
     .filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     .slice(0, 10);
+}
+
+function getAccountSearchKeywords(account) {
+  const domains = (account.stakeholders ?? [])
+    .map((stakeholder) => getEmailDomain(stakeholder.email ?? ""))
+    .filter(Boolean)
+    .flatMap((domain) => [domain, domain.split(".")[0]]);
+
+  return [account.name, account.shortCode, account.primaryContact?.name, ...domains]
+    .map(normalizeKeyword)
+    .filter((value) => value.length >= 3)
+    .filter((value, index, list) => list.indexOf(value) === index)
+    .slice(0, 4);
 }
 
 function clampLimit(limit) {
@@ -176,28 +209,67 @@ export async function fetchFirefliesTranscriptsForAccount(account, options = {})
   const participantEmails = getAccountParticipantEmails(account);
   const limit = clampLimit(options.limit);
   const daysBack = Math.min(Math.max(Number(options.daysBack ?? DEFAULT_DAYS_BACK), 1), 180);
-  const variables = {
+  const retries = Number.isFinite(Number(options.retries))
+    ? Math.max(0, Number(options.retries))
+    : DEFAULT_RETRY_COUNT;
+  const commonVariables = {
     limit,
     fromDate: asIsoDate(daysBack),
     toDate: new Date().toISOString(),
-    participants: participantEmails.length ? participantEmails : undefined,
-    keyword: participantEmails.length ? undefined : account.name,
   };
+  const queryInputs = [
+    ...(participantEmails.length
+      ? [{ participants: participantEmails, mode: "participants" }]
+      : []),
+    ...getAccountSearchKeywords(account).map((keyword) => ({
+      keyword,
+      mode: "keyword",
+    })),
+  ];
+  const pages = [];
+  let lastError = null;
 
-  const data = await firefliesGraphqlWithRetry({
-    query: TRANSCRIPTS_QUERY,
-    variables,
-    retries: Number.isFinite(Number(options.retries))
-      ? Math.max(0, Number(options.retries))
-      : DEFAULT_RETRY_COUNT,
-  });
+  for (const input of queryInputs) {
+    try {
+      const data = await firefliesGraphqlWithRetry({
+        query: TRANSCRIPTS_QUERY,
+        variables: {
+          ...commonVariables,
+          participants: input.participants,
+          keyword: input.keyword,
+        },
+        retries,
+      });
+      pages.push({
+        mode: input.mode,
+        transcripts: data.transcripts ?? [],
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (!pages.length && lastError) throw lastError;
+
+  const dedupedTranscripts = [
+    ...new Map(
+      pages.flatMap((page) => page.transcripts).map((transcript) => [transcript.id, transcript]),
+    ).values(),
+  ].slice(0, limit);
+
   return {
-    transcripts: (data.transcripts ?? []).map(normalizeTranscript),
+    transcripts: dedupedTranscripts.map(normalizeTranscript),
     query: {
       limit,
       daysBack,
-      mode: participantEmails.length ? "participants" : "keyword",
+      mode:
+        participantEmails.length && pages.some((page) => page.mode === "keyword")
+          ? "participants_plus_keyword"
+          : participantEmails.length
+            ? "participants"
+            : "keyword",
       participantCount: participantEmails.length,
+      keywordCount: getAccountSearchKeywords(account).length,
     },
   };
 }

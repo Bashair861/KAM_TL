@@ -1,7 +1,13 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { formatCurrency } from "@/data/kam-data";
-import { fetchAccounts, fetchKamUsers, updateAccountKam } from "@/services/db";
+import {
+  fetchAccounts,
+  fetchKamUsers,
+  updateAccountKam,
+  refreshAllAccountRetentionGrowthScoring,
+} from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
 import { TrendingDown, TrendingUp } from "lucide-react";
 export const Route = createFileRoute("/accounts/")({
@@ -22,6 +28,7 @@ function AccountsListPage() {
   const userId = profile?.id;
   const isHead = role === "Head of KAM" || role === "CEO";
   const queryClient = useQueryClient();
+  const scoringTriggeredRef = useRef(false);
   const { data: accounts = [], isLoading } = useQuery({
     queryKey: ["accounts", userId, role],
     queryFn: () => fetchAccounts({ role, userId }),
@@ -35,6 +42,16 @@ function AccountsListPage() {
     mutationFn: ({ accountId, kamId }) => updateAccountKam(accountId, kamId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
   });
+  const { mutate: refreshPortfolioScoring } = useMutation({
+    mutationFn: () => refreshAllAccountRetentionGrowthScoring({ role, userId }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+
+  useEffect(() => {
+    if (isLoading || !accounts.length || scoringTriggeredRef.current) return;
+    scoringTriggeredRef.current = true;
+    refreshPortfolioScoring();
+  }, [accounts.length, isLoading, refreshPortfolioScoring]);
   return (
     <div className="flex flex-col">
       <header className="h-16 bg-card border-b flex items-center justify-between px-8 sticky top-0 z-10">

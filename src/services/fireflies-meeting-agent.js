@@ -2,6 +2,8 @@ import { runFirefliesMeetingActionAgent } from "@/services/fireflies-action-agen
 import { runFirefliesLlmFallbackAgent } from "@/services/fireflies-llm-fallback-agent";
 import { runFirefliesOpportunityAgent } from "@/services/fireflies-opportunity-agent";
 
+const ACTION_CAP_BYPASS_RULE_IDS = new Set(["ESC-01"]);
+
 function normalizeMeetingDate(value) {
   if (!value) return null;
   const numericDate = new Date(Number(value));
@@ -36,50 +38,104 @@ function hasLowConfidence(items = []) {
   return items.some((item) => item.confidence === "Low");
 }
 
-function hasTranscriptContent(transcript) {
-  return [transcript.actionItems, transcript.overview, transcript.shortSummary]
-    .filter(Boolean)
-    .join(" ")
-    .trim().length >= 40;
+function normalizeLimit(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Infinity;
 }
 
-function shouldUseLlmFallback({ transcript, actionResult, opportunityResult }) {
+function hasRemainingCapacity(items = [], limit = Infinity, canBypass = () => false) {
+  if (!Number.isFinite(limit)) return false;
+  return items.filter((item) => !canBypass(item)).length < limit;
+}
+
+function canBypassActionCap(item) {
+  return ACTION_CAP_BYPASS_RULE_IDS.has(item?.ruleId);
+}
+
+function limitItems(items, limit = Infinity, canBypass = () => false) {
+  if (!Number.isFinite(limit)) return items;
+  const kept = [];
+  let counted = 0;
+
+  for (const item of items) {
+    if (canBypass(item)) {
+      kept.push(item);
+      continue;
+    }
+    if (counted >= limit) continue;
+    kept.push(item);
+    counted += 1;
+  }
+
+  return kept;
+}
+
+function hasTranscriptContent(transcript) {
+  return (
+    [transcript.actionItems, transcript.overview, transcript.shortSummary]
+      .filter(Boolean)
+      .join(" ")
+      .trim().length >= 40
+  );
+}
+
+function shouldUseLlmFallback({
+  transcript,
+  actionResult,
+  opportunityResult,
+  actionPerTranscriptLimit,
+  opportunityPerTranscriptLimit,
+}) {
   if (!hasTranscriptContent(transcript)) return false;
   if (!actionResult || !opportunityResult) return true;
   if ((actionResult.acceptedCount ?? 0) === 0 && (opportunityResult.acceptedCount ?? 0) === 0) {
     return true;
   }
-  return hasLowConfidence(actionResult.actions) || hasLowConfidence(opportunityResult.opportunities);
+  if (hasLowConfidence(actionResult.actions) || hasLowConfidence(opportunityResult.opportunities)) {
+    return true;
+  }
+  return (
+    hasRemainingCapacity(actionResult.actions, actionPerTranscriptLimit, canBypassActionCap) ||
+    hasRemainingCapacity(opportunityResult.opportunities, opportunityPerTranscriptLimit)
+  );
 }
 
-function mergeActionResult(baseResult, fallbackResult) {
+function mergeActionResult(baseResult, fallbackResult, { perTranscriptLimit = Infinity } = {}) {
   const actions = dedupeItems(
     [...(baseResult?.actions ?? []), ...(fallbackResult?.actions ?? [])],
     (item) => normalize(`${item.ruleId} ${item.title} ${item.sourceExcerpt}`),
   );
+  const cappedActions = limitItems(actions, perTranscriptLimit, canBypassActionCap);
 
   return {
     ...(baseResult ?? {}),
     transcriptId: baseResult?.transcriptId ?? fallbackResult?.transcriptId,
-    actions,
-    acceptedCount: actions.length,
+    actions: cappedActions,
+    acceptedCount: cappedActions.length,
     llmAcceptedCount: fallbackResult?.actions?.length ?? 0,
+    llmLimitedByRemainingCap: Math.max(actions.length - cappedActions.length, 0),
     llmDiagnostics: fallbackResult?.diagnostics ?? null,
   };
 }
 
-function mergeOpportunityResult(baseResult, fallbackResult) {
+function mergeOpportunityResult(
+  baseResult,
+  fallbackResult,
+  { perTranscriptLimit = Infinity } = {},
+) {
   const opportunities = dedupeItems(
     [...(baseResult?.opportunities ?? []), ...(fallbackResult?.opportunities ?? [])],
     (item) => normalize(`${item.category} ${item.title}`),
   );
+  const cappedOpportunities = limitItems(opportunities, perTranscriptLimit);
 
   return {
     ...(baseResult ?? {}),
     transcriptId: baseResult?.transcriptId ?? fallbackResult?.transcriptId,
-    opportunities,
-    acceptedCount: opportunities.length,
+    opportunities: cappedOpportunities,
+    acceptedCount: cappedOpportunities.length,
     llmAcceptedCount: fallbackResult?.opportunities?.length ?? 0,
+    llmLimitedByRemainingCap: Math.max(opportunities.length - cappedOpportunities.length, 0),
     llmDiagnostics: fallbackResult?.diagnostics ?? null,
   };
 }
@@ -158,12 +214,16 @@ export async function runFirefliesMeetingAgent({
   const baseOpportunityResultsByTranscript = indexTranscriptResults(
     opportunityResult.transcriptResults,
   );
+  const actionPerTranscriptLimit = normalizeLimit(perTranscriptLimit);
+  const opportunityTranscriptLimit = normalizeLimit(opportunityPerTranscriptLimit);
 
   const fallbackTranscripts = transcripts.filter((transcript) =>
     shouldUseLlmFallback({
       transcript,
       actionResult: baseActionResultsByTranscript.get(transcript.id),
       opportunityResult: baseOpportunityResultsByTranscript.get(transcript.id),
+      actionPerTranscriptLimit,
+      opportunityPerTranscriptLimit: opportunityTranscriptLimit,
     }),
   );
   const llmResult = await runFirefliesLlmFallbackAgent({
@@ -176,12 +236,14 @@ export async function runFirefliesMeetingAgent({
     mergeActionResult(
       baseActionResultsByTranscript.get(transcript.id),
       llmResultsByTranscript.get(transcript.id),
+      { perTranscriptLimit: actionPerTranscriptLimit },
     ),
   );
   const mergedOpportunityTranscriptResults = transcripts.map((transcript) =>
     mergeOpportunityResult(
       baseOpportunityResultsByTranscript.get(transcript.id),
       llmResultsByTranscript.get(transcript.id),
+      { perTranscriptLimit: opportunityTranscriptLimit },
     ),
   );
   const actionResultsByTranscript = indexTranscriptResults(mergedActionTranscriptResults);
@@ -196,11 +258,14 @@ export async function runFirefliesMeetingAgent({
     }),
   );
 
+  const mergedActions = mergedActionTranscriptResults.flatMap((result) => result.actions ?? []);
+  const mergedOpportunities = mergedOpportunityTranscriptResults.flatMap(
+    (result) => result.opportunities ?? [],
+  );
+
   return {
-    items: mergedActionTranscriptResults.flatMap((result) => result.actions ?? []),
-    opportunities: mergedOpportunityTranscriptResults.flatMap(
-      (result) => result.opportunities ?? [],
-    ),
+    items: limitItems(mergedActions, normalizeLimit(globalMaxItems), canBypassActionCap),
+    opportunities: limitItems(mergedOpportunities, normalizeLimit(opportunityGlobalMaxItems)),
     diagnostics: {
       actions: actionResult.diagnostics,
       opportunities: opportunityResult.diagnostics,

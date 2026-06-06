@@ -52,7 +52,8 @@ const CLASSIFIERS = [
     healthArea: "Project",
     ruleId: "PROJ-01",
     expectedLift: "+0.8 to +1.5 Project",
-    pattern: /\b(architecture|delivery|blocker|milestone|jira|timeline|implementation|technical)\b/i,
+    pattern:
+      /\b(architecture|delivery|blocker|milestone|jira|timeline|implementation|technical)\b/i,
   },
   {
     healthArea: "Relationship",
@@ -98,11 +99,50 @@ const CLASSIFIERS = [
   },
 ];
 
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "yahoo.com",
+  "hotmail.com",
+  "outlook.com",
+  "live.com",
+  "icloud.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+]);
+
 function normalize(value = "") {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+function normalizeEmail(value = "") {
+  return String(value).trim().toLowerCase();
+}
+
+function getEmailDomain(value = "") {
+  const domain = normalizeEmail(value).split("@")[1] ?? "";
+  return PUBLIC_EMAIL_DOMAINS.has(domain) ? "" : domain;
+}
+
+function getAccountEmailDomains(account) {
+  return [
+    account.primaryContact?.email,
+    ...(account.stakeholders ?? []).map((stakeholder) => stakeholder.email),
+  ]
+    .map(getEmailDomain)
+    .filter(Boolean);
+}
+
+function getTranscriptEmailDomains(transcript) {
+  return [
+    ...(transcript.participants ?? []),
+    ...(transcript.attendees ?? []).map((attendee) => attendee.email),
+  ]
+    .map(getEmailDomain)
+    .filter(Boolean);
 }
 
 function normalizeHistoryKey(value = "") {
@@ -147,23 +187,20 @@ function getTranscriptCandidateActions(transcript) {
   const explicitItems = splitActionItems(transcript.actionItems).filter(
     (item) => !NOTE_ONLY_PATTERN.test(item),
   );
-  if (explicitItems.length) {
-    return {
-      actionSource: "explicit_action_items",
-      candidates: explicitItems,
-      explicitCount: explicitItems.length,
-      summaryFallbackUsed: false,
-    };
-  }
-
   const summaryCandidates = deriveActionItemsFromSummary(
     [transcript.overview, transcript.shortSummary].filter(Boolean).join(" "),
   );
+  const summaryActionSource = explicitItems.length ? "summary_supplement" : "summary_derived";
+
   return {
-    actionSource: "summary_derived",
-    candidates: summaryCandidates,
-    explicitCount: 0,
-    summaryFallbackUsed: true,
+    actionSource: explicitItems.length ? "explicit_action_items" : "summary_derived",
+    candidates: [
+      ...explicitItems.map((text) => ({ text, actionSource: "explicit_action_items" })),
+      ...summaryCandidates.map((text) => ({ text, actionSource: summaryActionSource })),
+    ],
+    explicitCount: explicitItems.length,
+    summaryFallbackUsed: explicitItems.length === 0 && summaryCandidates.length > 0,
+    summarySupplementUsed: explicitItems.length > 0 && summaryCandidates.length > 0,
   };
 }
 
@@ -216,16 +253,31 @@ function getAccountRelevance(account, transcript, actionText) {
   }
 
   const matchedKeywords = keywords.filter((keyword) => haystack.includes(keyword));
+  const matchedDomains = getAccountEmailDomains(account).filter((domain) =>
+    getTranscriptEmailDomains(transcript).includes(domain),
+  );
   if (!matchedKeywords.length) {
-    return { relevant: false, matchStrength: "none", matchedKeywords: [] };
+    if (!matchedDomains.length) {
+      return { relevant: false, matchStrength: "none", matchedKeywords: [] };
+    }
+
+    return {
+      relevant: true,
+      matchStrength: "strong",
+      matchedKeywords: matchedDomains.map((domain) => `email domain:${domain}`),
+    };
   }
 
   const strongKeywords = new Set(getStrongAccountKeywords(account));
   const hasStrongMatch = matchedKeywords.some((keyword) => strongKeywords.has(keyword));
   return {
     relevant: true,
-    matchStrength: hasStrongMatch || matchedKeywords.length >= 2 ? "strong" : "partial",
-    matchedKeywords,
+    matchStrength:
+      hasStrongMatch || matchedKeywords.length >= 2 || matchedDomains.length ? "strong" : "partial",
+    matchedKeywords: [
+      ...matchedKeywords,
+      ...matchedDomains.map((domain) => `email domain:${domain}`),
+    ],
   };
 }
 
@@ -331,11 +383,12 @@ function hasConcreteActionShape(actionText) {
 
 function getConfidence(actionText, classifier, { actionSource, relevance, historyContext } = {}) {
   if (historyContext?.urgency === "R") return "High";
-  if (actionSource === "summary_derived") return "Low";
+  if (actionSource === "summary_derived" || actionSource === "summary_supplement") return "Low";
 
-  const hasDate = /\b(today|tomorrow|this week|next week|monday|tuesday|wednesday|thursday|friday|by\s+\w+|\d{1,2}\/\d{1,2})\b/i.test(
-    actionText,
-  );
+  const hasDate =
+    /\b(today|tomorrow|this week|next week|monday|tuesday|wednesday|thursday|friday|by\s+\w+|\d{1,2}\/\d{1,2})\b/i.test(
+      actionText,
+    );
   const hasOwner = /\b(kam|owner|sponsor|client|cto|cfo|vp|director|delivery|team)\b/i.test(
     actionText,
   );
@@ -374,7 +427,7 @@ function buildGuardedAction({
     historyContext,
   });
   const sourcePrefix =
-    actionSource === "summary_derived"
+    actionSource === "summary_derived" || actionSource === "summary_supplement"
       ? `fireflies-summary-${transcript.id}`
       : `fireflies-${transcript.id}`;
   return {
@@ -409,7 +462,7 @@ function buildGuardedAction({
         date: meetingDate,
         excerpt: actionText,
         reason:
-          actionSource === "summary_derived"
+          actionSource === "summary_derived" || actionSource === "summary_supplement"
             ? `The guarded agent derived this action from the meeting summary and mapped it to the global scoring rules.${historyContext ? ` ${historyContext.reason}` : ""}`
             : `The guarded agent kept this item because it is an explicit action mapped to the global scoring rules.${historyContext ? ` ${historyContext.reason}` : ""}`,
       },
@@ -432,6 +485,7 @@ export function runFirefliesMeetingActionAgent({
     transcriptsScanned: transcripts.length,
     rawActionItemsSeen: 0,
     summaryFallbacksUsed: 0,
+    summarySupplementsUsed: 0,
     summaryCandidatesSeen: 0,
     rejectedAsNoise: 0,
     rejectedAsUnrelated: 0,
@@ -443,21 +497,21 @@ export function runFirefliesMeetingActionAgent({
   };
 
   for (const transcript of transcripts) {
-    const {
-      actionSource,
-      candidates,
-      explicitCount,
-      summaryFallbackUsed,
-    } = getTranscriptCandidateActions(transcript);
+    const { actionSource, candidates, explicitCount, summaryFallbackUsed, summarySupplementUsed } =
+      getTranscriptCandidateActions(transcript);
     const transcriptAccepted = [];
 
     diagnostics.rawActionItemsSeen += explicitCount;
     if (summaryFallbackUsed) {
       diagnostics.summaryFallbacksUsed += 1;
-      diagnostics.summaryCandidatesSeen += candidates.length;
     }
+    if (summarySupplementUsed) diagnostics.summarySupplementsUsed += 1;
+    diagnostics.summaryCandidatesSeen += candidates.filter(
+      (candidate) => candidate.actionSource !== "explicit_action_items",
+    ).length;
 
-    for (const [index, actionText] of candidates.entries()) {
+    for (const [index, candidate] of candidates.entries()) {
+      const actionText = candidate.text;
       const key = normalize(actionText);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -490,7 +544,7 @@ export function runFirefliesMeetingActionAgent({
         transcript,
         actionText,
         index,
-        actionSource,
+        actionSource: candidate.actionSource,
         scoreHistory,
       });
       if (item) {
@@ -510,6 +564,7 @@ export function runFirefliesMeetingActionAgent({
       transcriptId: transcript.id,
       actionSource,
       summaryFallbackUsed,
+      summarySupplementUsed,
       candidateCount: candidates.length,
       acceptedCount: transcriptAccepted.length,
       actions: transcriptAccepted,

@@ -2,6 +2,7 @@ import {
   GLOBAL_ACTIVITY_RULE_MATRIX,
   evaluateActivityScoreRule,
 } from "@/services/activity-score-matrix";
+import { formatCurrency } from "@/data/kam-data";
 
 export const ACTIVITY_TAB_AREAS = [
   "KYC",
@@ -148,9 +149,16 @@ function getLowestMetric(block) {
   );
 }
 
-function getPotentialSlice(account, divisor = 3) {
-  const base = account.growthUpside || account.arr * 0.05 || 60_000;
-  return Math.max(25_000, Math.round(base / divisor));
+function formatKnownGrowthLift(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? `+${formatCurrency(parsed)} Growth`
+    : "+Growth potential";
+}
+
+function getKnownPotential(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
 }
 
 function isMeetingSource(source = "") {
@@ -300,7 +308,7 @@ function buildOpportunityEvidence(opportunity, account) {
         source: "Retention VS Growth",
         sourceType: "Retention VS Growth",
         date: "Current account state",
-        excerpt: `${account.whiteSpaceCount} white-space signals and ${account.growthUpside > 0 ? `up to $${Math.round(account.growthUpside / 1000)}k growth upside` : "active growth upside"} are already tracked on this account.`,
+        excerpt: `${account.whiteSpaceCount} white-space signals are already tracked on this account.`,
         reason: "This opportunity expands current footprint with the client.",
       }),
     );
@@ -332,12 +340,20 @@ function buildBackendOpportunities(account, opportunities) {
       title: opportunity.title,
       source: isMeetingSource(opportunity.source) ? "Fireflies meeting notes" : opportunity.source,
       priority: "Medium",
-      potentialValue: opportunity.potential ?? 0,
+      potentialValue: opportunity.potential ?? null,
       confidence: opportunity.confidence ?? "Medium",
       nextStep: opportunity.nextStep ?? "Validate fit with sponsor",
       healthArea,
-      approvalRequired: (opportunity.potential ?? 0) >= HIGH_VALUE_THRESHOLD,
-      approverRole: (opportunity.potential ?? 0) >= HIGH_VALUE_THRESHOLD ? "Head of KAM" : null,
+      approvalRequired:
+        Number.isFinite(Number(opportunity.potential)) &&
+        Number(opportunity.potential) > 0 &&
+        Number(opportunity.potential) >= HIGH_VALUE_THRESHOLD,
+      approverRole:
+        Number.isFinite(Number(opportunity.potential)) &&
+        Number(opportunity.potential) > 0 &&
+        Number(opportunity.potential) >= HIGH_VALUE_THRESHOLD
+          ? "Head of KAM"
+          : null,
       signalDate: opportunity.signalDate ?? "Recent",
     };
 
@@ -358,7 +374,7 @@ function buildWhitespaceOpportunity(account) {
     title: `${whiteSpace.service} expansion path for ${account.name}`,
     source: "Retention VS Growth",
     priority: account.whiteSpaceCount >= 3 ? "High" : "Medium",
-    potentialValue: getPotentialSlice(account, Math.max(account.whiteSpaceCount || 1, 2)),
+    potentialValue: null,
     confidence: account.whiteSpaceCount >= 3 ? "High" : "Medium",
     nextStep: `Validate ${whiteSpace.service} fit in the next client review`,
     healthArea: "Growth",
@@ -379,7 +395,7 @@ function buildWhitespaceOpportunity(account) {
         source: "Overview",
         sourceType: "Overview",
         date: "Today",
-        excerpt: `${account.whiteSpaceCount} whitespace items and ${account.growthUpside > 0 ? `$${Math.round(account.growthUpside / 1000)}k estimated growth upside` : "active growth potential"} exist on this account.`,
+        excerpt: `${account.whiteSpaceCount} whitespace items exist on this account.`,
         reason: "Growth opportunity is already supported by account context.",
       }),
     ],
@@ -390,6 +406,7 @@ function buildWhitespaceOpportunity(account) {
 
 function buildRetentionOpportunity(account, escalations) {
   const hasEscalation = (escalations ?? []).length > 0;
+  const arrValue = getKnownPotential(account.arr);
   if (!hasEscalation && account.retentionRisk === "Low" && account.renewalDays > 120) return null;
 
   return {
@@ -397,7 +414,8 @@ function buildRetentionOpportunity(account, escalations) {
     title: `Renewal recovery plan before the ${account.renewalDays}-day window tightens`,
     source: hasEscalation ? "Escalation + Retention" : "Overview",
     priority: account.retentionRisk === "High" || account.renewalDays <= 90 ? "High" : "Medium",
-    potentialValue: Math.max(Math.round(account.arr * 0.08), 50_000),
+    potentialValue: arrValue,
+    potentialValueLabel: arrValue ? `Protect ${formatCurrency(arrValue)} ARR` : "Not provided",
     confidence: hasEscalation ? "High" : "Medium",
     nextStep: "Prepare sponsor recovery plan and renewal talking points",
     healthArea: "Retention",
@@ -562,9 +580,7 @@ function buildMeetingActions(account, opportunities, escalations) {
         ? `Validate ${growthService.service} interest with the sponsor`
         : "Share roadmap summary and confirm next sponsor ask",
       healthArea: growthService ? "Growth" : "Relationship",
-      expectedLift: growthService
-        ? `+$${Math.round(getPotentialSlice(account, 4) / 1000)}k Growth`
-        : "+1.0 Relationship",
+      expectedLift: growthService ? "+Growth potential" : "+1.0 Relationship",
       confidence: growthService ? "Medium" : "High",
       nextStep: growthService
         ? `Turn the meeting signal into a scoped ${growthService.service} proposal`
@@ -596,7 +612,7 @@ function buildMeetingActions(account, opportunities, escalations) {
       expectedLift: openEscalation
         ? "+1.0 CSAT"
         : transcriptOpportunity
-          ? `+$${Math.round((transcriptOpportunity.potential ?? 0) / 1000)}k Growth`
+          ? formatKnownGrowthLift(transcriptOpportunity.potential)
           : "+Retention confidence",
       confidence: openEscalation ? "High" : "Medium",
       nextStep: openEscalation
@@ -680,7 +696,7 @@ function buildExistingEvidence(account, activity, area) {
       date: "Current account state",
       excerpt:
         area === "Growth"
-          ? `${account.whiteSpaceCount} whitespace items and ${account.growthUpside > 0 ? `$${Math.round(account.growthUpside / 1000)}k estimated upside` : "active upside"} support this activity.`
+          ? `${account.whiteSpaceCount} whitespace items support this activity.`
           : `${area} score is ${scoreSignal?.score ?? "n/a"}/10. ${summarizeMetrics(scoreSignal)}`,
       reason: `This existing activity is already aligned to ${area.toLowerCase()} improvement.`,
     }),
