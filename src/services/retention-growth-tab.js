@@ -3,6 +3,222 @@ import { formatCurrency } from "@/data/kam-data";
 const HIGH_VALUE_THRESHOLD = 100_000;
 const PRIORITY_ORDER = { High: 0, Medium: 1, Low: 2 };
 const SIGNAL_ORDER = { High: 0, Medium: 1, Low: 2 };
+const RETENTION_HEALTH_THRESHOLD = 75;
+const GROWTH_POTENTIAL_THRESHOLD = 75;
+const DATA_STALE_DAYS = 30;
+
+const RETENTION_SCORE_WEIGHTS = [
+  {
+    metric: "Overall account health",
+    weight: 25,
+    systemOfRecord: "accounts.health",
+    rationale:
+      "Carries the highest weight because retention starts with the blended account health already reviewed by the KAM team.",
+    missingHandling: "Missing health is treated as 0 in the score and flagged in data quality.",
+  },
+  {
+    metric: "Renewal proximity",
+    weight: 20,
+    systemOfRecord: "accounts.renewal_days",
+    rationale:
+      "Near-term renewals create immediate revenue-protection urgency, so renewal proximity is separated from generic health.",
+    missingHandling: "Missing renewal days use a neutral 50/100 renewal score and are flagged.",
+  },
+  {
+    metric: "Risk score",
+    weight: 15,
+    systemOfRecord: "health_scores + health_metrics / Risk",
+    rationale:
+      "Operational and competitive risk can override otherwise healthy relationship signals.",
+    missingHandling: "Missing risk score is treated as 0 in the score and flagged.",
+  },
+  {
+    metric: "Relationship score",
+    weight: 15,
+    systemOfRecord: "health_scores + health_metrics / Relationship",
+    rationale:
+      "Executive access and stakeholder cadence are leading indicators for renewal confidence.",
+    missingHandling: "Missing relationship score is treated as 0 in the score and flagged.",
+  },
+  {
+    metric: "CSAT score",
+    weight: 15,
+    systemOfRecord: "health_scores + health_metrics / CSAT",
+    rationale:
+      "Client sentiment is a direct churn-risk signal, especially when paired with renewal proximity.",
+    missingHandling: "Missing CSAT is treated as 0 in the score and flagged.",
+  },
+  {
+    metric: "Financial health",
+    weight: 10,
+    systemOfRecord: "health_scores + health_metrics / Financial",
+    rationale:
+      "Financial friction matters, but it is weighted lower than delivery, relationship, and sentiment signals.",
+    missingHandling: "Missing financial score is treated as 0 in the score and flagged.",
+  },
+];
+
+const GROWTH_SCORE_WEIGHTS = [
+  {
+    metric: "Whitespace services",
+    weight: 30,
+    systemOfRecord: "retention_growth.applicable + retention_growth.offered",
+    rationale:
+      "Whitespace gets the largest growth weight because services marked applicable-but-not-offered are the most actionable expansion path.",
+    missingHandling:
+      "If account white_space_count is missing, the app counts applicable-but-not-offered services.",
+  },
+  {
+    metric: "Growth upside ratio",
+    weight: 20,
+    systemOfRecord: "accounts.growth_upside + accounts.arr",
+    rationale:
+      "Commercial upside relative to current ARR shows whether the expansion is material for the account.",
+    missingHandling:
+      "Missing ARR or growth upside contributes 0 and is flagged when ARR is absent.",
+  },
+  {
+    metric: "Current service proof",
+    weight: 20,
+    systemOfRecord: "retention_growth.delivered/offered + tracking_note",
+    rationale:
+      "Live or positively tracked services prove credibility before pitching adjacent services.",
+    missingHandling: "No current service footprint uses a conservative proof score.",
+  },
+  {
+    metric: "Engagement cadence",
+    weight: 15,
+    systemOfRecord: "accounts.meetings_per_month",
+    rationale:
+      "Expansion depends on access; regular meetings indicate the KAM has a route to decision makers.",
+    missingHandling: "Missing cadence contributes 0 and is flagged.",
+  },
+  {
+    metric: "Pipeline signals",
+    weight: 15,
+    systemOfRecord: "opportunities + Fireflies-derived opportunities",
+    rationale:
+      "Explicit client interest from opportunities or meeting notes increases growth confidence without replacing whitespace.",
+    missingHandling: "No opportunities is valid and contributes 0 pipeline signal.",
+  },
+];
+
+const RETENTION_GROWTH_DATA_SOURCE_MAP = [
+  {
+    metric: "Current Revenue",
+    fields: "accounts.arr, fallback accounts.contract_value",
+    systemOfRecord: "accounts",
+    usage: "KPI display, revenue-at-risk, commercial guardrail limits",
+    missingHandling: "Show Not provided; do not estimate revenue.",
+    freshness: "Account commercial data should be reviewed monthly or on contract change.",
+  },
+  {
+    metric: "Revenue at Risk",
+    fields: "accounts.arr + retention signals + escalations + renewal window",
+    systemOfRecord: "accounts, escalations, opportunities",
+    usage: "Retention KPI and action table revenue impact",
+    missingHandling: "If ARR is missing, show 0/Not provided instead of estimating.",
+    freshness: "Refresh after escalation, renewal, Fireflies sync, or score update.",
+  },
+  {
+    metric: "Renewal Due",
+    fields: "accounts.renewal_days",
+    systemOfRecord: "accounts",
+    usage: "Retention health score and risk classification",
+    missingHandling: "Use neutral renewal score and flag missing renewal days.",
+    freshness: "Should be current against contract system.",
+  },
+  {
+    metric: "Retention Health",
+    fields:
+      "accounts.health, accounts.renewal_days, health_scores for Risk/Financial/Relationship/CSAT",
+    systemOfRecord: "accounts, health_scores, health_metrics",
+    usage: "2x2 matrix x-axis and retention status",
+    missingHandling: "Missing component scores are visible in data quality.",
+    freshness: "Recalculate after score marking or Fireflies risk signal.",
+  },
+  {
+    metric: "Growth Potential",
+    fields:
+      "accounts.white_space_count, accounts.growth_upside, accounts.meetings_per_month, retention_growth, opportunities",
+    systemOfRecord: "accounts, retention_growth, opportunities",
+    usage: "2x2 matrix y-axis and growth status",
+    missingHandling: "Use only known services/opportunities; do not invent whitespace.",
+    freshness: "Recalculate after opportunity, meeting sync, or service map update.",
+  },
+  {
+    metric: "Growth Pipeline",
+    fields: "opportunities.potential, retention_growth applicable services, accounts.growth_upside",
+    systemOfRecord: "opportunities, retention_growth, accounts",
+    usage: "Growth KPI and action table revenue impact",
+    missingHandling: "Only explicit known potential is shown; unknown values remain Not provided.",
+    freshness: "Refresh after opportunity creation or Fireflies sync.",
+  },
+  {
+    metric: "Current / Whitespace Services",
+    fields: "retention_growth.service, applicable, offered, delivered, tracking_note",
+    systemOfRecord: "retention_growth",
+    usage: "Current services, applicable growth, not-applicable list, offer recommendations",
+    missingHandling: "If no rows exist, service-driven growth is not generated.",
+    freshness: "Service map should be reviewed during QBR or account planning.",
+  },
+];
+
+const MATRIX_INTERACTION_SPEC = [
+  {
+    item: "X-axis",
+    rule: `Retention score: left means below ${RETENTION_HEALTH_THRESHOLD}/100, right means ${RETENTION_HEALTH_THRESHOLD}/100 or higher.`,
+  },
+  {
+    item: "Y-axis",
+    rule: `Growth score: top means ${GROWTH_POTENTIAL_THRESHOLD}/100 or higher, bottom means below ${GROWTH_POTENTIAL_THRESHOLD}/100.`,
+  },
+  {
+    item: "Bubble position",
+    rule: "The bubble position is calculated from the two scores, not manually dragged.",
+  },
+  {
+    item: "Quadrant action",
+    rule: "Each quadrant drives the account action table: protect, expand, maintain, or reassess.",
+  },
+  {
+    item: "Details",
+    rule: "The calculation panel below the matrix shows weights, source fields, missing data, and stale-data warnings.",
+  },
+];
+
+function getKnownPotential(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+}
+
+function hasKnownPotential(value) {
+  return getKnownPotential(value) !== null;
+}
+
+function hasKnownNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed);
+}
+
+function getKnownNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getArrValue(account) {
+  return getKnownPotential(account.arr) ?? getKnownPotential(account.contractValue);
+}
+
+function formatKnownCurrency(value) {
+  const knownValue = getKnownPotential(value);
+  return knownValue === null ? "Not provided" : formatCurrency(knownValue);
+}
+
+function formatDays(value) {
+  const knownValue = getKnownNumber(value);
+  return knownValue === null ? "Not provided" : `${Math.round(knownValue)} days`;
+}
 
 const SERVICE_CATALOGUE = {
   "Managed Kubernetes": {
@@ -253,22 +469,15 @@ function getServiceMeta(service) {
   );
 }
 
-function getPotentialBase(
-  account,
-  multiplier = 1,
-  divisor = Math.max(account.whiteSpaceCount || 1, 1),
-) {
-  const base = account.growthUpside || account.arr * 0.05 || 60_000;
-  return Math.max(25_000, Math.round((base / divisor) * multiplier));
-}
-
-function buildThresholds(account) {
-  const pocLimit = Math.min(Math.max(Math.round(account.arr * 0.015), 20_000), 80_000);
-  const serviceCreditLimit = Math.min(Math.max(Math.round(account.arr * 0.008), 8_000), 40_000);
-  const discountLimitPct = account.retentionRisk === "High" || account.renewalDays <= 90 ? 5 : 3;
-  const discountLimitValue = Math.round(account.arr * (discountLimitPct / 100));
-  const kamDraftLimit = Math.min(Math.max(Math.round(account.arr * 0.03), 50_000), 125_000);
-  const commercialLimit = Math.min(Math.max(Math.round(account.arr * 0.05), 75_000), 250_000);
+function buildThresholds(account, retentionRisk = account.retentionRisk) {
+  const arr = getArrValue(account) ?? 0;
+  const pocLimit = Math.min(Math.max(Math.round(arr * 0.015), 20_000), 80_000);
+  const serviceCreditLimit = Math.min(Math.max(Math.round(arr * 0.008), 8_000), 40_000);
+  const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
+  const discountLimitPct = retentionRisk === "High" || renewalDays <= 90 ? 5 : 3;
+  const discountLimitValue = Math.round(arr * (discountLimitPct / 100));
+  const kamDraftLimit = Math.min(Math.max(Math.round(arr * 0.03), 50_000), 125_000);
+  const commercialLimit = Math.min(Math.max(Math.round(arr * 0.05), 75_000), 250_000);
   const pocWeeks = account.contractType === "Retainer" ? 6 : 4;
 
   return {
@@ -436,13 +645,7 @@ function buildApplicableGrowth(account, opportunities, blockedServices) {
       const meta = getServiceMeta(serviceRecord.service);
       const relatedOpportunity = findServiceOpportunity(serviceRecord.service, meta, opportunities);
       const meetingRecord = findMeetingRecord(account, meta);
-      const potentialValue =
-        relatedOpportunity?.potential ??
-        getPotentialBase(
-          account,
-          meta.valueMultiplier,
-          Math.max(account.whiteSpaceCount || 1, 2 + index),
-        );
+      const potentialValue = getKnownPotential(relatedOpportunity?.potential);
       const confidence =
         relatedOpportunity?.confidence ??
         (/scheduled|pilot|reviewing|scoped|proposal/i.test(serviceRecord.trackingNote)
@@ -509,34 +712,41 @@ function buildApplicableGrowth(account, opportunities, blockedServices) {
         confidence,
         nextStep,
         offerType: meta.offerType,
-        approvalRequired: potentialValue >= HIGH_VALUE_THRESHOLD,
-        approverRole: potentialValue >= HIGH_VALUE_THRESHOLD ? "Head of KAM" : null,
+        approvalRequired:
+          hasKnownPotential(potentialValue) && potentialValue >= HIGH_VALUE_THRESHOLD,
+        approverRole:
+          hasKnownPotential(potentialValue) && potentialValue >= HIGH_VALUE_THRESHOLD
+            ? "Head of KAM"
+            : null,
         evidence,
       };
     })
-    .sort((left, right) => right.potentialValue - left.potentialValue);
+    .sort((left, right) => (right.potentialValue ?? 0) - (left.potentialValue ?? 0));
 }
 
 function buildRetentionSignals(account, escalations) {
   const signals = [];
   const openEscalation = (escalations ?? [])[0];
+  const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
+  const accountHealth = getKnownNumber(account.health);
   const competitorMetric = (account.riskScoring?.metrics ?? []).find((metric) =>
     /competitor/i.test(metric.label),
   );
 
-  if (account.renewalDays <= 120 || account.retentionRisk !== "Low") {
+  if (renewalDays <= 120) {
     signals.push({
       id: `retention-renewal-${account.id}`,
-      level: account.retentionRisk === "High" || account.renewalDays <= 60 ? "High" : "Medium",
+      level:
+        renewalDays <= 60 || (accountHealth !== null && accountHealth < 60) ? "High" : "Medium",
       title: "Renewal window is tightening",
-      reason: `Renewal is in ${account.renewalDays} days and retention risk is ${account.retentionRisk}.`,
+      reason: `Renewal is in ${Math.round(renewalDays)} days and account health is ${accountHealth ?? "not provided"}.`,
       recommendedAction: "Prepare a recovery and renewal plan before the next sponsor conversation",
       evidence: [
         buildEvidence({
           source: "Overview",
           sourceType: "Overview",
           date: "Today",
-          excerpt: `Renewal in ${account.renewalDays} days, health ${account.health}, retention risk ${account.retentionRisk}.`,
+          excerpt: `Renewal in ${Math.round(renewalDays)} days and health ${accountHealth ?? "not provided"}.`,
           reason: "Renewal timing and current health should shape the next retention move.",
         }),
       ],
@@ -564,12 +774,15 @@ function buildRetentionSignals(account, escalations) {
     });
   }
 
-  if (account.health <= 70 || (account.csat?.score ?? 10) < 8) {
+  if ((accountHealth !== null && accountHealth <= 70) || (account.csat?.score ?? 10) < 8) {
     signals.push({
       id: `retention-health-${account.id}`,
-      level: account.health <= 55 || (account.csat?.score ?? 10) < 7 ? "High" : "Medium",
+      level:
+        (accountHealth !== null && accountHealth <= 55) || (account.csat?.score ?? 10) < 7
+          ? "High"
+          : "Medium",
       title: "Health and sentiment need active recovery",
-      reason: `Account health is ${account.health} and CSAT is ${account.csat?.score ?? "n/a"}/10.`,
+      reason: `Account health is ${accountHealth ?? "not provided"} and CSAT is ${account.csat?.score ?? "n/a"}/10.`,
       recommendedAction:
         "Align a recovery story that addresses delivery sentiment and sponsor confidence",
       evidence: [
@@ -754,7 +967,7 @@ function buildOpportunityEvidence(account, opportunity, relatedGrowthItem, escal
         source: "Overview",
         sourceType: "Overview",
         date: "Today",
-        excerpt: `${account.whiteSpaceCount} whitespace signals and ${formatCurrency(account.growthUpside)} growth upside are already tracked for this account.`,
+        excerpt: `${account.whiteSpaceCount ?? 0} whitespace signals and ${formatKnownCurrency(account.growthUpside)} growth upside are already tracked for this account.`,
         reason: "Account context supports prioritizing relevant growth opportunities.",
       }),
     );
@@ -788,16 +1001,20 @@ function buildClientOpportunities(
       title: opportunity.title,
       source: isMeetingSource(opportunity.source) ? "Fireflies meeting notes" : opportunity.source,
       priority: "Medium",
-      potentialValue: opportunity.potential ?? 0,
+      potentialValue: getKnownPotential(opportunity.potential),
       confidence: opportunity.confidence ?? "Medium",
       nextStep: opportunity.nextStep || "Validate fit with the sponsor",
       category,
       actionLabel: relatedGrowthItem || category === "Growth" ? "Plan Pitch" : "Pursue",
       linkedService: relatedGrowthItem?.service ?? null,
       approvalRequired:
-        (opportunity.potential ?? 0) >= HIGH_VALUE_THRESHOLD || category === "Retention",
+        (hasKnownPotential(opportunity.potential) &&
+          getKnownPotential(opportunity.potential) >= HIGH_VALUE_THRESHOLD) ||
+        category === "Retention",
       approverRole:
-        (opportunity.potential ?? 0) >= HIGH_VALUE_THRESHOLD || category === "Retention"
+        (hasKnownPotential(opportunity.potential) &&
+          getKnownPotential(opportunity.potential) >= HIGH_VALUE_THRESHOLD) ||
+        category === "Retention"
           ? "Head of KAM"
           : null,
     };
@@ -833,14 +1050,15 @@ function buildClientOpportunities(
   if (retentionSignals[0]) {
     const signal = retentionSignals[0];
     const title = `Retention recovery plan for ${account.name}`;
+    const arrValue = getArrValue(account);
     if (!seen.has(normalize(title))) {
       items.push({
         id: `client-opp-retention-${account.id}`,
         title,
         source: "Retention signals",
         priority: signal.level === "High" ? "High" : "Medium",
-        potentialValue: Math.max(Math.round(account.arr * 0.04), 40_000),
-        potentialValueLabel: `Protect ${formatCurrency(account.arr)} ARR`,
+        potentialValue: arrValue,
+        potentialValueLabel: arrValue ? `Protect ${formatCurrency(arrValue)} ARR` : "Not provided",
         confidence: signal.level === "High" ? "High" : "Medium",
         nextStep: signal.recommendedAction,
         category: "Retention",
@@ -869,8 +1087,9 @@ function buildOfferFromGrowthItem(account, growthItem, thresholds) {
       ? `${thresholds.pocWeeks}-week ${growthItem.service} POC`
       : `${growthItem.service} expansion offer`;
   const approvalRequired =
-    growthItem.potentialValue > thresholds.kamDraftLimit ||
-    growthItem.potentialValue > thresholds.pocLimit;
+    hasKnownPotential(growthItem.potentialValue) &&
+    (growthItem.potentialValue > thresholds.kamDraftLimit ||
+      growthItem.potentialValue > thresholds.pocLimit);
 
   return {
     id: `offer-${growthItem.id}`,
@@ -891,9 +1110,10 @@ function buildOfferFromGrowthItem(account, growthItem, thresholds) {
 }
 
 function buildOfferFromOpportunity(account, opportunity, thresholds) {
+  const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
   const offerType =
     opportunity.category === "Retention"
-      ? account.renewalDays <= 90
+      ? renewalDays <= 90
         ? "Renewal"
         : "Service Credit"
       : /poc|pilot|ai/i.test(opportunity.title)
@@ -903,7 +1123,8 @@ function buildOfferFromOpportunity(account, opportunity, thresholds) {
     opportunity.approvalRequired ||
     offerType === "Renewal" ||
     offerType === "Service Credit" ||
-    (opportunity.potentialValue ?? 0) > thresholds.kamDraftLimit;
+    (hasKnownPotential(opportunity.potentialValue) &&
+      opportunity.potentialValue > thresholds.kamDraftLimit);
   const title =
     offerType === "POC"
       ? `${thresholds.pocWeeks}-week ${opportunity.linkedService || "targeted"} POC`
@@ -918,11 +1139,10 @@ function buildOfferFromOpportunity(account, opportunity, thresholds) {
     title,
     offerType,
     reason: opportunity.category === "Retention" ? opportunity.nextStep : opportunity.title,
-    potentialValue:
-      offerType === "Service Credit" ? thresholds.serviceCreditLimit : opportunity.potentialValue,
+    potentialValue: opportunity.potentialValue,
     potentialValueLabel:
       offerType === "Service Credit"
-        ? `${formatCurrency(thresholds.serviceCreditLimit)} service-credit ceiling`
+        ? (opportunity.potentialValueLabel ?? "Not provided")
         : opportunity.potentialValueLabel,
     confidence: opportunity.confidence,
     nextStep: opportunity.nextStep,
@@ -976,20 +1196,20 @@ function buildRecommendedOffers(
     }
   } else if (retentionSignals[0]) {
     const signal = retentionSignals[0];
+    const arrValue = getArrValue(account);
+    const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
     const offer = {
       id: `offer-retention-${account.id}`,
       title: `Retention protection package for ${account.name}`,
-      offerType: account.renewalDays <= 90 ? "Renewal" : "Service Credit",
+      offerType: renewalDays <= 90 ? "Renewal" : "Service Credit",
       reason: signal.reason,
-      potentialValue: thresholds.serviceCreditLimit,
+      potentialValue: renewalDays <= 90 ? arrValue : null,
       potentialValueLabel:
-        account.renewalDays <= 90
-          ? `Protect ${formatCurrency(account.arr)} ARR`
-          : `${formatCurrency(thresholds.serviceCreditLimit)} service-credit ceiling`,
+        renewalDays <= 90 && arrValue ? `Protect ${formatCurrency(arrValue)} ARR` : "Not provided",
       confidence: signal.level === "High" ? "High" : "Medium",
       nextStep: signal.recommendedAction,
       allowedValue:
-        account.renewalDays <= 90
+        renewalDays <= 90
           ? `Discount up to ${thresholds.discountLimitPct}% (${formatCurrency(thresholds.discountLimitValue)})`
           : `Up to ${formatCurrency(thresholds.serviceCreditLimit)}`,
       approvalRequired: true,
@@ -1004,7 +1224,9 @@ function buildRecommendedOffers(
   return offers.slice(0, 4);
 }
 
-function buildCommercialGuardrails(account, thresholds) {
+function buildCommercialGuardrails(account, thresholds, retentionRisk = account.retentionRisk) {
+  const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
+
   return {
     summary: {
       discountLimit: `${thresholds.discountLimitPct}% (${formatCurrency(thresholds.discountLimitValue)})`,
@@ -1064,16 +1286,532 @@ function buildCommercialGuardrails(account, thresholds) {
       },
     ],
     narrative:
-      account.renewalDays <= 90 || account.retentionRisk !== "Low"
+      renewalDays <= 90 || retentionRisk !== "Low"
         ? "Renewal pressure is active, so any discount, service credit, or larger commercial move should be reviewed by Head of KAM."
         : "Growth offers can be drafted by the KAM, but larger value changes still need Head of KAM review.",
   };
 }
 
+function clamp(value, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function toScore100(value) {
+  const score = Number(value ?? 0);
+  if (!Number.isFinite(score)) return 0;
+  return score <= 10 ? score * 10 : score;
+}
+
+function getRenewalScore(renewalDays) {
+  const days = getKnownNumber(renewalDays);
+  if (days === null) return 50;
+  if (days <= 30) return 25;
+  if (days <= 60) return 45;
+  if (days <= 90) return 60;
+  return 85;
+}
+
+function getRetentionHealthScore(account) {
+  const healthScore = toScore100(account.health);
+  const csatScore = toScore100(account.csat?.score);
+  const riskScore = toScore100(account.riskScoring?.score);
+  const relationshipScore = toScore100(account.relationshipHealth?.score);
+  const renewalScore = getRenewalScore(account.renewalDays);
+
+  return clamp(
+    Math.round(
+      healthScore * 0.25 +
+        renewalScore * 0.2 +
+        riskScore * 0.15 +
+        toScore100(account.financialHealth?.score) * 0.1 +
+        relationshipScore * 0.15 +
+        csatScore * 0.15,
+    ),
+  );
+}
+
+function getRetentionStatus(score) {
+  if (score >= 75) return "Healthy";
+  if (score >= 50) return "Watchlist";
+  return "At Risk";
+}
+
+function getGrowthPotentialScore(account, applicableGrowth, opportunities, currentServices) {
+  const whitespaceScore = clamp((account.whiteSpaceCount ?? applicableGrowth.length) * 18, 0, 100);
+  const arr = getArrValue(account) ?? 0;
+  const upsideRatio = arr > 0 ? clamp(((account.growthUpside ?? 0) / arr) * 100, 0, 100) : 0;
+  const pipelineScore = clamp((opportunities ?? []).length * 20, 0, 100);
+  const serviceProofScore = currentServices.some((service) =>
+    isPositiveTracking(service.trackingNote),
+  )
+    ? 85
+    : currentServices.length
+      ? 60
+      : 35;
+  const engagementScore = clamp((account.meetingsPerMonth ?? 0) * 18, 0, 100);
+
+  return clamp(
+    Math.round(
+      whitespaceScore * 0.3 +
+        upsideRatio * 0.2 +
+        serviceProofScore * 0.2 +
+        engagementScore * 0.15 +
+        pipelineScore * 0.15,
+    ),
+  );
+}
+
+function buildScoringWeights() {
+  return {
+    retention: RETENTION_SCORE_WEIGHTS,
+    growth: GROWTH_SCORE_WEIGHTS,
+  };
+}
+
+function getDataCheckStatus(isAvailable, isStale = false) {
+  if (!isAvailable) return "Missing";
+  if (isStale) return "Stale";
+  return "Ready";
+}
+
+function getDaysSince(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function buildDataQuality({ account, opportunities, escalations, currentServices }) {
+  const lastTouchAge = getDaysSince(account.lastTouch);
+  const calculatedAge = getDaysSince(account.retentionGrowthCalculatedAt);
+  const serviceCount = account.retentionGrowth?.length ?? 0;
+  const checks = [
+    {
+      label: "Revenue / ARR",
+      source: "accounts.arr",
+      available: getArrValue(account) !== null,
+      stale: false,
+      handling: "Revenue is never estimated; missing value displays as Not provided.",
+    },
+    {
+      label: "Renewal date window",
+      source: "accounts.renewal_days",
+      available: hasKnownNumber(account.renewalDays),
+      stale: false,
+      handling: "Missing renewal days use neutral score impact and are flagged.",
+    },
+    {
+      label: "Health score set",
+      source: "accounts.health + health_scores",
+      available:
+        hasKnownNumber(account.health) &&
+        hasKnownNumber(account.csat?.score) &&
+        hasKnownNumber(account.riskScoring?.score) &&
+        hasKnownNumber(account.relationshipHealth?.score) &&
+        hasKnownNumber(account.financialHealth?.score),
+      stale: false,
+      handling: "Missing score components reduce confidence and appear in this checklist.",
+    },
+    {
+      label: "Service / whitespace map",
+      source: "retention_growth",
+      available: serviceCount > 0,
+      stale: false,
+      handling: "No service map means no service-driven growth recommendations are generated.",
+    },
+    {
+      label: "Opportunity pipeline",
+      source: "opportunities",
+      available: (opportunities ?? []).length > 0,
+      stale: false,
+      handling: "No opportunities is valid; pipeline score contributes 0 instead of guessing.",
+    },
+    {
+      label: "Escalation feed",
+      source: "escalations",
+      available: Array.isArray(escalations),
+      stale: false,
+      handling: "Open escalations influence retention risk when present.",
+    },
+    {
+      label: "Engagement cadence",
+      source: "accounts.meetings_per_month",
+      available: hasKnownNumber(account.meetingsPerMonth),
+      stale: lastTouchAge !== null && lastTouchAge > DATA_STALE_DAYS,
+      handling: `Last touch older than ${DATA_STALE_DAYS} days is treated as stale context.`,
+    },
+    {
+      label: "Calculated scoring snapshot",
+      source: "accounts.retention_growth_calculated_at",
+      available: Boolean(account.retentionGrowthCalculatedAt),
+      stale: calculatedAge !== null && calculatedAge > 7,
+      handling:
+        "The UI recalculates live; persisted account scoring should refresh after key events.",
+    },
+  ];
+
+  const missing = checks.filter((check) => !check.available);
+  const stale = checks.filter((check) => check.available && check.stale);
+  const status = missing.length ? "Needs data" : stale.length ? "Stale review" : "Ready";
+
+  return {
+    status,
+    summary:
+      status === "Ready"
+        ? "All critical Retention vs Growth inputs are present."
+        : status === "Stale review"
+          ? `${stale.length} input${stale.length === 1 ? "" : "s"} should be refreshed.`
+          : `${missing.length} input${missing.length === 1 ? "" : "s"} missing; calculations remain conservative.`,
+    checks: checks.map((check) => ({
+      ...check,
+      status: getDataCheckStatus(check.available, check.stale),
+    })),
+    missing,
+    stale,
+    currentServiceCount: currentServices.length,
+  };
+}
+
+function getGrowthStatus(score) {
+  if (score >= 75) return "High Growth Potential";
+  if (score >= 50) return "Medium Growth Potential";
+  return "Low Growth Potential";
+}
+
+function getGrowthLevel(score) {
+  if (score >= 75) return "High";
+  if (score >= 50) return "Medium";
+  return "Low";
+}
+
+function getCalculatedRetentionRisk({ account, retentionSignals, opportunities, retentionScore }) {
+  const hasEscalationSignal = retentionSignals.some((signal) => /escalation/i.test(signal.id));
+  const hasCriticalMeetingSignal = (opportunities ?? []).some((opportunity) =>
+    /churn|renewal doubt|renewal risk|contract risk|not renew|cancel|terminate/i.test(
+      `${opportunity.title} ${opportunity.nextStep} ${opportunity.source}`,
+    ),
+  );
+  const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
+  const accountHealth = getKnownNumber(account.health) ?? 0;
+  const csatScore = Number(account.csat?.score ?? 10);
+  const riskScore = Number(account.riskScoring?.score ?? 10);
+  const projectScore = Number(account.projectHealth?.score ?? 10);
+  const relationshipScore = Number(account.relationshipHealth?.score ?? 10);
+  const competitorMetric = (account.riskScoring?.metrics ?? []).find((metric) =>
+    /competitor/i.test(metric.label),
+  );
+
+  const criticalSignals = [
+    renewalDays <= 60 && accountHealth < 75,
+    csatScore < 7,
+    riskScore < 6,
+    projectScore < 6,
+    hasEscalationSignal,
+    hasCriticalMeetingSignal,
+  ].filter(Boolean);
+
+  const warningSignals = [
+    renewalDays <= 120,
+    accountHealth < 75,
+    csatScore < 8,
+    riskScore < 7.5,
+    projectScore < 7.5,
+    relationshipScore < 7.5,
+    (account.meetingsPerMonth ?? 0) < 1,
+    competitorMetric && competitorMetric.value <= 6,
+  ].filter(Boolean);
+
+  if (retentionScore < 50 || criticalSignals.length) return "High";
+  if (retentionScore < 75 || warningSignals.length >= 2) return "Medium";
+  return "Low";
+}
+
+function getRevenueAtRisk(account, retentionSignals, retentionRisk) {
+  if (!retentionSignals.length) return 0;
+  const arr = getArrValue(account) ?? 0;
+  const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
+  if (retentionRisk === "High" || renewalDays <= 60) return arr;
+  return 0;
+}
+
+function getGrowthPipelineValue(account, applicableGrowth, recommendedOffers) {
+  const offerValue = recommendedOffers.reduce(
+    (total, offer) => total + (offer.potentialValue ?? 0),
+    0,
+  );
+  const whitespaceValue = applicableGrowth.reduce(
+    (total, item) => total + (item.potentialValue ?? 0),
+    0,
+  );
+  return Math.max(offerValue, whitespaceValue, account.growthUpside ?? 0);
+}
+
+function buildMatrixPosition(retentionScore, growthScore) {
+  const retentionRiskHigh = retentionScore < RETENTION_HEALTH_THRESHOLD;
+  const growthHigh = growthScore >= GROWTH_POTENTIAL_THRESHOLD;
+  const x = Math.round(clamp(18 + retentionScore * 0.64, 18, 82));
+  const y = Math.round(clamp(86 - growthScore * 0.68, 18, 82));
+
+  if (!retentionRiskHigh && growthHigh) {
+    return {
+      quadrant: "Expand Aggressively",
+      description: "Healthy account with strong expansion potential.",
+      recommendedAction: "Prioritize upsell/cross-sell and create an expansion plan.",
+      x,
+      y,
+    };
+  }
+  if (retentionRiskHigh && growthHigh) {
+    return {
+      quadrant: "Protect & Recover",
+      description: "At-risk account with meaningful growth value.",
+      recommendedAction: "Fix retention blockers first, then reopen the growth motion.",
+      x,
+      y,
+    };
+  }
+  if (!retentionRiskHigh && !growthHigh) {
+    return {
+      quadrant: "Maintain & Nurture",
+      description: "Stable account with limited near-term expansion signal.",
+      recommendedAction: "Keep engagement healthy and monitor for new whitespace.",
+      x,
+      y,
+    };
+  }
+  return {
+    quadrant: "Reassess / Monitor",
+    description: "At-risk account with limited growth upside.",
+    recommendedAction: "Resolve critical issues and reassess account strategy.",
+    x,
+    y,
+  };
+}
+
+function formatPotentialValue(item) {
+  if (item.potentialValueLabel) return item.potentialValueLabel;
+  const knownPotential = getKnownPotential(item.potentialValue);
+  return knownPotential === null ? "Not provided" : `+${formatCurrency(knownPotential)}`;
+}
+
+function buildDashboardActionRows({
+  account,
+  retentionSignals,
+  growthSignals,
+  applicableGrowth,
+  recommendedOffers,
+  dashboard,
+}) {
+  const rows = [];
+
+  if (retentionSignals[0]) {
+    rows.push({
+      id: `action-retention-${account.id}`,
+      focus: "Retention",
+      score: dashboard.retentionScore,
+      risk: dashboard.riskLevel,
+      revenueImpact: dashboard.revenueAtRiskLabel,
+      recommendedAction: retentionSignals[0].recommendedAction,
+      status: "Open",
+    });
+  }
+
+  if (applicableGrowth[0]) {
+    rows.push({
+      id: `action-growth-${applicableGrowth[0].id}`,
+      focus: "Growth",
+      score: dashboard.growthScore,
+      risk: dashboard.growthLevel,
+      revenueImpact: formatPotentialValue(applicableGrowth[0]),
+      recommendedAction: applicableGrowth[0].nextStep,
+      status: "Open",
+    });
+  }
+
+  if (recommendedOffers[0]) {
+    rows.push({
+      id: `action-offer-${recommendedOffers[0].id}`,
+      focus: "Offer",
+      score: dashboard.growthScore,
+      risk: recommendedOffers[0].approvalRequired ? "Approval Needed" : "Ready",
+      revenueImpact: formatPotentialValue(recommendedOffers[0]),
+      recommendedAction: recommendedOffers[0].nextStep,
+      status: "Draft Ready",
+    });
+  }
+
+  if (growthSignals[0] && !rows.some((row) => row.focus === "Growth")) {
+    rows.push({
+      id: `action-growth-signal-${growthSignals[0].id}`,
+      focus: "Growth",
+      score: dashboard.growthScore,
+      risk: growthSignals[0].level,
+      revenueImpact: dashboard.growthPipelineLabel,
+      recommendedAction: growthSignals[0].recommendedAction,
+      status: "Open",
+    });
+  }
+
+  if (!rows.length) {
+    rows.push({
+      id: `action-maintain-${account.id}`,
+      focus: "Maintain",
+      score: dashboard.retentionScore,
+      risk: dashboard.riskLevel,
+      revenueImpact: formatKnownCurrency(account.arr ?? account.contractValue),
+      recommendedAction: "Maintain quarterly engagement and monitor for new signals.",
+      status: "Monitor",
+    });
+  }
+
+  return rows.slice(0, 5);
+}
+
+function buildDashboardSummary({
+  account,
+  opportunities,
+  escalations,
+  currentServices,
+  applicableGrowth,
+  retentionSignals,
+  growthSignals,
+  recommendedOffers,
+}) {
+  const retentionScore = getRetentionHealthScore(account);
+  const growthScore = getGrowthPotentialScore(
+    account,
+    applicableGrowth,
+    opportunities,
+    currentServices,
+  );
+  const riskLevel = getCalculatedRetentionRisk({
+    account,
+    retentionSignals,
+    opportunities,
+    retentionScore,
+  });
+  const revenueAtRisk = getRevenueAtRisk(account, retentionSignals, riskLevel);
+  const growthPipeline = getGrowthPipelineValue(account, applicableGrowth, recommendedOffers);
+  const matrix = buildMatrixPosition(retentionScore, growthScore);
+  const growthLevel = getGrowthLevel(growthScore);
+  const scoringWeights = buildScoringWeights();
+  const dataQuality = buildDataQuality({ account, opportunities, escalations, currentServices });
+  const renewalDays = getKnownNumber(account.renewalDays);
+
+  const dashboard = {
+    retentionScore,
+    retentionStatus: getRetentionStatus(retentionScore),
+    growthScore,
+    growthStatus: getGrowthStatus(growthScore),
+    riskLevel,
+    growthLevel,
+    revenueAtRisk,
+    revenueAtRiskLabel: formatCurrency(revenueAtRisk),
+    growthPipeline,
+    growthPipelineLabel: formatCurrency(growthPipeline),
+    matrix,
+    scoringWeights,
+    dataSourceMap: RETENTION_GROWTH_DATA_SOURCE_MAP,
+    matrixSpec: MATRIX_INTERACTION_SPEC,
+    dataQuality,
+    calculationNotes: [
+      "Retention and growth are calculated separately; high health does not automatically mean growth unless whitespace, engagement, service proof, or pipeline signals exist.",
+      "Revenue and opportunity potential are not estimated by the system; only known ARR, contract value, growth upside, or explicit opportunity potential are shown.",
+      "Missing inputs are surfaced in the data quality checklist so the KAM can fix source data before relying on the recommendation.",
+    ],
+    kpis: [
+      {
+        label: "Current Revenue",
+        value: formatKnownCurrency(account.arr ?? account.contractValue),
+        hint: "Existing ARR under management",
+      },
+      {
+        label: "Revenue at Risk",
+        value: formatCurrency(revenueAtRisk),
+        hint: retentionSignals[0]?.title ?? "No material risk signal",
+      },
+      {
+        label: "Renewal Due",
+        value: formatDays(account.renewalDays),
+        hint:
+          renewalDays === null
+            ? "Missing renewal date"
+            : renewalDays <= 90
+              ? "Needs retention focus"
+              : "Outside urgent window",
+      },
+      {
+        label: "Growth Pipeline",
+        value: formatCurrency(growthPipeline),
+        hint: `${applicableGrowth.length} whitespace services`,
+      },
+      {
+        label: "Retention Health",
+        value: `${retentionScore}/100`,
+        hint: getRetentionStatus(retentionScore),
+      },
+      {
+        label: "Growth Potential",
+        value: `${growthScore}/100`,
+        hint: getGrowthStatus(growthScore),
+      },
+    ],
+    retentionInsights: [
+      {
+        label: "Main risk",
+        value: retentionSignals[0]?.title ?? "No active retention alarm",
+      },
+      {
+        label: "Recommended action",
+        value: retentionSignals[0]?.recommendedAction ?? matrix.recommendedAction,
+      },
+      {
+        label: "CSAT",
+        value: `${account.csat?.score ?? "n/a"}/10`,
+      },
+      {
+        label: "Open escalations",
+        value: `${retentionSignals.filter((signal) => /escalation/i.test(signal.id)).length}`,
+      },
+    ],
+    growthInsights: [
+      {
+        label: "Top growth move",
+        value: applicableGrowth[0]?.service ?? growthSignals[0]?.title ?? "Monitor whitespace",
+      },
+      {
+        label: "Recommended action",
+        value:
+          applicableGrowth[0]?.nextStep ??
+          growthSignals[0]?.recommendedAction ??
+          matrix.recommendedAction,
+      },
+      {
+        label: "Whitespace",
+        value: `${applicableGrowth.length} services ready`,
+      },
+      {
+        label: "Recommended offers",
+        value: `${recommendedOffers.length} active`,
+      },
+    ],
+  };
+
+  dashboard.actionRows = buildDashboardActionRows({
+    account,
+    retentionSignals,
+    growthSignals,
+    applicableGrowth,
+    recommendedOffers,
+    dashboard,
+  });
+
+  return dashboard;
+}
+
 export function buildRetentionGrowthTabModel({ account, opportunities, escalations }) {
   const blockedItems = buildNotApplicable(account);
   const blockedServices = new Set(blockedItems.map((item) => item.service));
-  const thresholds = buildThresholds(account);
   const currentServices = buildCurrentServices(account, opportunities);
   const applicableGrowth = buildApplicableGrowth(account, opportunities, blockedServices);
   const retentionSignals = buildRetentionSignals(account, escalations);
@@ -1091,6 +1829,13 @@ export function buildRetentionGrowthTabModel({ account, opportunities, escalatio
     blockedServices,
     escalations,
   );
+  const calculatedRetentionRisk = getCalculatedRetentionRisk({
+    account,
+    retentionSignals,
+    opportunities,
+    retentionScore: getRetentionHealthScore(account),
+  });
+  const thresholds = buildThresholds(account, calculatedRetentionRisk);
   const recommendedOffers = buildRecommendedOffers(
     account,
     applicableGrowth,
@@ -1098,9 +1843,20 @@ export function buildRetentionGrowthTabModel({ account, opportunities, escalatio
     retentionSignals,
     thresholds,
   );
-  const guardrails = buildCommercialGuardrails(account, thresholds);
+  const guardrails = buildCommercialGuardrails(account, thresholds, calculatedRetentionRisk);
+  const dashboard = buildDashboardSummary({
+    account,
+    opportunities,
+    escalations,
+    currentServices,
+    applicableGrowth,
+    retentionSignals,
+    growthSignals,
+    recommendedOffers,
+  });
 
   return {
+    dashboard,
     currentServices,
     applicableGrowth,
     opportunities: opportunityItems,
