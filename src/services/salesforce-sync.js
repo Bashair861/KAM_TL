@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { ensureContractRenewalNotifications } from "@/services/notifications";
 
 const ACCOUNT_SYNC_COLUMNS = new Set([
   "industry",
@@ -285,6 +286,12 @@ export const syncSalesforceMappedFieldsServer = createServerFn({ method: "POST" 
     await syncContractReferences(admin, data.accountId, accountUpdates, contractUpdates);
     await syncRetentionGrowth(admin, data.accountId, retentionGrowthUpdates);
     await syncStakeholders(admin, data.accountId, stakeholderUpdates);
+    if (
+      Object.prototype.hasOwnProperty.call(accountUpdates, "renewal_date") ||
+      Object.prototype.hasOwnProperty.call(contractUpdates, "renewal_date")
+    ) {
+      await ensureContractRenewalNotifications(admin).catch(() => null);
+    }
     return {
       accountFieldCount: Object.keys(accountUpdates).length,
       contractFieldCount: Object.keys(contractUpdates).length,

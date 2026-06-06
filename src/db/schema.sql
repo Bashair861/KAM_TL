@@ -220,15 +220,27 @@ create table if not exists opportunities (
 
 -- ── notifications ─────────────────────────────────────────────────────────────
 create table if not exists notifications (
-  id         text primary key,
-  title      text not null,
-  body       text,
-  account_id text references accounts(id) on delete set null,
-  time       text,
-  type       notif_type not null default 'info',
-  read       boolean not null default false,
-  created_at timestamptz default now()
+  id                   text primary key,
+  recipient_profile_id uuid references profiles(id) on delete cascade,
+  notification_key     text,
+  badge_key            text,
+  target_path          text,
+  title                text not null,
+  body                 text,
+  account_id           text references accounts(id) on delete set null,
+  time                 text,
+  type                 notif_type not null default 'info',
+  read                 boolean not null default false,
+  read_at              timestamptz,
+  created_at           timestamptz default now()
 );
+
+create unique index if not exists notifications_recipient_key_idx
+  on notifications (recipient_profile_id, notification_key);
+create index if not exists notifications_recipient_read_idx
+  on notifications (recipient_profile_id, read_at, created_at desc);
+create index if not exists notifications_recipient_badge_idx
+  on notifications (recipient_profile_id, badge_key, read_at);
 
 -- ── RLS: disable for now (anon key has full access for seeding) ───────────────
 alter table profiles               disable row level security;

@@ -6,6 +6,13 @@ import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
 import { applySowFieldsServer } from "@/services/sow-upload";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
+import { markNotificationsReadServer } from "@/services/notification-read";
+import {
+  createAccountAssignmentNotifications,
+  createActionItemNotifications,
+  ensureContractRenewalNotifications,
+  isNotificationRole,
+} from "@/services/notifications";
 // ─── mappers ─────────────────────────────────────────────────────────────────
 function mapFlatAccount(r) {
   return {
@@ -694,6 +701,11 @@ export async function createAccountActionItemTask(input) {
 
   const { data, error } = await supabase.from("tasks").insert(row).select("*").single();
   if (error) throw error;
+  await createActionItemNotifications(supabase, {
+    accountId,
+    actionItemId: data.id,
+    title,
+  }).catch(() => null);
   await logAccountChanges(
     accountId,
     [
@@ -1062,11 +1074,22 @@ export async function deleteAccount(accountId) {
 }
 // --- update account KAM assignment -------------------------------------------
 export async function updateAccountKam(accountId, kamId) {
+  const { data: current, error: currentError } = await supabase
+    .from("accounts")
+    .select("assigned_kam_id")
+    .eq("id", accountId)
+    .maybeSingle();
+  if (currentError) throw currentError;
+
   const { error } = await supabase
     .from("accounts")
     .update({ assigned_kam_id: kamId })
     .eq("id", accountId);
   if (error) throw error;
+
+  if (kamId && current?.assigned_kam_id !== kamId) {
+    await createAccountAssignmentNotifications(supabase, { accountId, kamId }).catch(() => null);
+  }
 }
 // --- update health block (score + metrics + kpi checkbox state) --------------
 export async function updateHealthBlock(accountId, area, score, metricUpdates, kpiData) {
@@ -1389,6 +1412,17 @@ export async function createAccount(data) {
     })),
   );
   if (hsError) throw hsError;
+
+  if (data.assignedKamId) {
+    await createAccountAssignmentNotifications(supabase, {
+      accountId: data.id,
+      kamId: data.assignedKamId,
+    }).catch(() => null);
+  }
+
+  if (data.contractRenewalDate) {
+    await ensureContractRenewalNotifications(supabase).catch(() => null);
+  }
 }
 
 // --- update account KYC fields -----------------------------------------------
@@ -1411,6 +1445,13 @@ export async function updateAccountKyc(accountId, updates) {
       .from("contract_details")
       .upsert(contractUpdates, { onConflict: "account_id" });
     if (contractError) throw contractError;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(updates, "renewal_date") ||
+    Object.prototype.hasOwnProperty.call(updates, "contract_renewal_date")
+  ) {
+    await ensureContractRenewalNotifications(supabase).catch(() => null);
   }
 }
 export async function applySowFields(accountId, fields) {
@@ -2393,6 +2434,11 @@ export async function createActivityRuleActivity(input) {
     .select("*")
     .single();
   if (error) throw error;
+  await createActionItemNotifications(supabase, {
+    accountId: input.accountId,
+    actionItemId: data.id,
+    title: data.title,
+  }).catch(() => null);
   return mapActivityRuleActivity(data);
 }
 
@@ -2461,6 +2507,15 @@ export async function createActivityRuleActivitiesFromMeetingActions({
 
   const { data, error } = await supabase.from("activity_rule_activities").insert(rows).select("*");
   if (error) throw error;
+  await Promise.all(
+    (data ?? []).map((row) =>
+      createActionItemNotifications(supabase, {
+        accountId,
+        actionItemId: row.id,
+        title: row.title,
+      }).catch(() => null),
+    ),
+  );
   const savedActivities = (data ?? []).map((row) => mapActivityRuleActivity(row));
   await logAccountChanges(
     accountId,
@@ -2634,22 +2689,212 @@ export async function markLegacyActivityDone(activityId) {
   return data;
 }
 
-// --- fetch notifications ------------------------------------------------------
-export async function fetchNotifications() {
+function formatNotificationTime(createdAt) {
+  if (!createdAt) return "";
+  const created = new Date(createdAt);
+  if (Number.isNaN(created.getTime())) return "";
+  const diffMs = Date.now() - created.getTime();
+  const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
+  if (diffMinutes < 1) return "Just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return created.toLocaleDateString();
+}
+
+function mapNotification(n) {
+  const embeddedAccount = Array.isArray(n.accounts) ? n.accounts[0] : n.accounts;
+  return {
+    id: n.id,
+    title: n.title,
+    body: n.body ?? "",
+    accountId: n.account_id ?? undefined,
+    accountName: embeddedAccount?.name ?? "",
+    time: n.time || formatNotificationTime(n.created_at),
+    type: n.type,
+    read: Boolean(n.read_at || n.read),
+    badgeKey: n.badge_key ?? null,
+    targetPath: n.target_path ?? null,
+    createdAt: n.created_at ?? null,
+  };
+}
+
+async function fetchLegacyNotifications() {
   const { data, error } = await supabase
     .from("notifications")
     .select("*")
     .order("created_at", { ascending: false });
   if (error) throw error;
-  return (data ?? []).map((n) => ({
-    id: n.id,
-    title: n.title,
-    body: n.body ?? "",
-    accountId: n.account_id ?? undefined,
-    time: n.time ?? "",
-    type: n.type,
-    read: n.read,
-  }));
+  return (data ?? []).map(mapNotification);
+}
+
+async function persistNotificationReads(input) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session?.access_token) {
+    throw new Error("Please sign in again before updating notifications.");
+  }
+
+  return markNotificationsReadServer({
+    data: {
+      accessToken: session.access_token,
+      notificationIds: input.notificationIds ?? [],
+      badgeKey: input.badgeKey ?? "",
+    },
+  });
+}
+
+// --- fetch notifications ------------------------------------------------------
+export async function fetchNotifications(options = {}) {
+  const role = options.role;
+  if (role && !isNotificationRole(role)) return [];
+
+  if (role && isNotificationRole(role)) {
+    await ensureContractRenewalNotifications(supabase).catch(() => null);
+  }
+
+  let query = supabase
+    .from("notifications")
+    .select("*, accounts(name)")
+    .order("created_at", { ascending: false })
+    .limit(options.limit ?? 100);
+
+  if (options.userId) {
+    query = query.eq("recipient_profile_id", options.userId);
+  }
+
+  const { data, error } = await query;
+  if (error && options.userId && isMissingColumnError(error, "recipient_profile_id")) {
+    return fetchLegacyNotifications();
+  }
+  if (error) throw error;
+  return (data ?? []).map(mapNotification);
+}
+
+export async function markNotificationsRead(notificationIds = []) {
+  const ids = notificationIds.filter(Boolean);
+  if (!ids.length) return;
+
+  let serverError = null;
+  try {
+    await persistNotificationReads({ notificationIds: ids });
+    return;
+  } catch (error) {
+    serverError = error;
+  }
+
+  const readAt = new Date().toISOString();
+  const { error } = await supabase
+    .from("notifications")
+    .update({ read: true, read_at: readAt })
+    .in("id", ids);
+  if (error && isMissingColumnError(error, "read_at")) {
+    const { error: fallbackError } = await supabase
+      .from("notifications")
+      .update({ read: true })
+      .in("id", ids);
+    if (fallbackError) throw serverError ?? fallbackError;
+    return;
+  }
+  if (error) throw serverError ?? error;
+}
+
+export async function markAllNotificationsRead(options = {}) {
+  const notificationIds = (options.notificationIds ?? []).filter(Boolean);
+
+  let serverError = null;
+  try {
+    await persistNotificationReads({ notificationIds });
+    return;
+  } catch (error) {
+    serverError = error;
+  }
+
+  const readAt = new Date().toISOString();
+  let query = supabase
+    .from("notifications")
+    .update({ read: true, read_at: readAt })
+    .eq("read", false);
+
+  if (notificationIds.length) {
+    query = query.in("id", notificationIds);
+  } else if (options.userId) {
+    query = query.eq("recipient_profile_id", options.userId);
+  }
+
+  const { error } = await query;
+  if (
+    error &&
+    (isMissingColumnError(error, "read_at") ||
+      isMissingColumnError(error, "recipient_profile_id"))
+  ) {
+    let fallback = supabase.from("notifications").update({ read: true }).eq("read", false);
+    if (notificationIds.length) {
+      fallback = fallback.in("id", notificationIds);
+    } else if (options.userId && !isMissingColumnError(error, "recipient_profile_id")) {
+      fallback = fallback.eq("recipient_profile_id", options.userId);
+    }
+    const { error: fallbackError } = await fallback;
+    if (fallbackError) throw serverError ?? fallbackError;
+    return;
+  }
+  if (error) throw serverError ?? error;
+}
+
+export async function markNotificationsReadByBadge(badgeKey, options = {}) {
+  if (!badgeKey) return;
+
+  const notificationIds = (options.notificationIds ?? []).filter(Boolean);
+
+  let serverError = null;
+  try {
+    await persistNotificationReads({ notificationIds, badgeKey });
+    return;
+  } catch (error) {
+    serverError = error;
+  }
+
+  const readAt = new Date().toISOString();
+  let query = supabase
+    .from("notifications")
+    .update({ read: true, read_at: readAt })
+    .eq("read", false);
+
+  if (notificationIds.length) {
+    query = query.in("id", notificationIds);
+  } else {
+    query = query.eq("badge_key", badgeKey);
+    if (options.userId) query = query.eq("recipient_profile_id", options.userId);
+  }
+
+  const { error } = await query;
+  if (
+    error &&
+    (isMissingColumnError(error, "badge_key") ||
+      isMissingColumnError(error, "recipient_profile_id"))
+  ) {
+    return;
+  }
+  if (error && isMissingColumnError(error, "read_at")) {
+    let fallback = supabase
+      .from("notifications")
+      .update({ read: true })
+      .eq("read", false);
+    if (notificationIds.length) {
+      fallback = fallback.in("id", notificationIds);
+    } else {
+      fallback = fallback.eq("badge_key", badgeKey);
+      if (options.userId) fallback = fallback.eq("recipient_profile_id", options.userId);
+    }
+    const { error: fallbackError } = await fallback;
+    if (fallbackError) throw serverError ?? fallbackError;
+    return;
+  }
+  if (error) throw serverError ?? error;
 }
 
 // ─── education log ────────────────────────────────────────────────────────────
