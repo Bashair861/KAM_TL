@@ -706,6 +706,17 @@ export async function createAccountActionItemTask(input) {
     actionItemId: data.id,
     title,
   }).catch(() => null);
+  await logAccountChanges(
+    accountId,
+    [
+      {
+        field: "Action item created",
+        oldValue: null,
+        newValue: summarizeTaskHistory({ ...input, title, description }),
+      },
+    ],
+    input.editedBy ?? "Unknown",
+  );
   return mapTask(data);
 }
 
@@ -1652,7 +1663,11 @@ export async function fetchOpportunities(accountId) {
   }));
 }
 
-export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportunities }) {
+export async function upsertOpportunitiesFromMeetingAgent({
+  accountId,
+  opportunities,
+  editedBy = "System",
+}) {
   if (!opportunities?.length) return [];
 
   const rows = opportunities.map((opportunity) => ({
@@ -1671,7 +1686,7 @@ export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportuni
     .upsert(rows, { onConflict: "id" })
     .select("*");
   if (error) throw error;
-  return (data ?? []).map((o) => ({
+  const savedOpportunities = (data ?? []).map((o) => ({
     id: o.id,
     accountId: o.account_id,
     title: o.title,
@@ -1681,6 +1696,16 @@ export async function upsertOpportunitiesFromMeetingAgent({ accountId, opportuni
     confidence: o.confidence,
     nextStep: o.next_step ?? "",
   }));
+  await logAccountChanges(
+    accountId,
+    savedOpportunities.map((opportunity) => ({
+      field: "Opportunity saved",
+      oldValue: null,
+      newValue: summarizeOpportunityHistory(opportunity),
+    })),
+    editedBy,
+  );
+  return savedOpportunities;
 }
 
 function firstRelatedRow(value) {
@@ -1744,7 +1769,7 @@ function buildAccountRetentionGrowthUpdate({ model, opportunities, escalations }
   };
 }
 
-export async function refreshAccountRetentionGrowthScoring(accountId) {
+export async function refreshAccountRetentionGrowthScoring(accountId, editedBy = "System") {
   const [account, opportunities, escalations] = await Promise.all([
     fetchAccount(accountId),
     fetchOpportunities(accountId),
@@ -1762,6 +1787,53 @@ export async function refreshAccountRetentionGrowthScoring(accountId) {
     .select("*")
     .single();
   if (error) throw error;
+
+  await logAccountChanges(
+    accountId,
+    [
+      {
+        field: "Retention/Growth retention score",
+        oldValue: String(account.retentionHealthScore ?? ""),
+        newValue: String(update.retention_health_score ?? ""),
+      },
+      {
+        field: "Retention/Growth risk level",
+        oldValue: account.calculatedRetentionRisk ?? account.retentionRisk ?? "",
+        newValue: update.calculated_retention_risk ?? "",
+      },
+      {
+        field: "Retention/Growth growth score",
+        oldValue: String(account.growthPotentialScore ?? ""),
+        newValue: String(update.growth_potential_score ?? ""),
+      },
+      {
+        field: "Retention/Growth growth level",
+        oldValue: account.growthPotentialLevel ?? "",
+        newValue: update.growth_potential_level ?? "",
+      },
+      {
+        field: "Retention/Growth revenue at risk",
+        oldValue: String(account.revenueAtRisk ?? ""),
+        newValue: String(update.revenue_at_risk ?? ""),
+      },
+      {
+        field: "Retention/Growth pipeline value",
+        oldValue: String(account.growthPipelineValue ?? ""),
+        newValue: String(update.growth_pipeline_value ?? ""),
+      },
+      {
+        field: "Retention/Growth quadrant",
+        oldValue: account.retentionGrowthQuadrant ?? "",
+        newValue: update.retention_growth_quadrant ?? "",
+      },
+      {
+        field: "Retention/Growth next action",
+        oldValue: account.retentionGrowthNextAction ?? "",
+        newValue: update.retention_growth_next_action ?? "",
+      },
+    ],
+    editedBy,
+  );
 
   return {
     account: mapFlatAccount(data),
@@ -1826,17 +1898,110 @@ export async function fetchAccountHistory(accountId) {
   }));
 }
 export async function logAccountChanges(accountId, changes, editedBy) {
-  if (changes.length === 0) return;
+  const rows = (changes ?? [])
+    .map((c) => ({
+      field: String(c.field ?? "").trim(),
+      oldValue: c.oldValue === undefined || c.oldValue === null ? null : String(c.oldValue),
+      newValue: c.newValue === undefined || c.newValue === null ? null : String(c.newValue),
+    }))
+    .filter((c) => c.field && c.oldValue !== c.newValue);
+
+  if (rows.length === 0) return;
   const { error } = await supabase.from("account_history").insert(
-    changes.map((c) => ({
+    rows.map((c) => ({
       account_id: accountId,
       field_name: c.field,
       old_value: c.oldValue,
       new_value: c.newValue,
-      edited_by: editedBy,
+      edited_by: editedBy ?? "Unknown",
     })),
   );
   if (error) throw error;
+}
+
+function compactAccountHistoryParts(parts) {
+  return parts
+    .map((part) => (part === null || part === undefined ? "" : String(part).trim()))
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function formatHistoryDateValue(value) {
+  if (!value) return "";
+  return String(value).slice(0, 10);
+}
+
+function summarizeMeetingHistory(row = {}) {
+  return compactAccountHistoryParts([
+    row.title ? `Title: ${row.title}` : null,
+    row.meeting_date ? `Date: ${formatHistoryDateValue(row.meeting_date)}` : null,
+    row.synced_at ? `Synced: ${formatHistoryDateValue(row.synced_at)}` : null,
+    Array.isArray(row.derived_action_items)
+      ? `Action items: ${row.derived_action_items.length}`
+      : null,
+    Array.isArray(row.derived_opportunities)
+      ? `Opportunities: ${row.derived_opportunities.length}`
+      : null,
+    row.short_summary ? `Summary: ${row.short_summary}` : null,
+  ]);
+}
+
+function summarizeRuleActivityHistory(activity = {}) {
+  return compactAccountHistoryParts([
+    activity.title ? `Title: ${activity.title}` : null,
+    activity.parameter ? `Area: ${activity.parameter}` : null,
+    activity.status ? `Status: ${activity.status}` : null,
+    activity.owner ? `Owner: ${activity.owner}` : null,
+    activity.dueDate ? `Due: ${activity.dueDate}` : null,
+    activity.rag ? `RAG: ${activity.rag}` : null,
+    activity.expectedLift ? `Expected lift: ${activity.expectedLift}` : null,
+    activity.nextStep ? `Next step: ${activity.nextStep}` : null,
+  ]);
+}
+
+function summarizeOpportunityHistory(opportunity = {}) {
+  return compactAccountHistoryParts([
+    opportunity.title ? `Title: ${opportunity.title}` : null,
+    opportunity.source ? `Source: ${opportunity.source}` : null,
+    opportunity.signalDate ? `Signal date: ${opportunity.signalDate}` : null,
+    opportunity.potential !== null && opportunity.potential !== undefined
+      ? `Potential: ${opportunity.potential}`
+      : null,
+    opportunity.confidence ? `Confidence: ${opportunity.confidence}` : null,
+    opportunity.nextStep ? `Next step: ${opportunity.nextStep}` : null,
+  ]);
+}
+
+function summarizeRetentionGrowthDraftHistory(draft = {}) {
+  return compactAccountHistoryParts([
+    draft.kind ? `Type: ${draft.kind}` : null,
+    draft.title ? `Title: ${draft.title}` : null,
+    draft.owner ? `Owner: ${draft.owner}` : null,
+    draft.dueDate ? `Due: ${draft.dueDate}` : null,
+    draft.potentialValueLabel ? `Potential: ${draft.potentialValueLabel}` : null,
+    draft.approvalState ? `Approval: ${draft.approvalState}` : null,
+    draft.nextStep ? `Next step: ${draft.nextStep}` : null,
+  ]);
+}
+
+function summarizeEducationHistory(session = {}) {
+  return compactAccountHistoryParts([
+    session.date ? `Date: ${session.date}` : null,
+    session.topic ? `Topic: ${session.topic}` : null,
+    session.approach ? `Approach: ${session.approach}` : null,
+    session.outcome ? `Outcome: ${session.outcome}` : null,
+  ]);
+}
+
+function summarizeTaskHistory(task = {}) {
+  return compactAccountHistoryParts([
+    task.title ? `Title: ${task.title}` : null,
+    task.description ? `Description: ${task.description}` : null,
+    task.reason ? `Reason: ${task.reason}` : null,
+    task.source ? `Source: ${task.source}` : null,
+    task.healthArea ? `Area: ${task.healthArea}` : null,
+    task.expectedLift ? `Expected lift: ${task.expectedLift}` : null,
+  ]);
 }
 
 export async function fetchAccountTasksForAiSuggestions(accountId) {
@@ -1926,8 +2091,20 @@ export async function fetchFirefliesMeetingSummaries(accountId) {
   return (data ?? []).map(mapFirefliesMeetingSummary);
 }
 
-export async function upsertFirefliesMeetingSummaries(accountId, meetings) {
+export async function upsertFirefliesMeetingSummaries(accountId, meetings, editedBy = "System") {
   if (!meetings?.length) return [];
+  const transcriptIds = meetings.map((meeting) => meeting.transcriptId).filter(Boolean);
+  const existingByTranscriptId = new Map();
+  if (transcriptIds.length) {
+    const { data: existingRows, error: existingError } = await supabase
+      .from("fireflies_meeting_summaries")
+      .select("*")
+      .eq("account_id", accountId)
+      .in("fireflies_transcript_id", transcriptIds);
+    if (existingError) throw existingError;
+    (existingRows ?? []).forEach((row) => existingByTranscriptId.set(row.fireflies_transcript_id, row));
+  }
+
   const now = new Date().toISOString();
   const rows = meetings.map((meeting) => ({
     account_id: accountId,
@@ -1954,6 +2131,18 @@ export async function upsertFirefliesMeetingSummaries(accountId, meetings) {
     .upsert(rows, { onConflict: "account_id,fireflies_transcript_id" })
     .select("*");
   if (error) throw error;
+  await logAccountChanges(
+    accountId,
+    (data ?? []).map((row) => {
+      const existing = existingByTranscriptId.get(row.fireflies_transcript_id);
+      return {
+        field: existing ? `Meeting note updated: ${row.title}` : "Meeting note synced",
+        oldValue: existing ? summarizeMeetingHistory(existing) : null,
+        newValue: summarizeMeetingHistory(row),
+      };
+    }),
+    editedBy,
+  );
   return (data ?? []).map(mapFirefliesMeetingSummary);
 }
 
@@ -2008,6 +2197,11 @@ export async function fetchRetentionGrowthDrafts(accountId) {
 export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "Unknown") {
   if (!accountId) throw new Error("Account id is required to save a retention/growth draft.");
   if (!draft?.id) throw new Error("Draft id is required.");
+  const { data: existingDraft } = await supabase
+    .from("retention_growth_drafts")
+    .select("*")
+    .eq("id", draft.id)
+    .maybeSingle();
 
   const now = new Date().toISOString();
   const row = {
@@ -2034,7 +2228,21 @@ export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "
     .select("*")
     .single();
   if (error) throw error;
-  return mapRetentionGrowthDraft(data);
+  const savedDraft = mapRetentionGrowthDraft(data);
+  await logAccountChanges(
+    accountId,
+    [
+      {
+        field: existingDraft
+          ? `Retention/Growth draft updated: ${savedDraft.title}`
+          : "Retention/Growth draft created",
+        oldValue: existingDraft ? summarizeRetentionGrowthDraftHistory(mapRetentionGrowthDraft(existingDraft)) : null,
+        newValue: summarizeRetentionGrowthDraftHistory(savedDraft),
+      },
+    ],
+    createdBy,
+  );
+  return savedDraft;
 }
 
 export async function deleteFirefliesMeetingHistory({
@@ -2042,6 +2250,7 @@ export async function deleteFirefliesMeetingHistory({
   meetingIds,
   deleteActionItems = false,
   deleteOpportunities = false,
+  editedBy = "Unknown",
 }) {
   if (!accountId) throw new Error("Account id is required to delete meeting history.");
 
@@ -2099,11 +2308,27 @@ export async function deleteFirefliesMeetingHistory({
     .select("id");
   if (deleteMeetingsError) throw deleteMeetingsError;
 
-  return {
+  const result = {
     meetingsDeleted: deletedMeetings?.length ?? 0,
     actionItemsDeleted,
     opportunitiesDeleted,
   };
+  await logAccountChanges(
+    accountId,
+    [
+      {
+        field: "Meeting history deleted",
+        oldValue: meetings.map((meeting) => summarizeMeetingHistory(meeting)).join("\n"),
+        newValue: compactAccountHistoryParts([
+          `Meetings deleted: ${result.meetingsDeleted}`,
+          `Linked activity items deleted: ${result.actionItemsDeleted}`,
+          `Linked opportunities deleted: ${result.opportunitiesDeleted}`,
+        ]),
+      },
+    ],
+    editedBy,
+  );
+  return result;
 }
 
 export async function fetchActivityRuleActivities(accountId) {
@@ -2217,7 +2442,11 @@ export async function createActivityRuleActivity(input) {
   return mapActivityRuleActivity(data);
 }
 
-export async function createActivityRuleActivitiesFromMeetingActions({ accountId, actions }) {
+export async function createActivityRuleActivitiesFromMeetingActions({
+  accountId,
+  actions,
+  editedBy = "System",
+}) {
   if (!actions?.length) return [];
 
   const sourceRefs = actions.map((action) => action.id).filter(Boolean);
@@ -2287,7 +2516,17 @@ export async function createActivityRuleActivitiesFromMeetingActions({ accountId
       }).catch(() => null),
     ),
   );
-  return (data ?? []).map((row) => mapActivityRuleActivity(row));
+  const savedActivities = (data ?? []).map((row) => mapActivityRuleActivity(row));
+  await logAccountChanges(
+    accountId,
+    savedActivities.map((activity) => ({
+      field: "Activity created from meeting note",
+      oldValue: null,
+      newValue: summarizeRuleActivityHistory(activity),
+    })),
+    editedBy,
+  );
+  return savedActivities;
 }
 
 export async function rejectActivityRuleSuggestion(input) {
@@ -2687,4 +2926,15 @@ export async function saveEducationSession(session) {
     outcome: session.outcome ?? null,
   });
   if (error) throw error;
+  await logAccountChanges(
+    session.accountId,
+    [
+      {
+        field: "Education record added",
+        oldValue: null,
+        newValue: summarizeEducationHistory(session),
+      },
+    ],
+    session.editedBy ?? "Unknown",
+  );
 }

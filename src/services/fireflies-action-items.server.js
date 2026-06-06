@@ -329,16 +329,23 @@ export async function syncFirefliesForAccount({
   });
   const allActions = result.items;
   const allOpportunities = result.opportunities;
-  const savedMeetings = await upsertFirefliesMeetingSummaries(account.id, result.meetings);
+  const editedBy = actorProfile?.name ?? "System";
+  const savedMeetings = await upsertFirefliesMeetingSummaries(
+    account.id,
+    result.meetings,
+    editedBy,
+  );
   const savedActivities = await createActivityRuleActivitiesFromMeetingActions({
     accountId: account.id,
     actions: allActions,
+    editedBy,
   });
   const savedOpportunities = await upsertOpportunitiesFromMeetingAgent({
     accountId: account.id,
     opportunities: allOpportunities,
+    editedBy,
   });
-  const retentionGrowthScoring = await refreshAccountRetentionGrowthScoring(account.id).catch(
+  const retentionGrowthScoring = await refreshAccountRetentionGrowthScoring(account.id, editedBy).catch(
     (error) => ({
       failed: true,
       error: error?.message ?? "Retention/growth scoring failed after Fireflies sync.",
