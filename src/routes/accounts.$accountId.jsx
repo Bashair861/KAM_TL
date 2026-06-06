@@ -2533,25 +2533,29 @@ function SalesforceMappingModal({
         </div>
 
         <div className="flex-1 overflow-auto">
-          {Object.entries(groupedRows).map(([group, groupRows]) => (
-            <div key={group} className="border-b">
-              <div className="px-5 py-2 bg-muted/40">
-                <p className="text-[11px] font-bold uppercase tracking-wider">{group}</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[880px] text-left">
-                  <thead>
-                    <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
-                      <th className="w-12 px-5 py-2">Sync</th>
-                      <th className="px-3 py-2">Our field</th>
-                      <th className="px-3 py-2">Current value</th>
-                      <th className="px-3 py-2">Salesforce field</th>
-                      <th className="px-3 py-2">Salesforce value</th>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left border-collapse">
+              {/* Single thead — columns align across all sections */}
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
+                  <th className="w-12 px-5 py-2">Sync</th>
+                  <th className="w-44 px-3 py-2">Our field</th>
+                  <th className="w-64 px-3 py-2">Current value</th>
+                  <th className="w-48 px-3 py-2">Salesforce field</th>
+                  <th className="px-3 py-2">Salesforce value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(groupedRows).map(([group, groupRows]) => (
+                  <>
+                    {/* Section header row spanning all columns */}
+                    <tr key={`header-${group}`}>
+                      <td colSpan={5} className="px-5 py-2 bg-muted/40 border-y">
+                        <p className="text-[11px] font-bold uppercase tracking-wider">{group}</p>
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y">
                     {groupRows.map((row) => (
-                      <tr key={row.id} className={!row.canSync ? "opacity-50" : ""}>
+                      <tr key={row.id} className={`border-b ${!row.canSync ? "opacity-50" : ""}`}>
                         <td className="px-5 py-3 align-top">
                           <input
                             type="checkbox"
@@ -2565,29 +2569,26 @@ function SalesforceMappingModal({
                         <td className="px-3 py-3 align-top">
                           <p className="text-xs font-bold">{row.destinationLabel}</p>
                         </td>
-                        <td className="px-3 py-3 align-top max-w-[250px]">
+                        <td className="px-3 py-3 align-top">
                           <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono text-muted-foreground">
                             {displaySyncValue(row.destinationValue)}
                           </pre>
                         </td>
                         <td className="px-3 py-3 align-top">
                           <p className="text-xs font-semibold">{row.sourceLabel}</p>
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            Sync value: {displaySyncValue(row.nextValue)}
-                          </p>
                         </td>
-                        <td className="px-3 py-3 align-top max-w-[320px]">
+                        <td className="px-3 py-3 align-top">
                           <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono">
                             {displaySyncValue(row.sourceValue)}
                           </pre>
                         </td>
                       </tr>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ))}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div className="px-5 py-4 border-t flex flex-col md:flex-row md:items-center md:justify-between gap-3">
