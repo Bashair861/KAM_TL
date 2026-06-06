@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
+import { getRolePermissions } from "@/data/kam-data";
 import { fetchAccounts } from "@/services/db";
 import { analyzeJiraIssue } from "@/services/jiraInsights";
 import { saveJiraEscalations } from "@/services/jira";
@@ -22,6 +23,8 @@ export const Route = createFileRoute("/escalations")({
 
 function EscalationsPage() {
   const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const canWrite = Boolean(profile && getRolePermissions(role).write);
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [issueKey, setIssueKey] = useState("SCRUM-1");
@@ -33,16 +36,21 @@ function EscalationsPage() {
   const [priority, setPriority] = useState("P1");
 
   const { data: accounts = [] } = useQuery({
-    queryKey: ["accounts"],
-    queryFn: () => fetchAccounts(),
+    queryKey: ["accounts", role, profile?.id],
+    queryFn: () => fetchAccounts({ role, userId: profile?.id }),
+    enabled: Boolean(profile),
   });
 
   // Set initial account when accounts first load (onSuccess removed in TanStack Query v5)
   useEffect(() => {
-    if (!selectedAccountId && accounts.length) {
+    if (!accounts.length) {
+      setSelectedAccountId("");
+      return;
+    }
+    if (!selectedAccountId || !accounts.some((account) => account.id === selectedAccountId)) {
       setSelectedAccountId(accounts[0].id);
     }
-  }, [accounts.length]);
+  }, [accounts, selectedAccountId]);
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
 
@@ -70,7 +78,9 @@ function EscalationsPage() {
 
   const saveMutation = useMutation({
     mutationFn: () => {
+      if (!canWrite) throw new Error("You have read-only access.");
       const accountId = selectedAccountId || result?.detectedAccount?.id || accounts[0]?.id;
+      if (!accountId) throw new Error("Select an assigned account before saving.");
       const allItems = [
         ...checkedItems.map((label) => ({ label, done: false })),
         ...customItems.map((label) => ({ label, done: false })),
@@ -115,6 +125,7 @@ function EscalationsPage() {
             <select
               value={selectedAccountId}
               onChange={(e) => setSelectedAccountId(e.target.value)}
+              disabled={!accounts.length}
               className="text-xs border rounded-md px-3 py-2 bg-background min-w-[180px]"
             >
               {accounts.map((a) => (
@@ -132,7 +143,7 @@ function EscalationsPage() {
             />
             <button
               onClick={() => analyzeMutation.mutate()}
-              disabled={!issueKey.trim() || analyzeMutation.isPending}
+              disabled={!canWrite || !accounts.length || !issueKey.trim() || analyzeMutation.isPending}
               className="flex items-center gap-1.5 px-4 py-2 bg-foreground text-background text-xs font-semibold rounded-md disabled:opacity-50"
             >
               {analyzeMutation.isPending ? (
@@ -149,7 +160,11 @@ function EscalationsPage() {
       {/* Body */}
       {!result && !analyzeMutation.isPending && !analyzeMutation.isError && (
         <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-          Select an account, enter a Jira issue key, and click Import.
+          {canWrite
+            ? accounts.length
+              ? "Select an account, enter a Jira issue key, and click Import."
+              : "No assigned accounts are available for your KAM profile."
+            : "You have read-only access. Jira imports are available to Head of KAM and assigned KAMs only."}
         </div>
       )}
 
@@ -176,7 +191,7 @@ function EscalationsPage() {
               </p>
               <button
                 onClick={() => saveMutation.mutate()}
-                disabled={saveMutation.isPending || savedOk}
+                disabled={!canWrite || saveMutation.isPending || savedOk}
                 className={`px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded flex items-center gap-1.5 ${
                   savedOk
                     ? "bg-green-100 text-green-700"

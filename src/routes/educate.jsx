@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
+import { getRolePermissions } from "@/data/kam-data";
 import { fetchAccounts, fetchAccount, fetchEducationLog, saveEducationSession } from "@/services/db";
 import { fetchEducationArticles } from "@/services/education";
 import { useAuth } from "@/context/AuthContext";
@@ -31,6 +32,8 @@ const ARTICLE_TABS = [
 
 function EducatePage() {
   const { profile } = useAuth();
+  const role = profile?.role ?? "KAM";
+  const canWrite = Boolean(profile && getRolePermissions(role).write);
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [activeTab, setActiveTab] = useState("account");
@@ -42,17 +45,23 @@ function EducatePage() {
   const [formError, setFormError] = useState("");
 
   const { data: accounts = [] } = useQuery({
-    queryKey: ["accounts"],
-    queryFn: () => fetchAccounts(),
+    queryKey: ["accounts", role, profile?.id],
+    queryFn: () => fetchAccounts({ role, userId: profile?.id }),
+    enabled: Boolean(profile),
   });
 
   useEffect(() => {
-    if (!selectedAccountId && accounts.length) {
+    if (!accounts.length) {
+      setSelectedAccountId("");
+      setForm((f) => ({ ...f, accountId: "" }));
+      return;
+    }
+    if (!selectedAccountId || !accounts.some((account) => account.id === selectedAccountId)) {
       const first = accounts[0].id;
       setSelectedAccountId(first);
       setForm((f) => ({ ...f, accountId: first }));
     }
-  }, [accounts.length]);
+  }, [accounts, selectedAccountId]);
 
   const { data: fullAccount } = useQuery({
     queryKey: ["account", selectedAccountId],
@@ -64,8 +73,9 @@ function EducatePage() {
 
   // Education log (all accounts or filtered)
   const { data: educationLog = [], refetch: refetchLog } = useQuery({
-    queryKey: ["education-log"],
-    queryFn: () => fetchEducationLog(),
+    queryKey: ["education-log", accounts.map((account) => account.id).join("|")],
+    queryFn: () => fetchEducationLog(accounts.map((account) => account.id)),
+    enabled: accounts.length > 0,
   });
 
   // Articles mutation
@@ -121,6 +131,10 @@ function EducatePage() {
   });
 
   function handleLog() {
+    if (!canWrite) {
+      setFormError("You have read-only access.");
+      return;
+    }
     if (!form.accountId || !form.date || !form.topic) {
       setFormError("Account, date, and topic are required.");
       return;
@@ -143,7 +157,8 @@ function EducatePage() {
         </div>
         <button
           onClick={() => { setForm((f) => ({ ...f, accountId: selectedAccountId })); setLogOpen(true); }}
-          className="flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground text-xs font-semibold rounded-md"
+          disabled={!canWrite || !selectedAccountId}
+          className="flex items-center gap-1.5 px-4 py-2 bg-primary text-primary-foreground text-xs font-semibold rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Plus className="size-3" /> Log Session
         </button>
@@ -236,6 +251,7 @@ function EducatePage() {
                     shared={sharedIds.includes(a.id)}
                     onShare={() => shareMutation.mutate(a)}
                     sharing={shareMutation.isPending}
+                    canShare={canWrite && Boolean(selectedAccountId)}
                   />
                 ))}
               </div>
@@ -352,7 +368,7 @@ function EducatePage() {
             </button>
             <button
               onClick={handleLog}
-              disabled={logMutation.isPending}
+              disabled={logMutation.isPending || !canWrite}
               className="px-4 py-2 text-xs bg-primary text-primary-foreground rounded-md disabled:opacity-50 flex items-center gap-1.5"
             >
               {logMutation.isPending && <Loader2 className="size-3 animate-spin" />}
@@ -365,7 +381,7 @@ function EducatePage() {
   );
 }
 
-function ArticleCard({ article, shared, onShare, sharing }) {
+function ArticleCard({ article, shared, onShare, sharing, canShare }) {
   return (
     <div className="border rounded-lg p-4 hover:border-accent/40 transition-colors flex flex-col">
       <div className="flex items-start justify-between mb-2 gap-2">
@@ -396,7 +412,7 @@ function ArticleCard({ article, shared, onShare, sharing }) {
         )}
         <button
           onClick={onShare}
-          disabled={shared || sharing}
+          disabled={shared || sharing || !canShare}
           className={`ml-auto flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider ${
             shared ? "text-success" : "text-muted-foreground hover:text-foreground"
           }`}

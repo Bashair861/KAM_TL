@@ -2903,7 +2903,12 @@ export async function fetchEducationLog(accountId) {
     .from("education_log")
     .select("*")
     .order("created_at", { ascending: false });
-  if (accountId) q = q.eq("account_id", accountId);
+  if (Array.isArray(accountId)) {
+    if (!accountId.length) return [];
+    q = q.in("account_id", accountId);
+  } else if (accountId) {
+    q = q.eq("account_id", accountId);
+  }
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map((e) => ({
