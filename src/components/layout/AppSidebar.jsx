@@ -83,19 +83,43 @@ export function AppSidebar() {
   const refreshNotifications = () =>
     queryClient.invalidateQueries({ queryKey: notificationQueryKey });
 
+  function markCachedNotificationsRead(predicate) {
+    queryClient.setQueryData(notificationQueryKey, (current) => {
+      if (!Array.isArray(current)) return current;
+      return current.map((notification) =>
+        predicate(notification) ? { ...notification, read: true } : notification,
+      );
+    });
+  }
+
   const markAllMutation = useMutation({
-    mutationFn: () => markAllNotificationsRead({ userId: profile?.id }),
-    onSuccess: refreshNotifications,
+    mutationFn: () =>
+      markAllNotificationsRead({
+        userId: profile?.id,
+        notificationIds: notifs.map((notification) => notification.id),
+      }),
+    onMutate: () => markCachedNotificationsRead(() => true),
+    onSettled: refreshNotifications,
   });
 
   const markOneMutation = useMutation({
     mutationFn: (notificationId) => markNotificationsRead([notificationId]),
-    onSuccess: refreshNotifications,
+    onMutate: (notificationId) =>
+      markCachedNotificationsRead((notification) => notification.id === notificationId),
+    onSettled: refreshNotifications,
   });
 
   const markBadgeMutation = useMutation({
-    mutationFn: (badgeKey) => markNotificationsReadByBadge(badgeKey, { userId: profile?.id }),
-    onSuccess: refreshNotifications,
+    mutationFn: (badgeKey) =>
+      markNotificationsReadByBadge(badgeKey, {
+        userId: profile?.id,
+        notificationIds: notifs
+          .filter((notification) => !notification.read && notification.badgeKey === badgeKey)
+          .map((notification) => notification.id),
+      }),
+    onMutate: (badgeKey) =>
+      markCachedNotificationsRead((notification) => notification.badgeKey === badgeKey),
+    onSettled: refreshNotifications,
   });
 
   useEffect(() => {

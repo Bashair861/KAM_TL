@@ -1,5 +1,5 @@
--- Adds recipient-aware notifications and sidebar badge routing.
--- Run in Supabase SQL Editor before deploying the notification UI changes.
+-- Ensures notification read state persists after opening the bell or clicking Mark all read.
+-- Safe to run multiple times in Supabase SQL Editor.
 
 begin;
 

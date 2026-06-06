@@ -6,6 +6,7 @@ import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
 import { applySowFieldsServer } from "@/services/sow-upload";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
+import { markNotificationsReadServer } from "@/services/notification-read";
 import {
   createAccountAssignmentNotifications,
   createActionItemNotifications,
@@ -2479,6 +2480,24 @@ async function fetchLegacyNotifications() {
   return (data ?? []).map(mapNotification);
 }
 
+async function persistNotificationReads(input) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session?.access_token) {
+    throw new Error("Please sign in again before updating notifications.");
+  }
+
+  return markNotificationsReadServer({
+    data: {
+      accessToken: session.access_token,
+      notificationIds: input.notificationIds ?? [],
+      badgeKey: input.badgeKey ?? "",
+    },
+  });
+}
+
 // --- fetch notifications ------------------------------------------------------
 export async function fetchNotifications(options = {}) {
   const role = options.role;
@@ -2510,6 +2529,14 @@ export async function markNotificationsRead(notificationIds = []) {
   const ids = notificationIds.filter(Boolean);
   if (!ids.length) return;
 
+  let serverError = null;
+  try {
+    await persistNotificationReads({ notificationIds: ids });
+    return;
+  } catch (error) {
+    serverError = error;
+  }
+
   const readAt = new Date().toISOString();
   const { error } = await supabase
     .from("notifications")
@@ -2520,20 +2547,34 @@ export async function markNotificationsRead(notificationIds = []) {
       .from("notifications")
       .update({ read: true })
       .in("id", ids);
-    if (fallbackError) throw fallbackError;
+    if (fallbackError) throw serverError ?? fallbackError;
     return;
   }
-  if (error) throw error;
+  if (error) throw serverError ?? error;
 }
 
 export async function markAllNotificationsRead(options = {}) {
+  const notificationIds = (options.notificationIds ?? []).filter(Boolean);
+
+  let serverError = null;
+  try {
+    await persistNotificationReads({ notificationIds });
+    return;
+  } catch (error) {
+    serverError = error;
+  }
+
   const readAt = new Date().toISOString();
   let query = supabase
     .from("notifications")
     .update({ read: true, read_at: readAt })
     .eq("read", false);
 
-  if (options.userId) query = query.eq("recipient_profile_id", options.userId);
+  if (notificationIds.length) {
+    query = query.in("id", notificationIds);
+  } else if (options.userId) {
+    query = query.eq("recipient_profile_id", options.userId);
+  }
 
   const { error } = await query;
   if (
@@ -2542,27 +2583,43 @@ export async function markAllNotificationsRead(options = {}) {
       isMissingColumnError(error, "recipient_profile_id"))
   ) {
     let fallback = supabase.from("notifications").update({ read: true }).eq("read", false);
-    if (options.userId && !isMissingColumnError(error, "recipient_profile_id")) {
+    if (notificationIds.length) {
+      fallback = fallback.in("id", notificationIds);
+    } else if (options.userId && !isMissingColumnError(error, "recipient_profile_id")) {
       fallback = fallback.eq("recipient_profile_id", options.userId);
     }
     const { error: fallbackError } = await fallback;
-    if (fallbackError) throw fallbackError;
+    if (fallbackError) throw serverError ?? fallbackError;
     return;
   }
-  if (error) throw error;
+  if (error) throw serverError ?? error;
 }
 
 export async function markNotificationsReadByBadge(badgeKey, options = {}) {
   if (!badgeKey) return;
 
+  const notificationIds = (options.notificationIds ?? []).filter(Boolean);
+
+  let serverError = null;
+  try {
+    await persistNotificationReads({ notificationIds, badgeKey });
+    return;
+  } catch (error) {
+    serverError = error;
+  }
+
   const readAt = new Date().toISOString();
   let query = supabase
     .from("notifications")
     .update({ read: true, read_at: readAt })
-    .eq("badge_key", badgeKey)
     .eq("read", false);
 
-  if (options.userId) query = query.eq("recipient_profile_id", options.userId);
+  if (notificationIds.length) {
+    query = query.in("id", notificationIds);
+  } else {
+    query = query.eq("badge_key", badgeKey);
+    if (options.userId) query = query.eq("recipient_profile_id", options.userId);
+  }
 
   const { error } = await query;
   if (
@@ -2576,14 +2633,18 @@ export async function markNotificationsReadByBadge(badgeKey, options = {}) {
     let fallback = supabase
       .from("notifications")
       .update({ read: true })
-      .eq("badge_key", badgeKey)
       .eq("read", false);
-    if (options.userId) fallback = fallback.eq("recipient_profile_id", options.userId);
+    if (notificationIds.length) {
+      fallback = fallback.in("id", notificationIds);
+    } else {
+      fallback = fallback.eq("badge_key", badgeKey);
+      if (options.userId) fallback = fallback.eq("recipient_profile_id", options.userId);
+    }
     const { error: fallbackError } = await fallback;
-    if (fallbackError) throw fallbackError;
+    if (fallbackError) throw serverError ?? fallbackError;
     return;
   }
-  if (error) throw error;
+  if (error) throw serverError ?? error;
 }
 
 // ─── education log ────────────────────────────────────────────────────────────
