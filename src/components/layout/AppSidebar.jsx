@@ -127,11 +127,7 @@ export function AppSidebar() {
   }, [pathname]);
 
   function handleToggleNotifications() {
-    const nextOpen = !showNotifs;
-    setShowNotifs(nextOpen);
-    if (nextOpen && unread > 0) {
-      markAllMutation.mutate();
-    }
+    setShowNotifs((open) => !open);
   }
 
   function handleOpenNotification(notification) {

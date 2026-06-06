@@ -1408,6 +1408,10 @@ export async function createAccount(data) {
       kamId: data.assignedKamId,
     }).catch(() => null);
   }
+
+  if (data.contractRenewalDate) {
+    await ensureContractRenewalNotifications(supabase).catch(() => null);
+  }
 }
 
 // --- update account KYC fields -----------------------------------------------
@@ -1430,6 +1434,13 @@ export async function updateAccountKyc(accountId, updates) {
       .from("contract_details")
       .upsert(contractUpdates, { onConflict: "account_id" });
     if (contractError) throw contractError;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(updates, "renewal_date") ||
+    Object.prototype.hasOwnProperty.call(updates, "contract_renewal_date")
+  ) {
+    await ensureContractRenewalNotifications(supabase).catch(() => null);
   }
 }
 export async function applySowFields(accountId, fields) {
