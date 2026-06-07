@@ -8,8 +8,10 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
+    "test": "npm run verify:retention-growth-rules",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "verify:retention-growth-rules": "tsx scripts/verify-retention-growth-rules.js",
     "seed": "node src/db/seed.js"
   },
   "dependencies": {

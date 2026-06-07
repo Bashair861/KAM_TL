@@ -21,6 +21,7 @@ import { fetchPortfolioNewsFeed } from "@/services/news";
 import { buildPortfolioRevenueMetrics } from "@/services/portfolio-metrics";
 import { StatCard } from "@/components/shared/StatCard";
 import { useAuth } from "@/context/AuthContext";
+import { formatRenewalDate } from "@/lib/utils";
 import {
   ArrowUpRight,
   TrendingUp,
@@ -55,16 +56,6 @@ export const Route = createFileRoute("/")({
   }),
   component: DashboardPage,
 });
-function formatRenewalDate(value) {
-  if (!value) return "No renewal date";
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(date);
-}
 function DashboardPage() {
   const { session, profile } = useAuth();
   const role = profile?.role ?? "KAM";

@@ -1228,6 +1228,9 @@ function buildCommercialGuardrails(account, thresholds, retentionRisk = account.
   const renewalDays = getKnownNumber(account.renewalDays) ?? Infinity;
 
   return {
+    limits: {
+      ...thresholds,
+    },
     summary: {
       discountLimit: `${thresholds.discountLimitPct}% (${formatCurrency(thresholds.discountLimitValue)})`,
       serviceCreditLimit: formatCurrency(thresholds.serviceCreditLimit),

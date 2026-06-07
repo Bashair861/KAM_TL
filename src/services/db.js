@@ -375,9 +375,7 @@ function getActivityAiSuggestionsSchemaError() {
 function isActivityAiSuggestionsTypeError(error) {
   const message = String(error?.message ?? "").toLowerCase();
   return (
-    error?.code === "22P02" &&
-    message.includes("invalid input syntax") &&
-    message.includes("uuid")
+    error?.code === "22P02" && message.includes("invalid input syntax") && message.includes("uuid")
   );
 }
 function getRowComplete(row) {
@@ -927,10 +925,7 @@ export async function markMeetingInsightActionItemState(input = {}) {
   return data;
 }
 export async function fetchKamUsers() {
-  const withStatus = await supabase
-    .from("profiles")
-    .select("id, name, initials, role, is_active")
-    .eq("role", "KAM");
+  const withStatus = await supabase.from("profiles").select("id, name, initials, role, is_active");
 
   if (!withStatus.error) {
     return (withStatus.data ?? [])
@@ -940,10 +935,7 @@ export async function fetchKamUsers() {
 
   if (!isMissingColumnError(withStatus.error, "is_active")) throw withStatus.error;
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("id, name, initials, role")
-    .eq("role", "KAM");
+  const { data, error } = await supabase.from("profiles").select("id, name, initials, role");
   if (error) throw error;
   return (data ?? []).map((user) => ({ ...user, role: normalizeRole(user.role) }));
 }
@@ -1355,40 +1347,42 @@ const HEALTH_AREAS = [
 
 // --- create new account -------------------------------------------------------
 export async function createAccount(data) {
-  const { error } = await supabase.from("accounts").insert([{
-    id: data.id,
-    name: data.name,
-    short_code: data.shortCode,
-    industry: data.industry,
-    tier: data.tier,
-    health: 50,
-    trend: 0,
-    contract_value: data.contractValue,
-    arr: data.arr,
-    renewal_days: data.renewalDays || null,
-    renewal_date: data.contractRenewalDate || null,
-    contract_duration: data.contractDuration || null,
-    contract_type: data.contractType,
-    last_touch: "Just now",
-    status: "healthy",
-    retention_risk: "Low",
-    growth_upside: 0,
-    white_space_count: 0,
-    is_startup: false,
-    region: data.region || null,
-    primary_contact_name: data.primaryContactName || null,
-    linkedin_url: data.linkedinUrl || null,
-    linkedin_summary: data.linkedinSummary || null,
-    ...(data.linkedinSummaryUpdatedAt
-      ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
-      : {}),
-    ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
-    ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
-    ...(data.websiteSummaryUpdatedAt
-      ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
-      : {}),
-    assigned_kam_id: data.assignedKamId || null,
-  }]);
+  const { error } = await supabase.from("accounts").insert([
+    {
+      id: data.id,
+      name: data.name,
+      short_code: data.shortCode,
+      industry: data.industry,
+      tier: data.tier,
+      health: 50,
+      trend: 0,
+      contract_value: data.contractValue,
+      arr: data.arr,
+      renewal_days: data.renewalDays || null,
+      renewal_date: data.contractRenewalDate || null,
+      contract_duration: data.contractDuration || null,
+      contract_type: data.contractType,
+      last_touch: "Just now",
+      status: "healthy",
+      retention_risk: "Low",
+      growth_upside: 0,
+      white_space_count: 0,
+      is_startup: false,
+      region: data.region || null,
+      primary_contact_name: data.primaryContactName || null,
+      linkedin_url: data.linkedinUrl || null,
+      linkedin_summary: data.linkedinSummary || null,
+      ...(data.linkedinSummaryUpdatedAt
+        ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
+        : {}),
+      ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
+      ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
+      ...(data.websiteSummaryUpdatedAt
+        ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
+        : {}),
+      assigned_kam_id: data.assignedKamId || null,
+    },
+  ]);
   if (error) throw error;
 
   const { error: contractError } = await supabase.from("contract_details").upsert(
@@ -2018,9 +2012,7 @@ export async function fetchAccountTasksForAiSuggestions(accountId) {
     throw error;
   }
 
-  return (data ?? []).map((row, index) =>
-    mapAccountTaskForAiSuggestion(row, index, accountId),
-  );
+  return (data ?? []).map((row, index) => mapAccountTaskForAiSuggestion(row, index, accountId));
 }
 
 export async function fetchActivityScoreHistory(accountId) {
@@ -2102,7 +2094,9 @@ export async function upsertFirefliesMeetingSummaries(accountId, meetings, edite
       .eq("account_id", accountId)
       .in("fireflies_transcript_id", transcriptIds);
     if (existingError) throw existingError;
-    (existingRows ?? []).forEach((row) => existingByTranscriptId.set(row.fireflies_transcript_id, row));
+    (existingRows ?? []).forEach((row) =>
+      existingByTranscriptId.set(row.fireflies_transcript_id, row),
+    );
   }
 
   const now = new Date().toISOString();
@@ -2236,7 +2230,9 @@ export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "
         field: existingDraft
           ? `Retention/Growth draft updated: ${savedDraft.title}`
           : "Retention/Growth draft created",
-        oldValue: existingDraft ? summarizeRetentionGrowthDraftHistory(mapRetentionGrowthDraft(existingDraft)) : null,
+        oldValue: existingDraft
+          ? summarizeRetentionGrowthDraftHistory(mapRetentionGrowthDraft(existingDraft))
+          : null,
         newValue: summarizeRetentionGrowthDraftHistory(savedDraft),
       },
     ],
@@ -2365,21 +2361,19 @@ export async function createActivityRuleActivity(input) {
   const now = new Date().toISOString();
 
   if (input.sourceType !== "manual") {
-    const [
-      { data: existingRows, error: existingError },
-      { data: legacyRows, error: legacyError },
-    ] = await Promise.all([
-      supabase
-        .from("activity_rule_activities")
-        .select("id,title,next_step,parameter")
-        .eq("account_id", input.accountId)
-        .limit(200),
-      supabase
-        .from("activities")
-        .select("id,title,area")
-        .eq("account_id", input.accountId)
-        .limit(200),
-    ]);
+    const [{ data: existingRows, error: existingError }, { data: legacyRows, error: legacyError }] =
+      await Promise.all([
+        supabase
+          .from("activity_rule_activities")
+          .select("id,title,next_step,parameter")
+          .eq("account_id", input.accountId)
+          .limit(200),
+        supabase
+          .from("activities")
+          .select("id,title,area")
+          .eq("account_id", input.accountId)
+          .limit(200),
+      ]);
 
     if (existingError) throw existingError;
     if (legacyError) throw legacyError;
@@ -2829,8 +2823,7 @@ export async function markAllNotificationsRead(options = {}) {
   const { error } = await query;
   if (
     error &&
-    (isMissingColumnError(error, "read_at") ||
-      isMissingColumnError(error, "recipient_profile_id"))
+    (isMissingColumnError(error, "read_at") || isMissingColumnError(error, "recipient_profile_id"))
   ) {
     let fallback = supabase.from("notifications").update({ read: true }).eq("read", false);
     if (notificationIds.length) {
@@ -2880,10 +2873,7 @@ export async function markNotificationsReadByBadge(badgeKey, options = {}) {
     return;
   }
   if (error && isMissingColumnError(error, "read_at")) {
-    let fallback = supabase
-      .from("notifications")
-      .update({ read: true })
-      .eq("read", false);
+    let fallback = supabase.from("notifications").update({ read: true }).eq("read", false);
     if (notificationIds.length) {
       fallback = fallback.in("id", notificationIds);
     } else {
@@ -2899,10 +2889,7 @@ export async function markNotificationsReadByBadge(badgeKey, options = {}) {
 
 // ─── education log ────────────────────────────────────────────────────────────
 export async function fetchEducationLog(accountId) {
-  let q = supabase
-    .from("education_log")
-    .select("*")
-    .order("created_at", { ascending: false });
+  let q = supabase.from("education_log").select("*").order("created_at", { ascending: false });
   if (Array.isArray(accountId)) {
     if (!accountId.length) return [];
     q = q.in("account_id", accountId);
