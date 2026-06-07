@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { formatCurrency } from "@/data/kam-data";
 import { fetchContracts } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
+import { formatRenewalDate } from "@/lib/utils";
 import { AlertTriangle, FileText } from "lucide-react";
 export const Route = createFileRoute("/contracts")({
   head: () => ({
@@ -17,7 +18,11 @@ function ContractsPage() {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const userId = profile?.id;
-  const { data: contracts = [], isLoading, error } = useQuery({
+  const {
+    data: contracts = [],
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: ["contracts", userId, role],
     queryFn: () => fetchContracts({ role, userId }),
   });
@@ -106,16 +111,6 @@ function ContractsPage() {
   );
 }
 // ── Shared atoms ────────────────────────────────────────────────────────────
-function formatRenewalDate(value) {
-  if (!value) return "";
-  const parsed = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(parsed.getTime())) return String(value);
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(parsed);
-}
 function daysUntilRenewal(value) {
   if (!value) return null;
   const date = new Date(`${value}T00:00:00`);

@@ -34,8 +34,6 @@ import {
   fetchActivityRuleActivities,
   createActivityRuleActivity,
   rejectActivityRuleSuggestion,
-  submitActivityRuleEvidence,
-  reviewActivityRuleEvidence,
   markActivityRuleActivityDone,
   markLegacyActivityDone,
   fetchKamTasks,
@@ -49,10 +47,12 @@ import {
   generateAccountLinkedinSummary,
   generateAccountWebsiteSummary,
   refreshAccountRetentionGrowthScoring,
-  fetchRetentionGrowthDrafts,
-  upsertRetentionGrowthDraft,
 } from "@/services/db";
 import { upsertActivityScoreSnapshotServer } from "@/services/activity-score-snapshot.server";
+import {
+  fetchRetentionGrowthDraftsServer,
+  upsertRetentionGrowthDraftServer,
+} from "@/services/retention-growth-drafts.server";
 import { lookupSalesforceAccountBundle } from "@/services/salesforce";
 import { extractSowFields } from "@/services/sow-upload";
 import { fetchEducationArticles } from "@/services/education";
@@ -313,7 +313,11 @@ function normalizeBooleanSyncValue(value) {
 }
 function normalizeContractTypeValue(value) {
   if (!hasSyncValue(value)) return "";
-  const text = String(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const text = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
   const contractTypeMap = new Map([
     ["staff augmented", "Staff Augmented"],
     ["staff augmentation", "Staff Augmented"],
@@ -374,7 +378,9 @@ function findStakeholderForContact(stakeholders, contact) {
   );
 }
 function retentionServiceKey(value) {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
 }
 function findRetentionGrowthService(retentionGrowth, serviceName) {
   const key = retentionServiceKey(serviceName);
@@ -385,7 +391,9 @@ function finalizeSalesforceRows(rows) {
   return rows.map((row) => {
     const dbValue = row.dbValue ?? row.nextValue;
     const missingRetentionService =
-      row.kind === "retentionGrowth" && row.dbColumn !== "service" && !hasSyncValue(row.serviceValue);
+      row.kind === "retentionGrowth" &&
+      row.dbColumn !== "service" &&
+      !hasSyncValue(row.serviceValue);
     const canSync = hasSyncValue(dbValue) && !missingRetentionService;
     const changed = displaySyncValue(row.destinationValue) !== displaySyncValue(row.nextValue);
     return {
@@ -405,7 +413,10 @@ function buildSalesforceMappingRows(bundle, account, fields) {
   const primaryContactRole = sfAccount.Primary_Contact_Role__c || primaryContact?.Title;
   const contractType = normalizeContractTypeValue(sfAccount.Contract_Type__c);
   const retentionService = String(sfAccount.Retention_Service__c ?? "").trim();
-  const existingRetentionService = findRetentionGrowthService(account.retentionGrowth ?? [], retentionService);
+  const existingRetentionService = findRetentionGrowthService(
+    account.retentionGrowth ?? [],
+    retentionService,
+  );
   const rows = [
     {
       id: "account.industry",
@@ -1541,6 +1552,8 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
     [account, escalations, opportunities],
   );
   const queryClient = useQueryClient();
+  const loadRetentionGrowthDrafts = useServerFn(fetchRetentionGrowthDraftsServer);
+  const saveRetentionGrowthDraftServer = useServerFn(upsertRetentionGrowthDraftServer);
   const { mutate: refreshRetentionGrowthScoring } = useMutation({
     mutationFn: () => refreshAccountRetentionGrowthScoring(account.id),
     onSuccess: () => {
@@ -1549,7 +1562,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   });
   const { data: savedDrafts = [] } = useQuery({
     queryKey: ["retention-growth-drafts", account.id],
-    queryFn: () => fetchRetentionGrowthDrafts(account.id),
+    queryFn: () => loadRetentionGrowthDrafts({ data: { accountId: account.id } }),
   });
   const [resolvedItems, setResolvedItems] = useState({});
   const [localDrafts, setLocalDrafts] = useState([]);
@@ -1559,15 +1572,32 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   const [offerTarget, setOfferTarget] = useState(null);
   const [offerForm, setOfferForm] = useState(createInitialReviewForm(null, profile?.name));
   const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [draftActionId, setDraftActionId] = useState("");
   const scoringTriggeredForAccountRef = useRef(null);
-  const { mutate: saveRetentionGrowthDraft } = useMutation({
-    mutationFn: (draft) => upsertRetentionGrowthDraft(account.id, draft, profile?.name),
+
+  function storeRetentionGrowthDraftInCache(draft) {
+    if (!draft?.id) return;
+    setLocalDrafts((current) => current.filter((item) => item.id !== draft.id));
+    queryClient.setQueryData(["retention-growth-drafts", account.id], (current = []) =>
+      dedupeRetentionDrafts([draft, ...current]),
+    );
+  }
+
+  const { mutate: saveRetentionGrowthDraft, isPending: savingRetentionGrowthDraft } = useMutation({
+    mutationFn: (draft) =>
+      saveRetentionGrowthDraftServer({
+        data: {
+          accountId: account.id,
+          draft,
+          createdBy: profile?.name,
+        },
+      }),
+    onMutate: () => {
+      setDraftSaveStatus("Submitting draft for Head of KAM approval...");
+    },
     onSuccess: (savedDraft) => {
-      setLocalDrafts((current) => current.filter((draft) => draft.id !== savedDraft.id));
-      queryClient.setQueryData(["retention-growth-drafts", account.id], (current = []) =>
-        dedupeRetentionDrafts([savedDraft, ...current]),
-      );
-      setDraftSaveStatus("Draft saved and will survive page refresh.");
+      storeRetentionGrowthDraftInCache(savedDraft);
+      setDraftSaveStatus("Draft submitted to Head of KAM for approval.");
       queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
     },
     onError: (error, draft) => {
@@ -1577,6 +1607,128 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
       );
     },
   });
+  const { mutate: convertRetentionGrowthDraftToAction, isPending: convertingRetentionGrowthDraft } =
+    useMutation({
+      mutationFn: async ({ draft, sourceItemId }) => {
+        let duplicateAction = false;
+        try {
+          await createAccountActionItemTask(buildRetentionGrowthActionItemInput(account, draft));
+        } catch (error) {
+          if (!/already exists/i.test(error?.message ?? "")) throw error;
+          duplicateAction = true;
+        }
+
+        const convertedDraft = {
+          ...draft,
+          approvalState: RETENTION_DRAFT_STATE_CONVERTED,
+        };
+        let savedDraft = convertedDraft;
+        let persistenceError = "";
+
+        try {
+          savedDraft = await saveRetentionGrowthDraftServer({
+            data: {
+              accountId: account.id,
+              draft: convertedDraft,
+              createdBy: profile?.name,
+            },
+          });
+        } catch (error) {
+          persistenceError = error?.message ?? "Draft state could not be persisted.";
+        }
+
+        return { draft: savedDraft, duplicateAction, persistenceError, sourceItemId };
+      },
+      onMutate: ({ draft }) => {
+        setDraftActionId(draft.id);
+        setDraftSaveStatus("Adding this plan to My Open Action Items...");
+      },
+      onSuccess: ({ draft, duplicateAction, persistenceError, sourceItemId }) => {
+        storeRetentionGrowthDraftInCache(draft);
+        const resolvedId = sourceItemId ?? getRetentionDraftSourceId(draft);
+        if (resolvedId) {
+          setResolvedItems((current) => ({
+            ...current,
+            [resolvedId]: {
+              status: "saved",
+              reviewedAt: new Date().toISOString(),
+            },
+          }));
+        }
+        setDraftSaveStatus(
+          duplicateAction
+            ? `"${draft.title}" already exists in My Open Action Items, so the draft was removed.`
+            : `Added "${draft.title}" to My Open Action Items on the dashboard.`,
+        );
+        if (persistenceError) {
+          setDraftSaveStatus((current) => `${current} Draft state was kept locally only.`);
+        } else {
+          queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
+        }
+        queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
+        queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      },
+      onError: (error) => {
+        setDraftSaveStatus(error?.message ?? "Could not add this draft to action items.");
+      },
+      onSettled: () => {
+        setDraftActionId("");
+      },
+    });
+  const { mutate: rejectRetentionGrowthDraft, isPending: rejectingRetentionGrowthDraft } =
+    useMutation({
+      mutationFn: async (draft) => {
+        const rejectedDraft = {
+          ...draft,
+          approvalState: RETENTION_DRAFT_STATE_REJECTED,
+        };
+        let savedDraft = rejectedDraft;
+        let persistenceError = "";
+
+        try {
+          savedDraft = await saveRetentionGrowthDraftServer({
+            data: {
+              accountId: account.id,
+              draft: rejectedDraft,
+              createdBy: profile?.name,
+            },
+          });
+        } catch (error) {
+          persistenceError = error?.message ?? "Draft rejection could not be persisted.";
+        }
+
+        return { draft: savedDraft, persistenceError };
+      },
+      onMutate: (draft) => {
+        setDraftActionId(draft.id);
+        setDraftSaveStatus("");
+      },
+      onSuccess: ({ draft, persistenceError }) => {
+        storeRetentionGrowthDraftInCache(draft);
+        const resolvedId = getRetentionDraftSourceId(draft);
+        if (resolvedId) {
+          setResolvedItems((current) => ({
+            ...current,
+            [resolvedId]: {
+              status: "rejected",
+              reviewedAt: new Date().toISOString(),
+            },
+          }));
+        }
+        setDraftSaveStatus(`Rejected "${draft.title}" and removed it from Draft Plans & Offers.`);
+        if (persistenceError) {
+          setDraftSaveStatus((current) => `${current} Rejection was kept locally only.`);
+        } else {
+          queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
+        }
+      },
+      onError: (error) => {
+        setDraftSaveStatus(error?.message ?? "Could not reject this draft.");
+      },
+      onSettled: () => {
+        setDraftActionId("");
+      },
+    });
 
   useEffect(() => {
     setResolvedItems({});
@@ -1587,6 +1739,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
     setOfferTarget(null);
     setOfferForm(createInitialReviewForm(null, profile?.name));
     setEvidenceTarget(null);
+    setDraftActionId("");
   }, [account.id, profile?.name]);
 
   useEffect(() => {
@@ -1595,16 +1748,17 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
     refreshRetentionGrowthScoring();
   }, [account.id, refreshRetentionGrowthScoring]);
 
-  const draftQueue = useMemo(
+  const allRetentionGrowthDrafts = useMemo(
     () => sortRetentionDrafts(dedupeRetentionDrafts([...localDrafts, ...savedDrafts])),
     [localDrafts, savedDrafts],
   );
+  const draftQueue = useMemo(
+    () => allRetentionGrowthDrafts.filter((draft) => !isTerminalRetentionDraft(draft)),
+    [allRetentionGrowthDrafts],
+  );
   const draftedItemIds = useMemo(
-    () =>
-      new Set(
-        draftQueue.map((draft) => draft.id.replace(/^draft-(plan|offer)-/, "")).filter(Boolean),
-      ),
-    [draftQueue],
+    () => new Set(allRetentionGrowthDrafts.map(getRetentionDraftSourceId).filter(Boolean)),
+    [allRetentionGrowthDrafts],
   );
   const activeApplicableGrowth = model.applicableGrowth.filter(
     (item) => !resolvedItems[item.id] && !draftedItemIds.has(item.id),
@@ -1629,12 +1783,17 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   function confirmPlanReview() {
     if (!planTarget) return;
     const draft = buildRetentionPlanDraft(planTarget, planForm, canApproveCommercial);
+    if (canApproveCommercial) {
+      convertRetentionGrowthDraftToAction({ draft, sourceItemId: planTarget.item.id });
+      closePlanReview();
+      return;
+    }
     setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
     saveRetentionGrowthDraft(draft);
     setResolvedItems((current) => ({
       ...current,
       [planTarget.item.id]: {
-        status: "drafted",
+        status: "pending-approval",
         reviewedAt: new Date().toISOString(),
       },
     }));
@@ -1654,12 +1813,17 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   function confirmOfferReview() {
     if (!offerTarget) return;
     const draft = buildRetentionOfferDraft(offerTarget, offerForm, canApproveCommercial);
+    if (canApproveCommercial) {
+      convertRetentionGrowthDraftToAction({ draft, sourceItemId: offerTarget.id });
+      closeOfferReview();
+      return;
+    }
     setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
     saveRetentionGrowthDraft(draft);
     setResolvedItems((current) => ({
       ...current,
       [offerTarget.id]: {
-        status: "drafted",
+        status: "pending-approval",
         reviewedAt: new Date().toISOString(),
       },
     }));
@@ -2038,6 +2202,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
                         <ApprovalPill
                           required={offer.approvalRequired}
                           approverRole={offer.approverRole}
+                          viewerRole={role}
                         />
                       </div>
                       <p className="text-xs text-muted-foreground">{offer.reason}</p>
@@ -2059,7 +2224,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
                     </div>
                     <div className="shrink-0">
                       <Button size="sm" disabled={!canAct} onClick={() => openOfferReview(offer)}>
-                        Create Draft Offer
+                        {canApproveCommercial ? "Add Action Item" : "Create Draft Offer"}
                       </Button>
                     </div>
                   </div>
@@ -2097,6 +2262,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
                     <ApprovalPill
                       required={rule.approvalRequired !== "No"}
                       approverRole={rule.approverRole}
+                      viewerRole={role}
                     />
                   </div>
                   <p className="text-sm font-semibold">{rule.allowedOffer}</p>
@@ -2127,33 +2293,74 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
         )}
         {draftQueue.length ? (
           <div className="divide-y">
-            {draftQueue.map((draft) => (
-              <div key={draft.id} className="px-6 py-4 space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-semibold">{draft.title}</p>
-                  <DraftKindBadge kind={draft.kind} />
-                  {draft.offerType ? <OfferTypeBadge type={draft.offerType} /> : null}
+            {draftQueue.map((draft) => {
+              const isDraftWorking = draftActionId === draft.id;
+              return (
+                <div key={draft.id} className="px-6 py-4 space-y-3">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">{draft.title}</p>
+                        <DraftKindBadge kind={draft.kind} />
+                        {draft.offerType ? <OfferTypeBadge type={draft.offerType} /> : null}
+                      </div>
+                      <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                        <MiniStat label="Owner" value={draft.owner} />
+                        <MiniStat label="Due date" value={draft.dueDate} />
+                        <MiniStat label="Potential value" value={draft.potentialValueLabel} />
+                      </div>
+                    </div>
+                    {canApproveCommercial && isPendingRetentionDraft(draft) ? (
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          disabled={
+                            isDraftWorking ||
+                            convertingRetentionGrowthDraft ||
+                            rejectingRetentionGrowthDraft
+                          }
+                          onClick={() => convertRetentionGrowthDraftToAction({ draft })}
+                        >
+                          {isDraftWorking && convertingRetentionGrowthDraft ? (
+                            <Loader2 className="mr-2 size-3 animate-spin" />
+                          ) : null}
+                          Approve
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-crit/30 text-crit hover:bg-crit/10"
+                          disabled={
+                            isDraftWorking ||
+                            convertingRetentionGrowthDraft ||
+                            rejectingRetentionGrowthDraft
+                          }
+                          onClick={() => rejectRetentionGrowthDraft(draft)}
+                        >
+                          {isDraftWorking && rejectingRetentionGrowthDraft ? (
+                            <Loader2 className="mr-2 size-3 animate-spin" />
+                          ) : null}
+                          Reject
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <MiniStat label="Next step" value={draft.nextStep} />
+                  <p className="text-xs text-muted-foreground">{draft.reason}</p>
+                  <p className="text-[11px] font-medium text-accent">{draft.approvalState}</p>
+                  <EvidencePreview
+                    evidence={draft.evidence}
+                    onView={() =>
+                      setEvidenceTarget({
+                        title: draft.title,
+                        subtitle: draft.kind === "offer" ? "Draft offer" : "Draft plan",
+                        evidence: draft.evidence,
+                      })
+                    }
+                  />
                 </div>
-                <div className="grid sm:grid-cols-3 gap-3 text-xs">
-                  <MiniStat label="Owner" value={draft.owner} />
-                  <MiniStat label="Due date" value={draft.dueDate} />
-                  <MiniStat label="Potential value" value={draft.potentialValueLabel} />
-                </div>
-                <MiniStat label="Next step" value={draft.nextStep} />
-                <p className="text-xs text-muted-foreground">{draft.reason}</p>
-                <p className="text-[11px] font-medium text-accent">{draft.approvalState}</p>
-                <EvidencePreview
-                  evidence={draft.evidence}
-                  onView={() =>
-                    setEvidenceTarget({
-                      title: draft.title,
-                      subtitle: draft.kind === "offer" ? "Draft offer" : "Draft plan",
-                      evidence: draft.evidence,
-                    })
-                  }
-                />
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <p className="px-6 py-6 text-xs text-muted-foreground">
@@ -2168,6 +2375,9 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
         onChange={setPlanForm}
         onClose={closePlanReview}
         onConfirm={confirmPlanReview}
+        viewerRole={role}
+        canApproveCommercial={canApproveCommercial}
+        isSaving={savingRetentionGrowthDraft || convertingRetentionGrowthDraft}
       />
 
       <RetentionOfferReviewSheet
@@ -2176,6 +2386,9 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
         onChange={setOfferForm}
         onClose={closeOfferReview}
         onConfirm={confirmOfferReview}
+        viewerRole={role}
+        canApproveCommercial={canApproveCommercial}
+        isSaving={savingRetentionGrowthDraft || convertingRetentionGrowthDraft}
       />
 
       <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
@@ -2253,14 +2466,17 @@ function OfferTypeBadge({ type }) {
   );
 }
 
-function ApprovalPill({ required, approverRole }) {
+function ApprovalPill({ required, approverRole, viewerRole }) {
+  const approver = approverRole ?? "Head of KAM";
+  if (required && viewerRole === approver) return null;
+
   return (
     <span
       className={`text-[10px] font-bold uppercase tracking-wide rounded-full px-2 py-1 ${
         required ? "bg-warn/10 text-warn" : "bg-success/10 text-success"
       }`}
     >
-      {required ? `Approval · ${approverRole ?? "Required"}` : "No approval"}
+      {required ? `Approval - ${approver}` : "No approval"}
     </span>
   );
 }
@@ -2296,6 +2512,10 @@ function DraftKindBadge({ kind }) {
   );
 }
 
+const RETENTION_DRAFT_STATE_PENDING = "Pending Head of KAM approval";
+const RETENTION_DRAFT_STATE_CONVERTED = "Converted to action item";
+const RETENTION_DRAFT_STATE_REJECTED = "Rejected by Head of KAM";
+
 function getPotentialValueLabel(item) {
   if (item.potentialValueLabel) return item.potentialValueLabel;
   const parsed = Number(item.potentialValue);
@@ -2307,10 +2527,52 @@ function formatOpportunityPotential(value) {
   return Number.isFinite(parsed) && parsed > 0 ? `+${formatCurrency(parsed)}` : "Not provided";
 }
 
-function getDraftApprovalState(item, canApproveCommercial) {
-  if (!item.approvalRequired) return "Within KAM authority";
+function getDraftApprovalState(canApproveCommercial) {
   if (canApproveCommercial) return "Within Head of KAM authority";
-  return `Pending ${item.approverRole ?? "Head of KAM"} approval`;
+  return RETENTION_DRAFT_STATE_PENDING;
+}
+
+function getRetentionDraftSourceId(draft) {
+  return draft?.id?.replace(/^draft-(plan|offer)-/, "") ?? "";
+}
+
+function isPendingRetentionDraft(draft) {
+  const state = String(draft?.approvalState ?? "");
+  return !state || /^pending\b/i.test(state) || /within kam authority/i.test(state);
+}
+
+function isTerminalRetentionDraft(draft) {
+  const state = String(draft?.approvalState ?? "").toLowerCase();
+  return state.includes("converted") || state.startsWith("rejected");
+}
+
+function buildRetentionGrowthActionItemInput(account, draft) {
+  const potentialValue =
+    draft.potentialValueLabel && draft.potentialValueLabel !== "Not provided"
+      ? draft.potentialValueLabel
+      : "";
+  const reason = [
+    draft.reason,
+    draft.offerType ? `Offer type: ${draft.offerType}` : "",
+    potentialValue ? `Potential value: ${potentialValue}` : "",
+    draft.owner ? `Owner: ${draft.owner}` : "",
+    draft.dueDate ? `Due date: ${draft.dueDate}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    accountId: account.id,
+    title: draft.title,
+    description: draft.nextStep,
+    reason,
+    source:
+      draft.kind === "offer"
+        ? "Retention vs Growth: draft offer"
+        : "Retention vs Growth: pitch plan",
+    healthArea: draft.kind === "offer" ? "Growth" : "Retention / Growth",
+    expectedLift: potentialValue,
+  };
 }
 
 function buildRetentionPlanDraft(target, form, canApproveCommercial) {
@@ -2326,7 +2588,7 @@ function buildRetentionPlanDraft(target, form, canApproveCommercial) {
     potentialValueLabel: getPotentialValueLabel(item),
     reason: item.reason ?? item.title,
     evidence: item.evidence ?? [],
-    approvalState: getDraftApprovalState(item, canApproveCommercial),
+    approvalState: getDraftApprovalState(canApproveCommercial),
     offerType: item.offerType ?? null,
     createdAt: new Date().toISOString(),
   };
@@ -2344,7 +2606,7 @@ function buildRetentionOfferDraft(item, form, canApproveCommercial) {
     reason: item.reason ?? item.title,
     evidence: item.evidence ?? [],
     offerType: item.offerType,
-    approvalState: getDraftApprovalState(item, canApproveCommercial),
+    approvalState: getDraftApprovalState(canApproveCommercial),
     createdAt: new Date().toISOString(),
   };
 }
@@ -2366,7 +2628,16 @@ function dedupeRetentionDrafts(drafts) {
   });
 }
 
-function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+function RetentionPlanReviewSheet({
+  target,
+  form,
+  onChange,
+  onClose,
+  onConfirm,
+  viewerRole,
+  canApproveCommercial,
+  isSaving,
+}) {
   const item = target?.item ?? null;
   const actionLabel =
     target?.kind === "opportunity"
@@ -2374,6 +2645,7 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
       : target?.kind === "growth"
         ? "Plan Pitch"
         : "Review";
+  const confirmLabel = canApproveCommercial ? "Add action item" : "Submit for approval";
 
   return (
     <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
@@ -2381,10 +2653,13 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
         {item && (
           <>
             <SheetHeader>
-              <SheetTitle>{actionLabel} draft plan</SheetTitle>
+              <SheetTitle>
+                {actionLabel} {canApproveCommercial ? "action item" : "approval draft"}
+              </SheetTitle>
               <SheetDescription>
-                AI suggests the next growth or retention move here. Review the draft before it
-                becomes an internal plan item.
+                {canApproveCommercial
+                  ? "Review the recommendation and add it directly to the account action items."
+                  : "Review the recommendation and submit it to Head of KAM for approval."}
               </SheetDescription>
             </SheetHeader>
 
@@ -2398,6 +2673,7 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
                   <ApprovalPill
                     required={Boolean(item.approvalRequired)}
                     approverRole={item.approverRole}
+                    viewerRole={viewerRole}
                   />
                 </div>
                 <div>
@@ -2459,6 +2735,16 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
                     }
                   />
                 </div>
+
+                {!canApproveCommercial && (
+                  <div className="rounded-xl border border-warn/30 bg-warn/5 p-4">
+                    <p className="text-sm font-semibold text-warn">Pending Head of KAM approval</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      This will be saved as a draft first. Once Head of KAM approves it, it becomes
+                      an action item for the assigned KAM.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-3">
@@ -2494,9 +2780,12 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
               </Button>
               <Button
                 onClick={onConfirm}
-                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+                disabled={
+                  isSaving || !form.title.trim() || !form.owner.trim() || !form.nextStep.trim()
+                }
               >
-                Save draft plan
+                {isSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                {confirmLabel}
               </Button>
             </SheetFooter>
           </>
@@ -2506,17 +2795,31 @@ function RetentionPlanReviewSheet({ target, form, onChange, onClose, onConfirm }
   );
 }
 
-function RetentionOfferReviewSheet({ target, form, onChange, onClose, onConfirm }) {
+function RetentionOfferReviewSheet({
+  target,
+  form,
+  onChange,
+  onClose,
+  onConfirm,
+  viewerRole,
+  canApproveCommercial,
+  isSaving,
+}) {
+  const confirmLabel = canApproveCommercial ? "Add action item" : "Submit for approval";
+
   return (
     <Sheet open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
       <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
         {target && (
           <>
             <SheetHeader>
-              <SheetTitle>Create draft offer</SheetTitle>
+              <SheetTitle>
+                {canApproveCommercial ? "Add offer action item" : "Create draft offer"}
+              </SheetTitle>
               <SheetDescription>
-                Review the recommended offer, adjust the internal draft, and mark any approval
-                dependency before it moves forward.
+                {canApproveCommercial
+                  ? "Review the recommended offer and add it directly to the account action items."
+                  : "Review the recommended offer and submit it to Head of KAM for approval."}
               </SheetDescription>
             </SheetHeader>
 
@@ -2528,6 +2831,7 @@ function RetentionOfferReviewSheet({ target, form, onChange, onClose, onConfirm 
                   <ApprovalPill
                     required={Boolean(target.approvalRequired)}
                     approverRole={target.approverRole}
+                    viewerRole={viewerRole}
                   />
                 </div>
                 <div>
@@ -2588,14 +2892,12 @@ function RetentionOfferReviewSheet({ target, form, onChange, onClose, onConfirm 
                   />
                 </div>
 
-                {target.approvalRequired && (
+                {!canApproveCommercial && (
                   <div className="rounded-xl border border-warn/30 bg-warn/5 p-4">
-                    <p className="text-sm font-semibold text-warn">
-                      Pending {target.approverRole ?? "Head of KAM"} approval
-                    </p>
+                    <p className="text-sm font-semibold text-warn">Pending Head of KAM approval</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      This draft can be created by the KAM, but it should not become a final
-                      client-facing offer until the required approver reviews it.
+                      This draft can be created by the KAM. After Head of KAM approves it, it
+                      becomes an action item for the assigned KAM.
                     </p>
                   </div>
                 )}
@@ -2634,9 +2936,12 @@ function RetentionOfferReviewSheet({ target, form, onChange, onClose, onConfirm 
               </Button>
               <Button
                 onClick={onConfirm}
-                disabled={!form.title.trim() || !form.owner.trim() || !form.nextStep.trim()}
+                disabled={
+                  isSaving || !form.title.trim() || !form.owner.trim() || !form.nextStep.trim()
+                }
               >
-                Create draft offer
+                {isSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                {confirmLabel}
               </Button>
             </SheetFooter>
           </>
@@ -3299,7 +3604,9 @@ function OverviewTab({ account }) {
                 className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
               />
             ) : fields.contractRenewalDate ? (
-              <p className="text-xs font-semibold">{formatDisplayDate(fields.contractRenewalDate)}</p>
+              <p className="text-xs font-semibold">
+                {formatDisplayDate(fields.contractRenewalDate)}
+              </p>
             ) : (
               <p className="text-xs italic text-muted-foreground">No renewal date saved.</p>
             )}
@@ -4836,9 +5143,7 @@ function ActivityTab({ account, opportunities, escalations, session }) {
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-bold">
-              Meeting Insights to Improve Account Score
-            </h3>
+            <h3 className="text-sm font-bold">Meeting Insights to Improve Account Score</h3>
             <p className="text-[11px] text-muted-foreground">
               Auto-extracted from the last 5 meeting transcripts - accept to push into the
               activities backlog.
@@ -5021,7 +5326,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
   );
 
   const [resolvedItems, setResolvedItems] = useState({});
-  const [evidenceTarget, setEvidenceTarget] = useState(null);
+  const [confirmActionTarget, setConfirmActionTarget] = useState(null);
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
   const [opportunityStatus, setOpportunityStatus] = useState("");
@@ -5030,7 +5335,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
 
   useEffect(() => {
     setResolvedItems({});
-    setEvidenceTarget(null);
+    setConfirmActionTarget(null);
     setRejectTarget(null);
     setRejectReason("");
     setOpportunityStatus("");
@@ -5057,8 +5362,8 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
     (item) =>
       Boolean(
         resolvedItems[item.id] ||
-          resolvedItems[getSuggestionSourceRef(item)] ||
-          persistedOpportunityRefs.has(getSuggestionSourceRef(item)),
+        resolvedItems[getSuggestionSourceRef(item)] ||
+        persistedOpportunityRefs.has(getSuggestionSourceRef(item)),
       ),
     [persistedOpportunityRefs, resolvedItems],
   );
@@ -5069,8 +5374,20 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
   const activeOpportunities = model.opportunities.filter(
     (item) => !isResolved(item) && !openTaskTitleKeys.has(normalizeActivityText(item.title)),
   );
+  const rejectedOpportunityHistory = useMemo(
+    () =>
+      savedRuleActivities
+        .filter(
+          (activity) => activity.status === "Rejected" && activity.sourceType === "opportunity",
+        )
+        .map(mapRejectedHistoryItem),
+    [savedRuleActivities],
+  );
   const opportunityPageSize = 5;
-  const opportunityPageCount = Math.max(1, Math.ceil(activeOpportunities.length / opportunityPageSize));
+  const opportunityPageCount = Math.max(
+    1,
+    Math.ceil(activeOpportunities.length / opportunityPageSize),
+  );
   const safeOpportunityPage = Math.min(opportunityPage, opportunityPageCount);
   const opportunityPageStart = activeOpportunities.length
     ? (safeOpportunityPage - 1) * opportunityPageSize
@@ -5094,7 +5411,8 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         source: `Opportunity: ${opportunity.source}`,
         healthArea: opportunity.healthArea,
         expectedLift:
-          opportunity.expectedLift ?? `+${formatCurrency(opportunity.potentialValue ?? 0)} potential`,
+          opportunity.expectedLift ??
+          `+${formatCurrency(opportunity.potentialValue ?? 0)} potential`,
       }),
     onMutate: (opportunity) => {
       setPursuingOpportunityId(opportunity.id);
@@ -5112,7 +5430,9 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
           reviewedAt: new Date().toISOString(),
         },
       }));
-      setOpportunityStatus(`Added "${opportunity.title}" to My Open Action Items.`);
+      setOpportunityStatus(
+        `Added "${opportunity.title}" to My Open Action Items on the dashboard and removed it from Opportunities.`,
+      );
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
     },
@@ -5125,18 +5445,36 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
   });
 
   const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
-    mutationFn: ({ target, reason }) =>
-      rejectActivityRuleSuggestion(
+    mutationFn: async ({ target, reason }) => {
+      const rejectedActivity = await rejectActivityRuleSuggestion(
         buildRejectedRuleActivityInput({
           accountId: account.id,
           target,
           reason,
           reviewer: profile?.name ?? "Unknown",
         }),
-      ),
+      );
+
+      if (target.sourceKind === "meeting") {
+        await markMeetingInsightActionItemState({
+          accountId: account.id,
+          requestedBy: profile?.id,
+          item: target,
+          sourceRef: getSuggestionSourceRef(target),
+          status: "dismissed",
+        });
+      }
+
+      return rejectedActivity;
+    },
     onSuccess: (_, { target, reason }) => {
       setResolvedItems((current) => ({
         ...current,
+        [target.id]: {
+          status: "rejected",
+          reason,
+          reviewedAt: new Date().toISOString(),
+        },
         [getSuggestionSourceRef(target)]: {
           status: "rejected",
           reason,
@@ -5153,6 +5491,25 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
   function confirmReject() {
     if (!rejectTarget || !rejectReason.trim()) return;
     rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
+  }
+
+  function requestPursueOpportunity(opportunity) {
+    setConfirmActionTarget({
+      kind: "opportunity-pursue",
+      item: opportunity,
+      title: "Pursue this opportunity?",
+      description:
+        "This will create a My Open Action Items task on the dashboard and remove this opportunity from the active planning list.",
+      confirmLabel: "Pursue opportunity",
+    });
+  }
+
+  function confirmActionTargetChange() {
+    if (!confirmActionTarget) return;
+    if (confirmActionTarget.kind === "opportunity-pursue") {
+      pursueOpportunityActionItem(confirmActionTarget.item);
+    }
+    setConfirmActionTarget(null);
   }
 
   return (
@@ -5185,9 +5542,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
               {activeOpportunities.length} open
             </span>
             {syncingSummaryOpportunities && (
-              <span className="text-[10px] font-semibold text-accent">
-                Scanning summaries...
-              </span>
+              <span className="text-[10px] font-semibold text-accent">Scanning summaries...</span>
             )}
           </div>
         </div>
@@ -5225,22 +5580,12 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
                       {opportunity.source} - {opportunity.signalDate}
                     </p>
                     <ScoreRuleDetails item={opportunity} />
-                    <EvidencePreview
-                      evidence={opportunity.evidence}
-                      onView={() =>
-                        setEvidenceTarget({
-                          title: opportunity.title,
-                          subtitle: `${opportunity.source} - ${opportunity.healthArea}`,
-                          evidence: opportunity.evidence,
-                        })
-                      }
-                    />
                   </div>
                   <div className="flex flex-wrap gap-2 shrink-0">
                     <Button
                       size="sm"
                       disabled={!canAct || pursuingOpportunityId === opportunity.id}
-                      onClick={() => pursueOpportunityActionItem(opportunity)}
+                      onClick={() => requestPursueOpportunity(opportunity)}
                     >
                       {pursuingOpportunityId === opportunity.id && (
                         <Loader2 className="size-3.5 animate-spin mr-1" />
@@ -5274,9 +5619,19 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
             itemLabel="opportunities"
           />
         )}
+        <RejectedHistoryDisclosure
+          title="Rejected Opportunities"
+          items={rejectedOpportunityHistory}
+          emptyText="No rejected opportunities yet."
+        />
       </div>
 
-      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+      <ConfirmActionDialog
+        target={confirmActionTarget}
+        onClose={() => setConfirmActionTarget(null)}
+        onConfirm={confirmActionTargetChange}
+        isSaving={Boolean(pursuingOpportunityId)}
+      />
 
       <RejectRecommendationDialog
         target={rejectTarget}
@@ -5329,11 +5684,67 @@ function PaginatedListFooter({ page, pageSize, total, onPageChange, itemLabel = 
   );
 }
 
+function RejectedHistoryDisclosure({ title, items, emptyText }) {
+  return (
+    <details className="border-t bg-muted/10 group">
+      <summary className="list-none cursor-pointer px-4 md:px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <span className="flex items-center gap-2">
+          <span className="size-8 rounded-md bg-crit/10 text-crit flex items-center justify-center shrink-0">
+            <History className="size-4" />
+          </span>
+          <span>
+            <span className="block text-xs font-bold">{title}</span>
+            <span className="block text-[11px] text-muted-foreground">
+              {items.length
+                ? `${items.length} rejected item${items.length === 1 ? "" : "s"} saved for review`
+                : emptyText}
+            </span>
+          </span>
+        </span>
+        <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+          {items.length} rejected
+          <ChevronDown className="size-4 transition-transform group-open:rotate-180" />
+        </span>
+      </summary>
+
+      <div className="border-t bg-background/70">
+        {items.length ? (
+          <div className="max-h-72 overflow-y-auto divide-y">
+            {items.map((item) => (
+              <div key={item.id} className="px-4 md:px-6 py-3 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold leading-snug">{item.title}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      {item.sourceLabel}
+                      {item.area ? ` - ${item.area}` : ""}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide rounded-full bg-crit/10 text-crit px-2 py-1">
+                    Rejected
+                  </span>
+                </div>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  <span className="font-semibold text-foreground">Reason:</span> {item.reason}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Rejected by {item.reviewer} - {item.date}
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-4 md:px-6 py-4 text-xs text-muted-foreground">{emptyText}</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ActivityTabPlanner({ account, opportunities, escalations, profile, session }) {
   const role = profile?.role ?? "KAM";
   const isAssignedKam = role === "KAM" ? account.assignedKamId === profile?.id : false;
   const canAct = role === "Head of KAM" || (role === "KAM" && isAssignedKam);
-  const canApproveEvidence = role === "Head of KAM" || role === "CEO";
   const queryClient = useQueryClient();
   const router = useRouter();
   const saveActivityScoreSnapshot = useServerFn(upsertActivityScoreSnapshotServer);
@@ -5385,9 +5796,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   const [resolvedItems, setResolvedItems] = useState({});
   const [reviewTarget, setReviewTarget] = useState(null);
   const [reviewForm, setReviewForm] = useState(createInitialReviewForm(null, profile?.name));
-  const [evidenceTarget, setEvidenceTarget] = useState(null);
-  const [evidenceSubmitTarget, setEvidenceSubmitTarget] = useState(null);
-  const [evidenceForm, setEvidenceForm] = useState(createInitialEvidenceForm(null, profile?.name));
+  const [confirmActionTarget, setConfirmActionTarget] = useState(null);
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
   const [firefliesActions, setFirefliesActions] = useState([]);
@@ -5499,18 +5908,36 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: rejectRuleActivity, isPending: rejectingRuleActivity } = useMutation({
-    mutationFn: ({ target, reason }) =>
-      rejectActivityRuleSuggestion(
+    mutationFn: async ({ target, reason }) => {
+      const rejectedActivity = await rejectActivityRuleSuggestion(
         buildRejectedRuleActivityInput({
           accountId: account.id,
           target,
           reason,
           reviewer: profile?.name ?? "Unknown",
         }),
-      ),
+      );
+
+      if (target.sourceKind === "meeting") {
+        await markMeetingInsightActionItemState({
+          accountId: account.id,
+          requestedBy: profile?.id,
+          item: target,
+          sourceRef: getSuggestionSourceRef(target),
+          status: "dismissed",
+        });
+      }
+
+      return rejectedActivity;
+    },
     onSuccess: (_, { target, reason }) => {
       setResolvedItems((current) => ({
         ...current,
+        [target.id]: {
+          status: "rejected",
+          reason,
+          reviewedAt: new Date().toISOString(),
+        },
         [getSuggestionSourceRef(target)]: {
           status: "rejected",
           reason,
@@ -5518,42 +5945,14 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["meeting-insight-action-states", account.id] });
+      if (target.sourceKind === "meeting") {
+        setFirefliesStatus(
+          `Rejected "${target.title}". The reason was saved and the insight was removed.`,
+        );
+      }
       setRejectTarget(null);
       setRejectReason("");
-    },
-  });
-
-  const { mutate: submitEvidence, isPending: submittingEvidence } = useMutation({
-    mutationFn: ({ row, form }) =>
-      submitActivityRuleEvidence({
-        ruleActivityId: row.dbId,
-        submittedBy: profile?.name ?? "Unknown",
-        evidenceQuality: form.evidenceQuality,
-        title: form.title.trim(),
-        notes: form.notes.trim(),
-        artifactUrl: form.artifactUrl.trim(),
-        checklist: buildEvidenceChecklistPayload(form.evidenceQuality),
-        requestedLift: row.expectedLift,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
-      setEvidenceSubmitTarget(null);
-      setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
-    },
-  });
-
-  const { mutate: validateEvidence, isPending: validatingEvidence } = useMutation({
-    mutationFn: (row) =>
-      reviewActivityRuleEvidence({
-        evidenceId: row.latestPendingEvidence.id,
-        ruleActivityId: row.dbId,
-        reviewer: profile?.name ?? "Unknown",
-        reviewStatus: "Approved",
-        approvedLift: row.expectedLift,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
-      router.invalidate();
     },
   });
 
@@ -5635,7 +6034,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           current.some(
             (item) =>
               item.id === stagedRecommendation.id ||
-              normalizeActivityText(item.title) === normalizeActivityText(stagedRecommendation.title),
+              normalizeActivityText(item.title) ===
+                normalizeActivityText(stagedRecommendation.title),
           )
         ) {
           return current;
@@ -5724,7 +6124,9 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           reviewedAt: new Date().toISOString(),
         },
       }));
-      setFirefliesStatus(`Added "${item.title}" to My Open Action Items.`);
+      setFirefliesStatus(
+        `Added "${item.title}" to My Open Action Items on the dashboard and removed it from Meeting Insights.`,
+      );
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
       queryClient.invalidateQueries({ queryKey: ["meeting-insight-action-states", account.id] });
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
@@ -5738,9 +6140,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     setResolvedItems({});
     setReviewTarget(null);
     setReviewForm(createInitialReviewForm(null, profile?.name));
-    setEvidenceTarget(null);
-    setEvidenceSubmitTarget(null);
-    setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
+    setConfirmActionTarget(null);
     setRejectTarget(null);
     setRejectReason("");
     setFirefliesActions([]);
@@ -5810,8 +6210,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     (item) =>
       Boolean(
         resolvedItems[item.id] ||
-          resolvedItems[getSuggestionSourceRef(item)] ||
-          persistedSourceRefs.has(getSuggestionSourceRef(item)),
+        resolvedItems[getSuggestionSourceRef(item)] ||
+        persistedSourceRefs.has(getSuggestionSourceRef(item)),
       ),
     [persistedSourceRefs, resolvedItems],
   );
@@ -5831,11 +6231,11 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   );
   const mergedMeetingActions = useMemo(() => {
     const actionsById = new Map();
-    [...model.meetingActions, ...scoreFirefliesActions, ...savedMeetingActions].forEach((item) => {
+    [...scoreFirefliesActions, ...savedMeetingActions].forEach((item) => {
       actionsById.set(getSuggestionSourceRef(item), item);
     });
     return [...actionsById.values()];
-  }, [model.meetingActions, savedMeetingActions, scoreFirefliesActions]);
+  }, [savedMeetingActions, scoreFirefliesActions]);
   const hiddenMeetingInsightRefs = useMemo(
     () =>
       new Set(
@@ -5849,12 +6249,21 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     () => new Set((accountOpenTasks ?? []).map((task) => normalizeActivityText(task.title))),
     [accountOpenTasks],
   );
-  const activeMeetingActions = mergedMeetingActions.filter(
-    (item) => {
-      if (hiddenMeetingInsightRefs.has(getSuggestionSourceRef(item))) return false;
-      if (openTaskTitleKeys.has(normalizeActivityText(item.title))) return false;
-      return item.persisted || !isResolved(item);
-    },
+  const activeMeetingActions = mergedMeetingActions.filter((item) => {
+    if (hiddenMeetingInsightRefs.has(getSuggestionSourceRef(item))) return false;
+    if (openTaskTitleKeys.has(normalizeActivityText(item.title))) return false;
+    return item.persisted || !isResolved(item);
+  });
+  const rejectedMeetingHistory = useMemo(
+    () =>
+      savedRuleActivities
+        .filter(
+          (activity) =>
+            activity.status === "Rejected" &&
+            (activity.sourceType === "meeting" || activity.sourceType === "fireflies_meeting"),
+        )
+        .map(mapRejectedHistoryItem),
+    [savedRuleActivities],
   );
   const meetingInsightPageSize = 5;
   const meetingInsightPageCount = Math.max(
@@ -5919,7 +6328,10 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     activityPageStart + activityPageSize,
   );
   const activityShowingStart = visibleActivityRows.length ? activityPageStart + 1 : 0;
-  const activityShowingEnd = Math.min(activityPageStart + activityPageSize, visibleActivityRows.length);
+  const activityShowingEnd = Math.min(
+    activityPageStart + activityPageSize,
+    visibleActivityRows.length,
+  );
 
   useEffect(() => {
     setActivityPage(1);
@@ -5950,14 +6362,28 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     saveRuleActivity({ target: reviewTarget, form: reviewForm });
   }
 
-  function openEvidenceSubmit(row) {
-    setEvidenceSubmitTarget(row);
-    setEvidenceForm(createInitialEvidenceForm(row, profile?.name));
-  }
-
   function confirmReject() {
     if (!rejectTarget || !rejectReason.trim()) return;
     rejectRuleActivity({ target: rejectTarget, reason: rejectReason.trim() });
+  }
+
+  function requestAddMeetingInsight(item) {
+    setConfirmActionTarget({
+      kind: "meeting-add",
+      item,
+      title: "Add this meeting insight to action items?",
+      description:
+        "This will create a My Open Action Items task on the dashboard and remove this insight from the meeting suggestions list.",
+      confirmLabel: "Add action item",
+    });
+  }
+
+  function confirmActionTargetChange() {
+    if (!confirmActionTarget) return;
+    if (confirmActionTarget.kind === "meeting-add") {
+      addMeetingInsightActionItem(confirmActionTarget.item);
+    }
+    setConfirmActionTarget(null);
   }
 
   function toggleExpectedLiftSort() {
@@ -6028,7 +6454,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     await Promise.all(existingRows.map((entry) => markLegacyActivityDone(entry.sourceId)));
 
     const transientRows = rowsToComplete.filter(
-      (entry) => !entry.dbId && entry.sourceKind !== "score_metric" && entry.sourceKind !== "existing",
+      (entry) =>
+        !entry.dbId && entry.sourceKind !== "score_metric" && entry.sourceKind !== "existing",
     );
     await Promise.all(
       transientRows.map(async (entry) => {
@@ -6115,16 +6542,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                           {opportunity.source} · {opportunity.signalDate}
                         </p>
                         <ScoreRuleDetails item={opportunity} />
-                        <EvidencePreview
-                          evidence={opportunity.evidence}
-                          onView={() =>
-                            setEvidenceTarget({
-                              title: opportunity.title,
-                              subtitle: `${opportunity.source} · ${opportunity.healthArea}`,
-                              evidence: opportunity.evidence,
-                            })
-                          }
-                        />
                       </div>
                       <div className="flex items-start lg:items-center shrink-0">
                         <Button
@@ -6189,16 +6606,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                             </div>
                             <p className="text-xs text-muted-foreground">{item.reason}</p>
                             <ScoreRuleDetails item={item} />
-                            <EvidencePreview
-                              evidence={item.evidence}
-                              onView={() =>
-                                setEvidenceTarget({
-                                  title: item.title,
-                                  subtitle: `RAG analysis · ${item.healthArea}`,
-                                  evidence: item.evidence,
-                                })
-                              }
-                            />
                             <div className="flex flex-wrap gap-2">
                               <Button
                                 size="sm"
@@ -6234,10 +6641,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
 
       <div className="bg-card border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold">
-                Meeting Insights to Improve Account Score
-              </h3>
+          <div>
+            <h3 className="text-sm font-bold">Meeting Insights to Improve Account Score</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
               Meeting summaries are saved to Meeting History, and guarded action items are saved to
               the dashboard action item list.
@@ -6282,57 +6687,24 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                       {item.meetingTitle} · {item.meetingDate}
                     </p>
                     <ScoreRuleDetails item={item} />
-                    <EvidencePreview
-                      evidence={item.evidence}
-                      onView={() =>
-                        setEvidenceTarget({
-                          title: item.title,
-                          subtitle: `${item.meetingTitle} · ${item.meetingDate}`,
-                          evidence: item.evidence,
-                        })
-                      }
-                    />
                   </div>
                   <div className="flex flex-wrap gap-2 shrink-0">
-                    {item.persisted ? (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!canAct || item.status === "Validated"}
-                          onClick={() => openEvidenceSubmit(item)}
-                        >
-                          Evidence
-                        </Button>
-                        {canApproveEvidence && item.latestPendingEvidence && (
-                          <Button
-                            size="sm"
-                            disabled={validatingEvidence}
-                            onClick={() => validateEvidence(item)}
-                          >
-                            Validate
-                          </Button>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <Button
-                          size="sm"
-                          disabled={!canAct || addingMeetingInsight}
-                          onClick={() => addMeetingInsightActionItem(item)}
-                        >
-                          Add
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={!canAct}
-                          onClick={() => setRejectTarget({ ...item, sourceKind: "meeting" })}
-                        >
-                          Reject
-                        </Button>
-                      </>
-                    )}
+                    <Button
+                      size="sm"
+                      disabled={!canAct || addingMeetingInsight}
+                      onClick={() => requestAddMeetingInsight(item)}
+                    >
+                      {addingMeetingInsight && <Loader2 className="size-3.5 animate-spin mr-1" />}
+                      Add
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!canAct || rejectingRuleActivity}
+                      onClick={() => setRejectTarget({ ...item, sourceKind: "meeting" })}
+                    >
+                      Reject
+                    </Button>
                   </div>
                 </div>
               </li>
@@ -6352,6 +6724,11 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
             itemLabel="meeting insights"
           />
         )}
+        <RejectedHistoryDisclosure
+          title="Rejected Meeting Insights"
+          items={rejectedMeetingHistory}
+          emptyText="No rejected meeting insights yet."
+        />
       </div>
 
       <div className="bg-card border rounded-xl overflow-hidden">
@@ -6407,7 +6784,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         </div>
         <div className="px-4 py-2 border-b bg-muted/20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-            Showing {activityShowingStart}-{activityShowingEnd} of {visibleActivityRows.length} items
+            Showing {activityShowingStart}-{activityShowingEnd} of {visibleActivityRows.length}{" "}
+            items
           </p>
           {activityStatus && (
             <p
@@ -6574,8 +6952,8 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                 </p>
                 {aiSuggestions.length ? (
                   <p className="mt-2 text-[11px] font-medium text-muted-foreground">
-                    {aiSuggestions.length} recommendation{aiSuggestions.length === 1 ? "" : "s"} ready
-                    to review.
+                    {aiSuggestions.length} recommendation{aiSuggestions.length === 1 ? "" : "s"}{" "}
+                    ready to review.
                   </p>
                 ) : null}
               </div>
@@ -6681,18 +7059,11 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         onRefresh={generateAiSuggestions}
       />
 
-      <EvidenceDetailSheet target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
-
-      <EvidenceSubmissionDialog
-        target={evidenceSubmitTarget}
-        form={evidenceForm}
-        onChange={setEvidenceForm}
-        onClose={() => {
-          setEvidenceSubmitTarget(null);
-          setEvidenceForm(createInitialEvidenceForm(null, profile?.name));
-        }}
-        onConfirm={() => submitEvidence({ row: evidenceSubmitTarget, form: evidenceForm })}
-        isSaving={submittingEvidence}
+      <ConfirmActionDialog
+        target={confirmActionTarget}
+        onClose={() => setConfirmActionTarget(null)}
+        onConfirm={confirmActionTargetChange}
+        isSaving={addingMeetingInsight}
       />
 
       <ScheduleMeetingDialog
@@ -6765,15 +7136,12 @@ function AiRecommendationsSheet({
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               <p className="text-[11px] text-muted-foreground">
                 Select recommendations to stage them for dashboard action items.
-                {!canAct ? " You can review recommendations, but adding requires activity permissions." : ""}
+                {!canAct
+                  ? " You can review recommendations, but adding requires activity permissions."
+                  : ""}
               </p>
               <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={isLoading}
-                  onClick={onRefresh}
-                >
+                <Button size="sm" variant="outline" disabled={isLoading} onClick={onRefresh}>
                   {isLoading && <Loader2 className="size-3.5 animate-spin mr-1" />}
                   Refresh
                 </Button>
@@ -7106,98 +7474,6 @@ function EvidenceDetailSheet({ target, onClose }) {
   );
 }
 
-function EvidenceSubmissionDialog({ target, form, onChange, onClose, onConfirm, isSaving }) {
-  return (
-    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Submit evidence</DialogTitle>
-          <DialogDescription>
-            Evidence quality controls how much lift is eligible after reviewer validation.
-          </DialogDescription>
-        </DialogHeader>
-
-        {target && (
-          <div className="space-y-4">
-            <div className="rounded-lg border p-3 bg-muted/20">
-              <p className="text-sm font-semibold">{target.title}</p>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Current stage: {target.status} / {target.activityScorePct ?? 0}%
-              </p>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="evidence-quality">Evidence quality</Label>
-              <select
-                id="evidence-quality"
-                value={form.evidenceQuality}
-                onChange={(event) =>
-                  onChange((current) => ({ ...current, evidenceQuality: event.target.value }))
-                }
-                className="h-10 rounded-md border bg-background px-3 text-sm"
-              >
-                <option value="Meeting note only">Meeting note only</option>
-                <option value="Action tracker plus note">Action tracker plus note</option>
-                <option value="Completed action plus outcome proof">
-                  Completed action plus outcome proof
-                </option>
-              </select>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="evidence-title">Evidence title</Label>
-              <Input
-                id="evidence-title"
-                value={form.title}
-                onChange={(event) =>
-                  onChange((current) => ({ ...current, title: event.target.value }))
-                }
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="evidence-notes">Notes</Label>
-              <Textarea
-                id="evidence-notes"
-                rows={4}
-                value={form.notes}
-                onChange={(event) =>
-                  onChange((current) => ({ ...current, notes: event.target.value }))
-                }
-                placeholder="Mention meeting, tracker, completion proof, owner, and outcome."
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="evidence-url">Artifact URL</Label>
-              <Input
-                id="evidence-url"
-                value={form.artifactUrl}
-                onChange={(event) =>
-                  onChange((current) => ({ ...current, artifactUrl: event.target.value }))
-                }
-                placeholder="https://..."
-              />
-            </div>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            disabled={isSaving || !form.title.trim() || !form.notes.trim()}
-            onClick={onConfirm}
-          >
-            {isSaving ? "Submitting..." : "Submit evidence"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 const MEETING_TIME_OPTIONS = [
   ["08:00", "8:00 AM"],
   ["08:30", "8:30 AM"],
@@ -7220,14 +7496,7 @@ const MEETING_TIME_OPTIONS = [
   ["17:00", "5:00 PM"],
 ];
 
-function ScheduleMeetingDialog({
-  target,
-  form,
-  onChange,
-  onClose,
-  onConfirm,
-  isSaving,
-}) {
+function ScheduleMeetingDialog({ target, form, onChange, onClose, onConfirm, isSaving }) {
   return (
     <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-3xl max-h-[88vh] overflow-y-auto">
@@ -7377,6 +7646,40 @@ function ScheduleMeetingDialog({
   );
 }
 
+function ConfirmActionDialog({ target, onClose, onConfirm, isSaving = false }) {
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{target?.title ?? "Confirm action"}</DialogTitle>
+          <DialogDescription>
+            {target?.description ??
+              "Please confirm before this recommendation is moved into action items."}
+          </DialogDescription>
+        </DialogHeader>
+
+        {target?.item && (
+          <div className="rounded-lg border bg-muted/20 p-3">
+            <p className="text-sm font-semibold">{target.item.title}</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              It will appear in My Open Action Items and disappear from this suggestion list.
+            </p>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={isSaving} onClick={onConfirm}>
+            {isSaving ? "Adding..." : (target?.confirmLabel ?? "Confirm")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function RejectRecommendationDialog({
   target,
   value,
@@ -7391,7 +7694,8 @@ function RejectRecommendationDialog({
         <DialogHeader>
           <DialogTitle>Reject recommendation</DialogTitle>
           <DialogDescription>
-            Rejected recommendations are removed from active suggestions in this tab.
+            Add a reason before removing this recommendation. The rejection is saved for audit and
+            the item is removed from the active list.
           </DialogDescription>
         </DialogHeader>
 
@@ -7979,11 +8283,13 @@ function createInitialReviewForm(item, ownerName) {
     };
   }
 
+  const title = item.title ?? item.service ?? "";
+
   return {
-    title: item.title ?? "",
+    title,
     owner: ownerName ?? "KAM Person",
     dueDate: getFutureDateInput(getSuggestedReviewDays(item)),
-    nextStep: item.nextStep ?? item.title ?? "",
+    nextStep: item.nextStep ?? title,
   };
 }
 
@@ -8008,6 +8314,27 @@ function formatDraftDate(dateValue) {
 
 function mapPriorityToRag(priority) {
   return priority === "High" ? "R" : priority === "Low" ? "G" : "A";
+}
+
+function getRejectedHistorySourceLabel(sourceType) {
+  if (sourceType === "opportunity") return "Opportunity";
+  if (sourceType === "meeting" || sourceType === "fireflies_meeting") return "Meeting Insight";
+  if (sourceType === "rag") return "Activity Rule";
+  if (sourceType === "score_metric") return "Score Marking Matrics";
+  return sourceType ? sourceType.replace(/_/g, " ") : "Suggestion";
+}
+
+function mapRejectedHistoryItem(activity) {
+  return {
+    id: activity.id,
+    title: activity.title,
+    reason:
+      activity.nextStep || activity.weakSignal || activity.successCriteria || "No reason saved.",
+    reviewer: activity.owner || "Unknown",
+    date: formatDraftDate(activity.updatedAt || activity.generatedAt),
+    sourceLabel: getRejectedHistorySourceLabel(activity.sourceType),
+    area: activity.parameter || activity.impactedMetric || "",
+  };
 }
 
 function mapMeetingActionToActivityRow(item, sourceKind) {
@@ -8221,44 +8548,6 @@ function buildRejectedRuleActivityInput({ accountId, target, reason, reviewer })
     reviewCadence: target.reviewCadence ?? null,
     sourceType: sourceKind,
     sourceRef: getSuggestionSourceRef(target),
-  };
-}
-
-function createInitialEvidenceForm(row, submitterName) {
-  return {
-    submittedBy: submitterName ?? "Unknown",
-    evidenceQuality: "Action tracker plus note",
-    title: row ? `Evidence for ${row.title}` : "",
-    notes: "",
-    artifactUrl: "",
-  };
-}
-
-function buildEvidenceChecklistPayload(evidenceQuality) {
-  const checks = {
-    "Meeting note only": [
-      "Meeting title/date is present",
-      "Action is explicit",
-      "Account/client context is present",
-      "Owner or next step is mentioned",
-    ],
-    "Action tracker plus note": [
-      "Meeting note is present",
-      "Owner is assigned",
-      "Due date is assigned",
-      "Action tracker or task reference is present",
-    ],
-    "Completed action plus outcome proof": [
-      "Completion evidence is present",
-      "Outcome/result is documented",
-      "Client or internal validation exists",
-      "Reviewer can tie outcome to impacted metric",
-    ],
-  };
-
-  return {
-    evidenceQuality,
-    checks: checks[evidenceQuality] ?? [],
   };
 }
 
@@ -8655,7 +8944,10 @@ function combineDateAndTime(date, time) {
 }
 
 function formatGoogleCalendarDateTime(date) {
-  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  return date
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}/, "");
 }
 
 function buildGoogleCalendarTemplateUrl(form) {
@@ -8902,7 +9194,10 @@ function EducateTab({ account }) {
                   <div className="flex items-center justify-between mt-1">
                     <div className="flex flex-wrap gap-1">
                       {a.tags.map((t) => (
-                        <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-semibold">
+                        <span
+                          key={t}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-semibold"
+                        >
                           {t}
                         </span>
                       ))}
@@ -8931,7 +9226,6 @@ function EducateTab({ account }) {
           )}
         </Card>
       </div>
-
     </div>
   );
 }
