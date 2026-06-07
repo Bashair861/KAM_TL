@@ -1119,6 +1119,17 @@ export async function updateHealthBlock(accountId, area, score, metricUpdates, k
       ),
     );
   }
+
+  // Recompute accounts.health as the average of all area scores (×10 to stay on 0-100 scale)
+  const { data: allAreaScores } = await supabase
+    .from("health_scores")
+    .select("score")
+    .eq("account_id", accountId);
+  if (allAreaScores && allAreaScores.length > 0) {
+    const avg = allAreaScores.reduce((acc, s) => acc + (s.score ?? 0), 0) / allAreaScores.length;
+    const newHealth = parseFloat((avg * 10).toFixed(1));
+    await supabase.from("accounts").update({ health: newHealth }).eq("id", accountId);
+  }
 }
 // --- KPI section templates used when creating new accounts -------------------
 const NEW_ACCOUNT_KPI_TEMPLATES = {
