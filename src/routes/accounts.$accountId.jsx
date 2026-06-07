@@ -1223,7 +1223,7 @@ function AccountDetailPage() {
               Growth Upside
             </p>
             <span className="text-3xl font-bold text-accent">
-              {formatCurrency(account.growthUpside)}
+              {formatCurrency(account.growthPipelineValue)}
             </span>
             <p className="text-xs text-muted-foreground mt-2">
               {account.whiteSpaceCount} white-space items
@@ -2693,6 +2693,7 @@ function OverviewTab({ account }) {
       contractDuration: account.contractDuration || account.contractScoring?.duration || "",
       linkedinUrl: account.linkedinUrl ?? "",
       websiteUrl: account.websiteUrl ?? "",
+      primary: account.primaryContact?.name ?? "",
     }),
     [
       account.businessInfo,
@@ -2710,6 +2711,7 @@ function OverviewTab({ account }) {
       account.revenue,
       account.teamSize,
       account.websiteUrl,
+      account.primaryContact?.name,
     ],
   );
   const [fields, setFields] = useState(initialFields);
@@ -3878,14 +3880,28 @@ function KycField({ n, label, icon, children, wide, editable, value, onChange, m
 function ScoreMatricsTab({ account }) {
   const [expanded, setExpanded] = useState(null);
   const open = (title, hint, block, area) => setExpanded({ title, hint, block, area });
+  const areaScores = [
+    account.relationshipHealth.score,
+    account.projectHealth.score,
+    account.whiteSpace.score,
+    account.contractScoring.score,
+    account.csat.score,
+    account.riskScoring.score,
+    account.resourceHealth.score,
+    account.financialHealth.score,
+  ];
+  const overallScore = parseFloat(
+    (areaScores.reduce((a, b) => a + b, 0) / areaScores.length).toFixed(1),
+  );
   return (
     <div className="space-y-6">
       {/* All 8 health areas + overall at a glance */}
       <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2">
         <ScoreCard
           title="Overall"
-          score={account.health / 10}
+          score={overallScore}
           subtitle={`${account.trend >= 0 ? "+" : ""}${account.trend}%`}
+          bold
         />
         <ScoreCard title="Relationship" score={account.relationshipHealth.score} />
         <ScoreCard title="Project" score={account.projectHealth.score} />
@@ -4011,16 +4027,18 @@ function ScoreMatricsTab({ account }) {
     </div>
   );
 }
-function ScoreCard({ title, score, subtitle, inverse }) {
+function ScoreCard({ title, score, subtitle, inverse, bold }) {
   const good = inverse ? score >= 7 : score >= 8;
   const ok = inverse ? score >= 5 : score >= 6;
   const color = good ? "text-success" : ok ? "text-warn" : "text-crit";
   return (
-    <div className="bg-card border rounded-xl p-3">
-      <p className="text-[9px] uppercase tracking-widest text-muted-foreground font-bold truncate">
+    <div className={`bg-card border rounded-xl p-3 ${bold ? "ring-2 ring-primary" : ""}`}>
+      <p
+        className={`uppercase tracking-widest text-muted-foreground font-bold truncate ${bold ? "text-[10px]" : "text-[9px]"}`}
+      >
         {title}
       </p>
-      <p className={`text-xl font-bold mt-0.5 ${color}`}>
+      <p className={`font-bold mt-0.5 ${bold ? "text-2xl" : "text-xl"} ${color}`}>
         {score.toFixed(1)}
         <span className="text-[10px] text-muted-foreground">/10</span>
       </p>
@@ -4769,11 +4787,6 @@ function ContractScoringBlock({ account, onExpand }) {
             </button>
           )}
         </div>
-      </div>
-      <div className="px-4 md:px-6 py-4 border-b grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-        <ContractFact label="Type" value={c.type || account.contractType} />
-        <ContractFact label="Duration" value={c.duration} />
-        <ContractFact label="Renewal Date" value={formatDisplayDate(c.renewalDate)} />
       </div>
       {c.metrics.length > 0 && (
         <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
