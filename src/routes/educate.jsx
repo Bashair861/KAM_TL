@@ -91,13 +91,10 @@ function EducatePage() {
       }),
   });
 
-  // Auto-fetch on account ready or tab change
+  // Reset shared state when account or tab changes
   useEffect(() => {
-    if (selectedAccountId && (fullAccount || accounts.length)) {
-      setSharedIds([]);
-      articlesMutation.mutate(activeTab);
-    }
-  }, [selectedAccountId, !!fullAccount, activeTab]);
+    setSharedIds([]);
+  }, [selectedAccountId, activeTab]);
 
   // Log session mutation
   const logMutation = useMutation({
@@ -257,8 +254,17 @@ function EducatePage() {
               </div>
             )}
             {!articlesMutation.isPending && !articlesMutation.isError && articles.length === 0 && (
-              <div className="py-10 text-center text-sm text-muted-foreground">
-                Click Refresh to load articles.
+              <div className="py-10 text-center space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Select an account and click <strong>Refresh</strong> to fetch web articles.
+                </p>
+                <button
+                  onClick={() => { setSharedIds([]); articlesMutation.mutate(activeTab); }}
+                  disabled={articlesMutation.isPending}
+                  className="mx-auto flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-primary text-primary-foreground rounded-md disabled:opacity-50"
+                >
+                  <RefreshCw className="size-3" /> Load Articles
+                </button>
               </div>
             )}
           </div>
