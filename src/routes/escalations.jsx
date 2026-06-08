@@ -657,15 +657,24 @@ function formatDate(val) {
 function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, onClose, onActionToggled }) {
   const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
   const [items, setItems] = useState(esc.actionItems ?? []);
+  const [togglingIdx, setTogglingIdx] = useState(null);
 
   async function toggle(item, idx) {
+    if (!item.id || togglingIdx !== null) return;
     const newDone = !item.done;
+    setTogglingIdx(idx);
+    // Optimistic update
+    const updated = items.map((a, i) => i === idx ? { ...a, done: newDone } : a);
+    setItems(updated);
     try {
       await toggleEscalationActionItem(item.id, newDone);
-      const updated = items.map((a, i) => i === idx ? { ...a, done: newDone } : a);
-      setItems(updated);
       onActionToggled({ ...esc, actionItems: updated });
-    } catch {}
+    } catch {
+      // Revert on failure
+      setItems(items);
+    } finally {
+      setTogglingIdx(null);
+    }
   }
 
   const slaColor = esc.slaRemainingHours < 24 ? "text-crit" : esc.slaRemainingHours < 48 ? "text-warn" : "text-success";
@@ -714,17 +723,28 @@ function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, on
               </p>
               <div className="border rounded-lg divide-y overflow-hidden">
                 {items.map((a, i) => (
-                  <label key={a.id ?? a.label} className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/30 cursor-pointer">
+                  <label
+                    key={a.id ?? a.label}
+                    className={`flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-colors ${
+                      a.done ? "bg-success/5 hover:bg-success/10" : "hover:bg-muted/30"
+                    } ${togglingIdx === i ? "opacity-60" : ""}`}
+                  >
                     <input
                       type="checkbox"
                       checked={a.done}
                       onChange={() => toggle(a, i)}
-                      className="shrink-0 accent-primary"
+                      disabled={togglingIdx !== null}
+                      className="shrink-0 accent-primary size-4"
                     />
-                    <span className={`text-xs flex-1 ${a.done ? "line-through text-muted-foreground" : ""}`}>
+                    <span className={`text-xs flex-1 leading-snug ${a.done ? "line-through text-muted-foreground" : "text-foreground"}`}>
                       {a.label}
                     </span>
-                    {a.done && <CheckCircle2 className="size-3.5 text-success shrink-0" />}
+                    {togglingIdx === i
+                      ? <Loader2 className="size-3.5 animate-spin text-muted-foreground shrink-0" />
+                      : a.done
+                        ? <CheckCircle2 className="size-3.5 text-success shrink-0" />
+                        : null
+                    }
                   </label>
                 ))}
               </div>

@@ -1647,7 +1647,7 @@ export async function fetchEscalations(accountId) {
     realisticCheck: e.realistic_check ?? undefined,
     clientFeedback: e.client_feedback ?? undefined,
     stakeholders: e.stakeholders ?? [],
-    actionItems: (e.escalation_action_items ?? []).map((a) => ({ label: a.label, done: a.done })),
+    actionItems: (e.escalation_action_items ?? []).map((a) => ({ id: a.id, label: a.label, done: a.done })),
   }));
 }
 // --- fetch opportunities ------------------------------------------------------
