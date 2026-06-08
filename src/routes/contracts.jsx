@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { formatCurrency } from "@/data/kam-data";
 import { fetchContracts } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
+import { formatRenewalDate } from "@/lib/utils";
 import { AlertTriangle, FileText } from "lucide-react";
 export const Route = createFileRoute("/contracts")({
   head: () => ({
@@ -17,7 +18,11 @@ function ContractsPage() {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const userId = profile?.id;
-  const { data: contracts = [], isLoading, error } = useQuery({
+  const {
+    data: contracts = [],
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: ["contracts", userId, role],
     queryFn: () => fetchContracts({ role, userId }),
   });
@@ -89,7 +94,7 @@ function ContractsPage() {
                         {formatContractValue(c.contractValue)}
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <RenewalBadge days={c.renewalDays} />
+                        <RenewalBadge date={c.renewalDate} />
                       </td>
                       <td className="px-6 py-4 text-right">
                         <ComplianceBadge value={c.contractCompliance} />
@@ -106,8 +111,17 @@ function ContractsPage() {
   );
 }
 // ── Shared atoms ────────────────────────────────────────────────────────────
-function RenewalBadge({ days }) {
-  const numericDays = Number(days);
+function daysUntilRenewal(value) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.ceil((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+function RenewalBadge({ date }) {
+  const numericDays = daysUntilRenewal(date);
+  const dateLabel = formatRenewalDate(date);
   if (!Number.isFinite(numericDays)) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
@@ -118,7 +132,7 @@ function RenewalBadge({ days }) {
       className={`inline-flex items-center gap-1 text-xs font-semibold ${urgent ? "text-crit" : warn ? "text-warn" : "text-muted-foreground"}`}
     >
       {(urgent || warn) && <AlertTriangle className="size-3" />}
-      {Math.round(numericDays)}d
+      {dateLabel}
     </span>
   );
 }

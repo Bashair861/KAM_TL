@@ -7,8 +7,8 @@ import { useAuth } from "@/context/AuthContext";
 export const Route = createFileRoute("/set-password")({
   head: () => ({
     meta: [
-      { title: "Set Password - Aether KAM" },
-      { name: "description", content: "Set your password for Aether KAM." },
+      { title: "Set New Password - Aether KAM" },
+      { name: "description", content: "Set or reset your password for Aether KAM." },
     ],
   }),
   component: SetPasswordPage,
@@ -71,9 +71,9 @@ function SetPasswordPage() {
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-8">
         <div className="w-full max-w-sm">
           <div className="mb-8 text-center">
-            <h1 className="text-2xl font-bold tracking-tight">Set your password</h1>
+            <h1 className="text-2xl font-bold tracking-tight">Set a new password</h1>
             <p className="text-sm text-muted-foreground mt-2">
-              Create a password to finish setting up your account.
+              Create a password for your Aether KAM account.
             </p>
           </div>
 
@@ -89,10 +89,18 @@ function SetPasswordPage() {
             ) : !session ? (
               <div className="text-center py-4">
                 <Lock className="size-8 mx-auto text-muted-foreground mb-3" />
-                <p className="text-sm font-semibold">Invite session not found</p>
+                <p className="text-sm font-semibold">Password session not found</p>
                 <p className="text-xs text-muted-foreground mt-2">
-                  Open the latest invite email link, or ask your administrator to resend access.
+                  Open the latest password reset or invite email link, or request a new reset from
+                  the sign-in page.
                 </p>
+                <button
+                  type="button"
+                  onClick={() => navigate({ to: "/login" })}
+                  className="mt-4 inline-flex h-9 items-center justify-center rounded-md border bg-background px-3 text-sm font-semibold hover:bg-muted/40 transition-colors"
+                >
+                  Return to sign in
+                </button>
               </div>
             ) : complete ? (
               <div className="text-center py-4">
@@ -151,7 +159,11 @@ function SetPasswordPage() {
                   disabled={submitting}
                   className="w-full h-10 rounded-md bg-accent text-white text-sm font-semibold hover:opacity-90 active:opacity-80 disabled:opacity-60 transition-opacity flex items-center justify-center gap-2 mt-1"
                 >
-                  {submitting ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
+                  {submitting ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Lock className="size-4" />
+                  )}
                   {submitting ? "Saving..." : "Save password"}
                 </button>
               </>

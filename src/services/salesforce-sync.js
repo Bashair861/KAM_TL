@@ -1,16 +1,47 @@
 import { createServerFn } from "@tanstack/react-start";
+import { ensureContractRenewalNotifications } from "@/services/notifications";
 
 const ACCOUNT_SYNC_COLUMNS = new Set([
   "industry",
   "business_info",
   "client_history",
+  "contract_value",
+  "arr",
   "revenue",
   "primary_contact_name",
   "primary_contact_role",
   "region",
   "employees",
   "main_business_flow",
+  "renewal_date",
+  "contract_duration",
+  "contract_type",
+  "last_touch",
+  "linkedin_url",
+  "website_url",
 ]);
+const ACCOUNT_NUMBER_COLUMNS = new Set(["contract_value", "arr"]);
+const CONTRACT_SYNC_COLUMNS = new Set([
+  "type",
+  "duration",
+  "renewal_date",
+  "auto_renew",
+  "non_terminator",
+  "min_one_year",
+  "price_hike",
+  "backup_exists",
+  "critical_resources",
+  "customer_feedback",
+]);
+const CONTRACT_BOOLEAN_COLUMNS = new Set([
+  "auto_renew",
+  "non_terminator",
+  "min_one_year",
+  "backup_exists",
+]);
+const CONTRACT_NUMBER_COLUMNS = new Set(["critical_resources"]);
+const RETENTION_GROWTH_SYNC_COLUMNS = new Set(["service", "offered", "delivered"]);
+const RETENTION_GROWTH_BOOLEAN_COLUMNS = new Set(["offered", "delivered"]);
 const STAKEHOLDER_SYNC_COLUMNS = new Set(["name", "role", "email", "influence", "last_contact"]);
 const INFLUENCE_VALUES = new Set(["Champion", "Decision Maker", "Influencer", "Blocker"]);
 
@@ -22,6 +53,21 @@ function readEnv(name) {
 function normalizedText(value) {
   const text = String(value ?? "").trim();
   return text.length > 0 ? text : null;
+}
+
+function normalizedNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(String(value).replace(/[$,\s]/g, ""));
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+function normalizedBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value).trim().toLowerCase();
+  if (["true", "yes", "y", "1"].includes(text)) return true;
+  if (["false", "no", "n", "0"].includes(text)) return false;
+  return null;
 }
 
 function stakeholderMatchKey(value) {
@@ -65,11 +111,95 @@ async function createSupabaseClients(accessToken) {
 }
 
 function cleanAccountUpdates(updates) {
-  return Object.fromEntries(
-    Object.entries(updates ?? {}).filter(
-      ([column, value]) => ACCOUNT_SYNC_COLUMNS.has(column) && value !== undefined,
-    ),
-  );
+  const clean = {};
+  Object.entries(updates ?? {}).forEach(([column, value]) => {
+    if (!ACCOUNT_SYNC_COLUMNS.has(column) || value === undefined) return;
+    clean[column] = ACCOUNT_NUMBER_COLUMNS.has(column) ? normalizedNumber(value) : value;
+  });
+  return clean;
+}
+
+function cleanContractUpdates(updates) {
+  const clean = {};
+  Object.entries(updates ?? {}).forEach(([column, value]) => {
+    if (!CONTRACT_SYNC_COLUMNS.has(column) || value === undefined) return;
+    if (CONTRACT_BOOLEAN_COLUMNS.has(column)) {
+      clean[column] = normalizedBoolean(value);
+      return;
+    }
+    if (CONTRACT_NUMBER_COLUMNS.has(column)) {
+      clean[column] = normalizedNumber(value);
+      return;
+    }
+    clean[column] = value;
+  });
+  return clean;
+}
+
+function cleanRetentionGrowthFields(fields) {
+  const clean = {};
+  Object.entries(fields ?? {}).forEach(([column, value]) => {
+    if (!RETENTION_GROWTH_SYNC_COLUMNS.has(column) || value === undefined) return;
+    if (RETENTION_GROWTH_BOOLEAN_COLUMNS.has(column)) {
+      clean[column] = normalizedBoolean(value);
+      return;
+    }
+    clean[column] = normalizedText(value);
+  });
+  return clean;
+}
+
+async function syncContractReferences(admin, accountId, accountUpdates, directContractUpdates) {
+  const contractUpdates = { account_id: accountId, ...cleanContractUpdates(directContractUpdates) };
+  if (Object.prototype.hasOwnProperty.call(accountUpdates, "contract_type")) {
+    contractUpdates.type = accountUpdates.contract_type;
+  }
+  if (Object.prototype.hasOwnProperty.call(accountUpdates, "contract_duration")) {
+    contractUpdates.duration = accountUpdates.contract_duration;
+  }
+  if (Object.prototype.hasOwnProperty.call(accountUpdates, "renewal_date")) {
+    contractUpdates.renewal_date = accountUpdates.renewal_date;
+  }
+  if (Object.keys(contractUpdates).length <= 1) return;
+
+  const { error } = await admin
+    .from("contract_details")
+    .upsert(contractUpdates, { onConflict: "account_id" });
+  if (error) throw error;
+}
+
+async function syncRetentionGrowth(admin, accountId, retentionGrowthUpdates) {
+  for (const update of retentionGrowthUpdates) {
+    const fields = cleanRetentionGrowthFields(update.fields);
+    const service = normalizedText(update.service ?? fields.service);
+    if (!service) continue;
+
+    const payload = {
+      account_id: accountId,
+      service,
+      ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null)),
+    };
+
+    const { data: existingRows, error: fetchError } = await admin
+      .from("retention_growth")
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("service", service)
+      .limit(1);
+    if (fetchError) throw fetchError;
+
+    const existing = existingRows?.[0];
+    if (existing) {
+      const { account_id: _accountId, service: _service, ...updates } = payload;
+      if (Object.keys(updates).length === 0) continue;
+      const { error } = await admin.from("retention_growth").update(updates).eq("id", existing.id);
+      if (error) throw error;
+      continue;
+    }
+
+    const { error } = await admin.from("retention_growth").insert(payload);
+    if (error) throw error;
+  }
 }
 
 function cleanStakeholderFields(fields) {
@@ -140,6 +270,10 @@ export const syncSalesforceMappedFieldsServer = createServerFn({ method: "POST" 
   .handler(async ({ data }) => {
     const { admin } = await createSupabaseClients(data.accessToken);
     const accountUpdates = cleanAccountUpdates(data.payload.accountUpdates);
+    const contractUpdates = cleanContractUpdates(data.payload.contractUpdates);
+    const retentionGrowthUpdates = Array.isArray(data.payload.retentionGrowthUpdates)
+      ? data.payload.retentionGrowthUpdates
+      : [];
     const stakeholderUpdates = Array.isArray(data.payload.stakeholderUpdates)
       ? data.payload.stakeholderUpdates
       : [];
@@ -149,9 +283,19 @@ export const syncSalesforceMappedFieldsServer = createServerFn({ method: "POST" 
       if (error) throw error;
     }
 
+    await syncContractReferences(admin, data.accountId, accountUpdates, contractUpdates);
+    await syncRetentionGrowth(admin, data.accountId, retentionGrowthUpdates);
     await syncStakeholders(admin, data.accountId, stakeholderUpdates);
+    if (
+      Object.prototype.hasOwnProperty.call(accountUpdates, "renewal_date") ||
+      Object.prototype.hasOwnProperty.call(contractUpdates, "renewal_date")
+    ) {
+      await ensureContractRenewalNotifications(admin).catch(() => null);
+    }
     return {
       accountFieldCount: Object.keys(accountUpdates).length,
+      contractFieldCount: Object.keys(contractUpdates).length,
+      retentionGrowthGroupCount: retentionGrowthUpdates.length,
       stakeholderGroupCount: stakeholderUpdates.length,
     };
   });

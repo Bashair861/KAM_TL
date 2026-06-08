@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 4.5 - Salesforce Integration (lookup + sync + field-mapping modal)
+  Last updated: Phase 4.6 - Project Charter Sheet Upload + Salesforce Integration
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -32,6 +32,7 @@ TECH STACK
 - Lucide React (icons)
 - Radix UI (headless components)
 - Recharts (charts)
+- JSZip (client-side .xlsx parsing for Project Charter Auto-fill)
 - bun (preferred package manager + script runner)
 - Deployed target: Cloudflare Pages (via @cloudflare/vite-plugin)
 
@@ -48,7 +49,7 @@ src/
     index.jsx               ← Dashboard page
     login.jsx               ← Login page (no sidebar)
     accounts.index.jsx      ← Accounts portfolio list + KAM assignment column
-    accounts.$accountId.jsx ← Account detail (Client 360) — largest file, 7 tabs
+    accounts.$accountId.jsx ← Account detail (Client 360) — largest file, 9 tabs
     contracts.jsx           ← Contracts page (dynamic, Supabase-backed)
     strategy.jsx            ← Strategy builder page (still partially static)
     escalations.jsx         ← Escalations list page
@@ -84,6 +85,11 @@ src/
     add-account-history.sql        ← Migration: creates account_history audit log table
     add-account-insert-policy.sql  ← Migration: INSERT RLS policy on accounts table
     add-health-scores-insert-policy.sql ← Migration: INSERT RLS policy on health_scores
+    add-account-linkedin-url.sql   <- Migration: adds linkedin_url to accounts
+    add-linkedin-summary.sql       <- Migration: adds linkedin_summary to accounts
+    add-linkedin-summary-updated-at.sql <- Migration: tracks LinkedIn summary timestamp
+    add-account-website-summary.sql <- Migration: adds website URL + AI website summary fields
+    add-account-contract-fields.sql <- Migration: adds contract renewal date + duration fields
 
   styles.css                ← Global Tailwind CSS styles + custom design tokens
 
@@ -97,6 +103,16 @@ Recent JS additions:
   src/services/user-admin.js        <- Server-only Supabase Auth invite function
   src/db/add-user-management.sql    <- profiles.is_active + user management RPCs/RLS
   src/db/rename-ceo-role.sql        <- keeps user_role enum value as CEO
+  src/db/add-account-linkedin-url.sql <- accounts.linkedin_url for Salesforce Account LinkedIn
+  src/db/add-linkedin-summary.sql   <- accounts.linkedin_summary for AI-generated LinkedIn brief
+  src/db/add-linkedin-summary-updated-at.sql <- accounts.linkedin_summary_updated_at timestamp
+  src/db/add-account-website-summary.sql <- accounts.website_url + website_summary fields
+  src/db/add-account-contract-fields.sql <- accounts.renewal_date + contract_duration
+  src/services/linkedin-summary.js  <- Server fn: generates/saves Account's Linkedin Summary
+  src/services/website-summary.js   <- Server fn: generates/saves Account's Website Summary
+  accounts.$accountId.jsx           <- Project Charter Auto-fill:
+                                       client-side .xlsx parser + confirmation dialog
+                                       for KYC field auto-fill in the Overview tab
 
 Salesforce integration additions (Phase 4.5):
   src/services/salesforce.js        <- Server fn: lookupSalesforceAccountBundle
@@ -108,6 +124,33 @@ Salesforce integration additions (Phase 4.5):
   SalesforceMappingModal            <- Inline component in accounts.$accountId.jsx
                                        Field-by-field review table with checkboxes
                                        Groups: Account/KYC + one group per Salesforce Contact
+  Account Details section           <- Overview tab section below KYC for LinkedIn URL
+
+Project Charter sheet upload additions (Phase 4.6):
+  Project Charter Auto-fill         <- Overview tab upload control beside Salesforce sync
+                                       Accepts .xlsx only; reads in browser with JSZip
+                                       No server upload, no Supabase storage, no env vars
+  extractKycFieldMatchesFromXlsx    <- Inline helper in accounts.$accountId.jsx
+                                       Reads sharedStrings + worksheet XML from the workbook
+                                       Matches known labels, aliases, and inline "Label: value"
+                                       values, then searches nearby cells for valid values
+  CharterMappingDialog              <- Inline review modal in accounts.$accountId.jsx
+                                       Shows matched Excel label, KYC field, value, DB target,
+                                       and whether Save KYC will persist the value
+                                       Preselects rows with extracted values; user can select,
+                                       deselect, apply, or close without saving
+  KYC_CHARTER_FIELD_KEYS            <- Extracts 12 KYC-facing charter fields:
+                                       accountStatus, industry, business, history,
+                                       stakeholdersInfo, revenue, mrrArr, primary, tenure,
+                                       team, competitors, flow
+                                       Does not currently extract Account Details fields:
+                                       contract renewal date, contract duration, LinkedIn URL,
+                                       or website URL
+  Save behavior                     <- Applying selected rows updates local KYC form state.
+                                       DB-backed rows persist only when user clicks Save KYC.
+                                       accountStatus + stakeholdersInfo are local/display-only
+                                       because they do not map to current DB writes.
+                                       Files are never stored after parsing.
 
 USER ROLES & PERMISSIONS (ROLE_PERMISSIONS in kam-data.js)
 ────────────────────────────────────────────────────────────────────────────────
@@ -194,6 +237,8 @@ PHASE 3 — Write Operations (partial — in progress)
       - fetchAccountHistory() fetches ordered by edited_at DESC
       - Logging wired to: KYC save, KAM assignment, KPI score save
       - add-account-history.sql creates the table + RLS policies
+      - add-account-work-history.sql adds DB triggers for activities, escalations,
+        escalation action items, retention/growth services, education log, and opportunities
   ✓ Contracts page fully dynamic
       - fetchContracts() joins accounts + contract_details in one Supabase query
       - Shows: Account, Type, Duration, Value, Renewal, Process Compliance
@@ -202,7 +247,7 @@ PHASE 3 — Write Operations (partial — in progress)
   ✓ New Account creation (Head of KAM only)
       - "+ New Account" button visible only to Head of KAM role
       - NewAccountModal: name, short code (auto-derived), industry, region, tier,
-        contract type, contract value, ARR, renewal days, primary contact, assign KAM
+        contract type, contract value, ARR, renewal date, primary contact, assign KAM
       - Account ID auto-generated as slug from name (e.g. "Helios Robotics" → "helios-robotics")
       - createAccount() inserts into accounts table with sensible defaults
         (health: 50, status: healthy, trend: 0, retention_risk: Low)
@@ -333,8 +378,9 @@ IMPORTANT DECISIONS & PATTERNS
 9. NEW ACCOUNT DEFAULTS
    - health: 50, trend: 0, status: 'healthy', retention_risk: 'Low'
    - growth_upside: 0, white_space_count: 0, is_startup: false
-   - No health_scores, health_metrics, or contract_details rows created on insert
-   - KPI editor handles missing rows by inserting on first save
+   - health_scores rows are pre-populated for all 8 areas on insert
+   - contract_details reference row is created on insert for type/duration/renewal date
+   - KPI editor still handles missing legacy rows by inserting on first save
    - Score bars derived from kpi_data jsonb when health_metrics rows are absent
 
 10. DERIVED METRIC BARS PATTERN
@@ -346,6 +392,29 @@ IMPORTANT DECISIONS & PATTERNS
 
 
 ────────────────────────────────────────────────────────────────────────────────
+11. PROJECT CHARTER SHEET UPLOAD PATTERN
+    - Charter upload is client-side only: accounts.$accountId.jsx imports JSZip,
+      validates .xlsx files, and parses xl/sharedStrings.xml + worksheet XML in browser.
+    - It is not OCR and does not upload/store the workbook in Supabase or on the server.
+    - Upload controls are role-gated by the existing editable permission and disabled
+      while the workbook is being read.
+    - Label matching uses KYC_FORM_FIELDS labels + aliases. It supports both
+      "Label: value" cells and nearby right/below/diagonal value cells.
+    - Extracted values are filtered through field-specific validators so template
+      labels, instructions, placeholders, and generic words are not autofilled.
+    - CharterMappingDialog is mandatory review: only checked rows with extracted
+      values are applied. Rows can show Yes, Local, No value, or No match.
+    - Apply Selected updates local KYC state only. DB-backed values are persisted
+      later through the existing Save KYC flow and history logging.
+    - The dialog stays open after Apply Selected so the user can review the success
+      message, apply another selection, or close manually.
+    - Local-only charter values such as accountStatus and stakeholdersInfo update
+      savedSnapshot immediately because they are visible context but not DB-backed.
+    - Current Charter extraction intentionally excludes Account Details fields
+      (contractRenewalDate, contractDuration, linkedinUrl, websiteUrl), even though
+      those fields exist in KYC_FORM_FIELDS for manual edits and Salesforce sync.
+
+
 WHAT IS NEXT — UPCOMING PHASES
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -370,7 +439,19 @@ PHASE 4.5 (remaining) — Salesforce AI mapping assistant
   - Uses GEMINI_API_KEY env var (Google Gemini free tier — no cost)
   - AI prompt scope is strictly: field mapping only (no other purpose)
 
-PHASE 5 - AI Assistant (Google Gemini)
+PHASE 5 - AI Assistant
+  - Added Account's Linkedin Summary section in account Overview tab
+      - Uses accounts.linkedin_url as input
+      - Calls Gemini or OpenAI server-side via src/services/linkedin-summary.js
+      - Saves 2-3 paragraph output to accounts.linkedin_summary
+      - Saves the last generated time to accounts.linkedin_summary_updated_at
+      - Focus metrics: new job postings, company major activities,
+        competitor information, CEO status / communication updates
+  - Added Account's Website Summary section below LinkedIn Summary
+      - Uses accounts.website_url as input
+      - Calls OpenAI server-side via src/services/website-summary.js
+      - Saves 2-3 paragraph output to accounts.website_summary
+      - Saves the last generated time to accounts.website_summary_updated_at
   - Wire src/services/ai.js to Google Gemini API
   - AI bot that answers questions about an account based on its data
   - Suggested entry: account detail page
@@ -425,6 +506,11 @@ To set up a FRESH Supabase project from scratch:
   10. Run add-health-scores-insert-policy.sql in SQL Editor
   11. Run rename-ceo-role.sql in SQL Editor
   12. Run add-user-management.sql in SQL Editor
+  13. Run add-account-linkedin-url.sql in SQL Editor
+  14. Run add-linkedin-summary.sql in SQL Editor
+  15. Run add-linkedin-summary-updated-at.sql in SQL Editor
+  16. Run add-account-website-summary.sql in SQL Editor
+  17. Run add-account-contract-fields.sql in SQL Editor
 
 
 ────────────────────────────────────────────────────────────────────────────────
