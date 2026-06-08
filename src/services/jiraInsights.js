@@ -210,6 +210,52 @@ function buildInsights(issueKey, title, description, accountName) {
   return { keywords, educationSuggestions, actionItems };
 }
 
+// ── OpenAI-powered education suggestions ─────────────────────────────────────
+
+async function generateAISuggestions(keywords, title, description, issueKey, accountName) {
+  const apiKey = readEnv("OPENAI_API_KEY");
+  if (!apiKey) return null;
+
+  const prompt = `You are a KAM (Key Account Manager) assistant. Generate 4-6 education topic suggestions for the KAM to use when talking to the client about this escalation.
+
+Issue: ${issueKey} — ${title}
+Account: ${accountName}
+Detected keywords: ${keywords.join(", ")}
+Description: ${description.slice(0, 600)}
+
+Return ONLY a valid JSON array — no markdown, no code fences:
+[
+  {
+    "title": "Short education topic title",
+    "description": "One sentence explaining why this topic is relevant to the ticket",
+    "context": "Use before the ${accountName} escalation/RCA conversation.",
+    "matchedKeywords": ["up to 3 keywords from the detected list that triggered this suggestion"]
+  }
+]`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.4-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.6,
+    }),
+  });
+
+  if (!res.ok) return null;
+  const json = await res.json();
+  const text = json.choices?.[0]?.message?.content ?? "";
+  try {
+    const match = text.match(/\[[\s\S]*\]/);
+    if (match) return JSON.parse(match[0]);
+  } catch {}
+  return null;
+}
+
 // ── Server function ────────────────────────────────────────────────────────────
 
 export const analyzeJiraIssue = createServerFn({ method: "POST" })
@@ -227,6 +273,15 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
     const resolvedAccountName = accountName || detectedAccount?.name || "the client";
 
     const insights = buildInsights(issueKey, title, description, resolvedAccountName);
+
+    // Use AI suggestions if available, fall back to rule-based
+    const aiSuggestions = await generateAISuggestions(
+      insights.keywords,
+      title,
+      description,
+      issueKey,
+      resolvedAccountName,
+    );
 
     return {
       issue: {
@@ -247,7 +302,7 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
         ? { id: detectedAccount.id, name: detectedAccount.name }
         : null,
       keywords: insights.keywords,
-      educationSuggestions: insights.educationSuggestions,
+      educationSuggestions: aiSuggestions ?? insights.educationSuggestions,
       suggestedActionItems: insights.actionItems,
     };
   });
