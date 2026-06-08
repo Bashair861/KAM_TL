@@ -7574,7 +7574,7 @@ function ActivityTab({ account, opportunities, escalations, session }) {
                 disabled={!editable}
                 className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40 whitespace-nowrap"
               >
-                + Add
+                Add To Action Items
               </button>
             </li>
           ))}
@@ -9157,7 +9157,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                       onClick={() => requestAddMeetingInsight(item)}
                     >
                       {addingMeetingInsight && <Loader2 className="size-3.5 animate-spin mr-1" />}
-                      Add
+                      Add To Action Items
                     </Button>
                     <Button
                       variant="outline"
@@ -9487,7 +9487,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                     disabled={!canAct || addingAiSuggestionId === suggestion.id}
                     onClick={() => dismissStagedAiRecommendation(suggestion)}
                   >
-                    Remove/Reject
+                    Reject
                   </Button>
                 </div>
               </div>
