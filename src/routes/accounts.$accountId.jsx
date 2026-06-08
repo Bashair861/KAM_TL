@@ -10395,6 +10395,18 @@ function EducateTab({ account }) {
   );
 }
 /* ============================== TAB 6: Escalation ============================== */
+function formatEscalationDate(val) {
+  if (!val) return "Unknown";
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return d.toLocaleString("en-US", {
+      month: "short", day: "numeric", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch { return val; }
+}
+
 function EscalationsTab({ list }) {
   if (!list.length) {
     return (
@@ -10420,15 +10432,14 @@ function EscalationsTab({ list }) {
                 </span>
                 <h3 className="text-sm font-bold">{e.title}</h3>
               </div>
-              <p className="text-xs text-muted-foreground mt-1">Opened {e.openedAt} - 48h SLA</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Opened {formatEscalationDate(e.openedAt)}
+              </p>
             </div>
             <div className="flex flex-col items-end gap-1">
               <div className="bg-primary text-primary-foreground px-3 py-1.5 rounded text-[11px] font-mono flex items-center gap-1">
                 <Clock className="size-3" /> {e.slaRemainingHours.toFixed(1)}h left
               </div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                Last synced with Jira - 3m ago
-              </p>
             </div>
           </div>
           <p className="text-sm mb-4">{e.description}</p>

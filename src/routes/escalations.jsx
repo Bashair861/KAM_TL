@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { getRolePermissions, getAccount } from "@/data/kam-data";
-import { fetchAccounts, fetchEscalations, createEscalation } from "@/services/db";
+import { fetchAccounts, fetchEscalations, createEscalation, toggleEscalationActionItem } from "@/services/db";
 import { analyzeJiraIssue } from "@/services/jiraInsights";
 import { saveJiraEscalations } from "@/services/jira";
 import { useAuth } from "@/context/AuthContext";
@@ -45,6 +45,9 @@ function EscalationsPage() {
   const [customItems, setCustomItems] = useState([]);
   const [newItemText, setNewItemText] = useState("");
   const [priority, setPriority] = useState("P1");
+
+  // Escalation detail modal
+  const [selectedEscalation, setSelectedEscalation] = useState(null);
 
   // Create escalation dialog state
   const [createOpen, setCreateOpen] = useState(false);
@@ -456,7 +459,7 @@ function EscalationsPage() {
                   </h3>
                   <div className="space-y-3">
                     {col.items.map((e) => (
-                      <EscalationCard key={e.id} esc={e} accounts={accounts} priorityBadge={priorityBadge} />
+                      <EscalationCard key={e.id} esc={e} accounts={accounts} priorityBadge={priorityBadge} onOpen={() => setSelectedEscalation(e)} />
                     ))}
                     {col.items.length === 0 && (
                       <p className="text-xs text-muted-foreground text-center py-6">None</p>
@@ -467,6 +470,21 @@ function EscalationsPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* ── Escalation Detail Modal ── */}
+      {selectedEscalation && (
+        <EscalationDetailModal
+          esc={selectedEscalation}
+          accounts={accounts}
+          priorityBadge={priorityBadge}
+          priorityColor={priorityColor}
+          onClose={() => setSelectedEscalation(null)}
+          onActionToggled={(updated) => {
+            setSelectedEscalation(updated);
+            queryClient.invalidateQueries({ queryKey: ["escalations"], exact: false });
+          }}
+        />
       )}
 
       {/* ── Create Escalation Dialog ── */}
@@ -584,10 +602,13 @@ function EscalationsPage() {
   );
 }
 
-function EscalationCard({ esc, accounts, priorityBadge }) {
+function EscalationCard({ esc, accounts, priorityBadge, onOpen }) {
   const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
   return (
-    <div className="bg-card border rounded-lg p-4 hover:shadow-md transition-shadow">
+    <div
+      onClick={onOpen}
+      className="bg-card border rounded-lg p-4 hover:shadow-md hover:border-primary/30 transition-all cursor-pointer"
+    >
       <div className="flex items-center justify-between mb-2">
         <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${priorityBadge(esc.priority)}`}>
           {esc.priority}
@@ -618,5 +639,119 @@ function EscalationCard({ esc, accounts, priorityBadge }) {
         </div>
       )}
     </div>
+  );
+}
+
+function formatDate(val) {
+  if (!val) return "—";
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return d.toLocaleString("en-US", {
+      month: "short", day: "numeric", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch { return val; }
+}
+
+function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, onClose, onActionToggled }) {
+  const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
+  const [items, setItems] = useState(esc.actionItems ?? []);
+
+  async function toggle(item, idx) {
+    const newDone = !item.done;
+    try {
+      await toggleEscalationActionItem(item.id, newDone);
+      const updated = items.map((a, i) => i === idx ? { ...a, done: newDone } : a);
+      setItems(updated);
+      onActionToggled({ ...esc, actionItems: updated });
+    } catch {}
+  }
+
+  const slaColor = esc.slaRemainingHours < 24 ? "text-crit" : esc.slaRemainingHours < 48 ? "text-warn" : "text-success";
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <div className="flex items-start gap-3">
+            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0 mt-0.5 ${priorityBadge(esc.priority)}`}>
+              {esc.priority}
+            </span>
+            <DialogTitle className="text-base leading-snug">{esc.title}</DialogTitle>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 mt-2 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">{acc.name}</span>
+            <span>·</span>
+            <span className={`font-mono font-bold ${slaColor}`}>
+              <Clock className="size-3 inline mr-0.5" />
+              {Number(esc.slaRemainingHours ?? 0).toFixed(1)}h SLA remaining
+            </span>
+            <span>·</span>
+            <span>Opened {formatDate(esc.openedAt)}</span>
+          </div>
+        </DialogHeader>
+
+        <div className="overflow-y-auto flex-1 space-y-4 pr-1">
+          {esc.description && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Description</p>
+              <p className="text-sm leading-relaxed">{esc.description}</p>
+            </div>
+          )}
+
+          {esc.rca && (
+            <div className="bg-muted/30 rounded-lg p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Root Cause Analysis</p>
+              <p className="text-xs leading-relaxed">{esc.rca}</p>
+            </div>
+          )}
+
+          {items.length > 0 && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
+                Action Items ({items.filter((a) => a.done).length}/{items.length} done)
+              </p>
+              <div className="border rounded-lg divide-y overflow-hidden">
+                {items.map((a, i) => (
+                  <label key={a.id ?? a.label} className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/30 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={a.done}
+                      onChange={() => toggle(a, i)}
+                      className="shrink-0 accent-primary"
+                    />
+                    <span className={`text-xs flex-1 ${a.done ? "line-through text-muted-foreground" : ""}`}>
+                      {a.label}
+                    </span>
+                    {a.done && <CheckCircle2 className="size-3.5 text-success shrink-0" />}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {esc.recommendation && (
+            <div className="bg-accent/5 border border-accent/20 rounded-lg p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-accent mb-1">Recommendation</p>
+              <p className="text-xs leading-relaxed">{esc.recommendation}</p>
+            </div>
+          )}
+
+          {esc.clientFeedback && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Client Feedback</p>
+              <p className="text-xs leading-relaxed">{esc.clientFeedback}</p>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="pt-2 border-t">
+          <button onClick={onClose} className="px-4 py-2 text-xs border rounded-md hover:bg-muted">
+            Close
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -2942,6 +2942,15 @@ export async function saveEducationSession(session) {
   );
 }
 
+// ─── toggle escalation action item done state ─────────────────────────────────
+export async function toggleEscalationActionItem(id, done) {
+  const { error } = await supabase
+    .from("escalation_action_items")
+    .update({ done })
+    .eq("id", id);
+  if (error) throw error;
+}
+
 // ─── create escalation (manual / runtime) ────────────────────────────────────
 export async function createEscalation(escalation) {
   const id = `ESC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
