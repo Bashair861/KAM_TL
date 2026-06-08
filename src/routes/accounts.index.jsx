@@ -11,13 +11,25 @@ import {
   refreshAllAccountRetentionGrowthScoring,
 } from "@/services/db";
 import { useAuth } from "@/context/AuthContext";
-import { TrendingDown, TrendingUp, X, Loader2, Building2, Trash2, AlertTriangle } from "lucide-react";
+import { formatRenewalDate } from "@/lib/utils";
+import {
+  TrendingDown,
+  TrendingUp,
+  X,
+  Loader2,
+  Building2,
+  Trash2,
+  AlertTriangle,
+} from "lucide-react";
 
 export const Route = createFileRoute("/accounts/")({
   head: () => ({
     meta: [
       { title: "Accounts Portfolio — Aether KAM" },
-      { name: "description", content: "Full list of key accounts with health, contract value, and trend." },
+      {
+        name: "description",
+        content: "Full list of key accounts with health, contract value, and trend.",
+      },
     ],
   }),
   component: AccountsListPage,
@@ -26,22 +38,20 @@ export const Route = createFileRoute("/accounts/")({
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function slugify(name) {
-  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 function initials(name) {
-  return name.split(" ").map((w) => w[0] ?? "").join("").slice(0, 3).toUpperCase();
-}
-
-function formatRenewalDate(value) {
-  if (!value) return "—";
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(date);
+  return name
+    .split(" ")
+    .map((w) => w[0] ?? "")
+    .join("")
+    .slice(0, 3)
+    .toUpperCase();
 }
 
 // ── page ─────────────────────────────────────────────────────────────────────
@@ -81,7 +91,10 @@ function AccountsListPage() {
       setDeleteError("");
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
     },
-    onError: (err) => setDeleteError(err.message ?? "Delete failed. Make sure the RLS policy is applied in Supabase."),
+    onError: (err) =>
+      setDeleteError(
+        err.message ?? "Delete failed. Make sure the RLS policy is applied in Supabase.",
+      ),
   });
 
   const { mutate: refreshPortfolioScoring } = useMutation({
@@ -141,13 +154,21 @@ function AccountsListPage() {
               {accounts.map((a) => (
                 <tr key={a.id} className="hover:bg-muted/40 transition-colors">
                   <td className="px-6 py-4">
-                    <Link to="/accounts/$accountId" params={{ accountId: a.id }} className="flex items-center gap-3 group">
+                    <Link
+                      to="/accounts/$accountId"
+                      params={{ accountId: a.id }}
+                      className="flex items-center gap-3 group"
+                    >
                       <div className="size-9 rounded-lg bg-primary/5 border flex items-center justify-center font-bold text-xs">
                         {a.shortCode}
                       </div>
                       <div>
-                        <p className="font-semibold group-hover:text-accent transition-colors">{a.name}</p>
-                        <p className="text-[11px] text-muted-foreground">{a.tier} · {a.region}</p>
+                        <p className="font-semibold group-hover:text-accent transition-colors">
+                          {a.name}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {a.tier} · {a.region}
+                        </p>
                       </div>
                     </Link>
                   </td>
@@ -164,9 +185,16 @@ function AccountsListPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={`inline-flex items-center gap-0.5 text-xs font-medium ${a.trend >= 0 ? "text-success" : "text-crit"}`}>
-                      {a.trend >= 0 ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
-                      {a.trend >= 0 ? "+" : ""}{a.trend}%
+                    <span
+                      className={`inline-flex items-center gap-0.5 text-xs font-medium ${a.trend >= 0 ? "text-success" : "text-crit"}`}
+                    >
+                      {a.trend >= 0 ? (
+                        <TrendingUp className="size-3" />
+                      ) : (
+                        <TrendingDown className="size-3" />
+                      )}
+                      {a.trend >= 0 ? "+" : ""}
+                      {a.trend}%
                     </span>
                   </td>
                   <td className="px-6 py-4 text-xs">{a.contractType}</td>
@@ -177,9 +205,13 @@ function AccountsListPage() {
                         onChange={(e) => assignKam({ accountId: a.id, kamId: e.target.value })}
                         className="text-xs bg-card border rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
                       >
-                        <option value="" disabled>— unassigned —</option>
+                        <option value="" disabled>
+                          — unassigned —
+                        </option>
                         {kamUsers.map((u) => (
-                          <option key={u.id} value={u.id}>{u.name}</option>
+                          <option key={u.id} value={u.id}>
+                            {u.name}
+                          </option>
                         ))}
                       </select>
                     ) : (
@@ -190,11 +222,17 @@ function AccountsListPage() {
                   </td>
                   <td className="px-6 py-4 text-right font-semibold">{formatCurrency(a.arr)}</td>
                   <td className="px-6 py-4 text-right text-xs">
-                    <span className={a.contractRenewalDate ? "text-muted-foreground" : "text-warn font-semibold"}>
-                      {formatRenewalDate(a.contractRenewalDate)}
+                    <span
+                      className={
+                        a.contractRenewalDate ? "text-muted-foreground" : "text-warn font-semibold"
+                      }
+                    >
+                      {formatRenewalDate(a.contractRenewalDate, "—")}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-right text-xs text-muted-foreground">{a.lastTouch}</td>
+                  <td className="px-6 py-4 text-right text-xs text-muted-foreground">
+                    {a.lastTouch}
+                  </td>
                   {isHead && (
                     <td className="px-6 py-4">
                       <button
@@ -230,7 +268,10 @@ function AccountsListPage() {
           account={accounts.find((a) => a.id === confirmDeleteId)}
           deleting={deleting}
           error={deleteError}
-          onCancel={() => { setConfirmDeleteId(null); setDeleteError(""); }}
+          onCancel={() => {
+            setConfirmDeleteId(null);
+            setDeleteError("");
+          }}
           onConfirm={() => confirmDelete(confirmDeleteId)}
         />
       )}
@@ -258,9 +299,9 @@ function DeleteConfirmModal({ account, deleting, error, onCancel, onConfirm }) {
           <div className="min-w-0">
             <h2 className="text-base font-bold">Delete account?</h2>
             <p className="text-sm text-muted-foreground mt-1">
-              <span className="font-semibold text-foreground">{account.name}</span> and all its
-              data — health scores, activities, escalations, contracts, history — will be
-              permanently deleted. This cannot be undone.
+              <span className="font-semibold text-foreground">{account.name}</span> and all its data
+              — health scores, activities, escalations, contracts, history — will be permanently
+              deleted. This cannot be undone.
             </p>
           </div>
         </div>
@@ -282,7 +323,13 @@ function DeleteConfirmModal({ account, deleting, error, onCancel, onConfirm }) {
             disabled={deleting}
             className="px-4 py-2 bg-crit text-white text-xs font-bold rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:opacity-90 transition-opacity"
           >
-            {deleting ? <><Loader2 className="size-3 animate-spin" /> Deleting…</> : "Yes, delete account"}
+            {deleting ? (
+              <>
+                <Loader2 className="size-3 animate-spin" /> Deleting…
+              </>
+            ) : (
+              "Yes, delete account"
+            )}
           </button>
         </div>
       </div>
@@ -340,7 +387,8 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
         assignedKamId: form.assignedKamId || null,
       }),
     onSuccess: onCreated,
-    onError: (err) => setError(err.message ?? "Failed to create account. The ID may already exist."),
+    onError: (err) =>
+      setError(err.message ?? "Failed to create account. The ID may already exist."),
   });
 
   function handleSubmit(e) {
@@ -354,7 +402,10 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 md:p-8" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 md:p-8"
+      onClick={onClose}
+    >
       <div
         className="bg-background w-full max-w-2xl rounded-xl border shadow-2xl flex flex-col max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
@@ -366,18 +417,22 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
               <Building2 className="size-4" />
             </span>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-accent">Head of KAM</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                Head of KAM
+              </p>
               <h2 className="text-base font-bold">Add New Account</h2>
             </div>
           </div>
-          <button onClick={onClose} className="size-8 rounded-md border flex items-center justify-center hover:bg-muted transition-colors">
+          <button
+            onClick={onClose}
+            className="size-8 rounded-md border flex items-center justify-center hover:bg-muted transition-colors"
+          >
             <X className="size-4" />
           </button>
         </div>
 
         {/* form */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto">
-
           {/* Account name */}
           <Field label="Account Name" required>
             <input
@@ -432,14 +487,22 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
           {/* Tier + Contract type */}
           <div className="grid grid-cols-2 gap-4">
             <Field label="Tier" required>
-              <select value={form.tier} onChange={(e) => set("tier", e.target.value)} className={inputCls}>
+              <select
+                value={form.tier}
+                onChange={(e) => set("tier", e.target.value)}
+                className={inputCls}
+              >
                 <option>Enterprise</option>
                 <option>Growth</option>
                 <option>Strategic</option>
               </select>
             </Field>
             <Field label="Contract Type" required>
-              <select value={form.contractType} onChange={(e) => set("contractType", e.target.value)} className={inputCls}>
+              <select
+                value={form.contractType}
+                onChange={(e) => set("contractType", e.target.value)}
+                className={inputCls}
+              >
                 <option>Staff Augmented</option>
                 <option>Time Based</option>
                 <option>Retainer</option>
@@ -506,16 +569,24 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
 
           {/* Assign KAM */}
           <Field label="Assign to KAM">
-            <select value={form.assignedKamId} onChange={(e) => set("assignedKamId", e.target.value)} className={inputCls}>
+            <select
+              value={form.assignedKamId}
+              onChange={(e) => set("assignedKamId", e.target.value)}
+              className={inputCls}
+            >
               <option value="">— unassigned —</option>
               {kamUsers.map((u) => (
-                <option key={u.id} value={u.id}>{u.name}</option>
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                </option>
               ))}
             </select>
           </Field>
 
           {error && (
-            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">{error}</p>
+            <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">
+              {error}
+            </p>
           )}
         </form>
 
@@ -525,7 +596,10 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
             Health starts at 50 · status: healthy · can be updated after creation
           </p>
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-xs border rounded-md hover:bg-muted transition-colors"
+            >
               Cancel
             </button>
             <button
@@ -533,7 +607,13 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
               disabled={isPending}
               className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:opacity-90 transition-opacity"
             >
-              {isPending ? <><Loader2 className="size-3 animate-spin" /> Creating…</> : "Create Account"}
+              {isPending ? (
+                <>
+                  <Loader2 className="size-3 animate-spin" /> Creating…
+                </>
+              ) : (
+                "Create Account"
+              )}
             </button>
           </div>
         </div>
@@ -544,7 +624,8 @@ function NewAccountModal({ kamUsers, onClose, onCreated }) {
 
 // ── primitives ────────────────────────────────────────────────────────────────
 
-const inputCls = "w-full bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent";
+const inputCls =
+  "w-full bg-background border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent";
 
 function Field({ label, required, hint, children }) {
   return (

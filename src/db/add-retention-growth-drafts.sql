@@ -28,13 +28,13 @@ CREATE INDEX IF NOT EXISTS idx_retention_growth_drafts_account_created
 
 ALTER TABLE public.retention_growth_drafts ENABLE ROW LEVEL SECURITY;
 
-GRANT SELECT, INSERT, UPDATE ON public.retention_growth_drafts TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.retention_growth_drafts TO anon, authenticated;
 
 DO $$ BEGIN
   CREATE POLICY "authenticated can read retention growth drafts"
     ON public.retention_growth_drafts
     FOR SELECT
-    TO authenticated
+    TO anon, authenticated
     USING (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -42,7 +42,7 @@ DO $$ BEGIN
   CREATE POLICY "authenticated can insert retention growth drafts"
     ON public.retention_growth_drafts
     FOR INSERT
-    TO authenticated
+    TO anon, authenticated
     WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -50,7 +50,7 @@ DO $$ BEGIN
   CREATE POLICY "authenticated can update retention growth drafts"
     ON public.retention_growth_drafts
     FOR UPDATE
-    TO authenticated
+    TO anon, authenticated
     USING (true)
     WITH CHECK (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

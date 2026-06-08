@@ -375,9 +375,7 @@ function getActivityAiSuggestionsSchemaError() {
 function isActivityAiSuggestionsTypeError(error) {
   const message = String(error?.message ?? "").toLowerCase();
   return (
-    error?.code === "22P02" &&
-    message.includes("invalid input syntax") &&
-    message.includes("uuid")
+    error?.code === "22P02" && message.includes("invalid input syntax") && message.includes("uuid")
   );
 }
 function getRowComplete(row) {
@@ -927,10 +925,7 @@ export async function markMeetingInsightActionItemState(input = {}) {
   return data;
 }
 export async function fetchKamUsers() {
-  const withStatus = await supabase
-    .from("profiles")
-    .select("id, name, initials, role, is_active")
-    .eq("role", "KAM");
+  const withStatus = await supabase.from("profiles").select("id, name, initials, role, is_active");
 
   if (!withStatus.error) {
     return (withStatus.data ?? [])
@@ -940,10 +935,7 @@ export async function fetchKamUsers() {
 
   if (!isMissingColumnError(withStatus.error, "is_active")) throw withStatus.error;
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("id, name, initials, role")
-    .eq("role", "KAM");
+  const { data, error } = await supabase.from("profiles").select("id, name, initials, role");
   if (error) throw error;
   return (data ?? []).map((user) => ({ ...user, role: normalizeRole(user.role) }));
 }
@@ -1366,40 +1358,42 @@ const HEALTH_AREAS = [
 
 // --- create new account -------------------------------------------------------
 export async function createAccount(data) {
-  const { error } = await supabase.from("accounts").insert([{
-    id: data.id,
-    name: data.name,
-    short_code: data.shortCode,
-    industry: data.industry,
-    tier: data.tier,
-    health: 50,
-    trend: 0,
-    contract_value: data.contractValue,
-    arr: data.arr,
-    renewal_days: data.renewalDays || null,
-    renewal_date: data.contractRenewalDate || null,
-    contract_duration: data.contractDuration || null,
-    contract_type: data.contractType,
-    last_touch: "Just now",
-    status: "healthy",
-    retention_risk: "Low",
-    growth_upside: 0,
-    white_space_count: 0,
-    is_startup: false,
-    region: data.region || null,
-    primary_contact_name: data.primaryContactName || null,
-    linkedin_url: data.linkedinUrl || null,
-    linkedin_summary: data.linkedinSummary || null,
-    ...(data.linkedinSummaryUpdatedAt
-      ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
-      : {}),
-    ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
-    ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
-    ...(data.websiteSummaryUpdatedAt
-      ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
-      : {}),
-    assigned_kam_id: data.assignedKamId || null,
-  }]);
+  const { error } = await supabase.from("accounts").insert([
+    {
+      id: data.id,
+      name: data.name,
+      short_code: data.shortCode,
+      industry: data.industry,
+      tier: data.tier,
+      health: 50,
+      trend: 0,
+      contract_value: data.contractValue,
+      arr: data.arr,
+      renewal_days: data.renewalDays || null,
+      renewal_date: data.contractRenewalDate || null,
+      contract_duration: data.contractDuration || null,
+      contract_type: data.contractType,
+      last_touch: "Just now",
+      status: "healthy",
+      retention_risk: "Low",
+      growth_upside: 0,
+      white_space_count: 0,
+      is_startup: false,
+      region: data.region || null,
+      primary_contact_name: data.primaryContactName || null,
+      linkedin_url: data.linkedinUrl || null,
+      linkedin_summary: data.linkedinSummary || null,
+      ...(data.linkedinSummaryUpdatedAt
+        ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
+        : {}),
+      ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
+      ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
+      ...(data.websiteSummaryUpdatedAt
+        ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
+        : {}),
+      assigned_kam_id: data.assignedKamId || null,
+    },
+  ]);
   if (error) throw error;
 
   const { error: contractError } = await supabase.from("contract_details").upsert(
@@ -1874,7 +1868,9 @@ export async function refreshAllAccountRetentionGrowthScoring(opts) {
 export async function fetchContracts(opts) {
   let q = supabase
     .from("accounts")
-    .select("*, contract_details(duration, renewal_date, auto_renew, non_terminator, price_hike)");
+    .select(
+      "*, contract_details(duration, renewal_date, auto_renew, non_terminator, min_one_year, price_hike, backup_exists, critical_resources, customer_feedback)",
+    );
   if (opts?.role === "KAM" && opts.userId) {
     q = q.eq("assigned_kam_id", opts.userId);
   }
@@ -1888,9 +1884,250 @@ export async function fetchContracts(opts) {
       renewalDate: row.renewal_date ?? row.contract_renewal_date ?? cd?.renewal_date ?? null,
       autoRenew: Boolean(cd?.auto_renew),
       nonTerminator: Boolean(cd?.non_terminator),
+      minOneYear: Boolean(cd?.min_one_year),
       priceHike: cd?.price_hike ?? "-",
+      backupExists: Boolean(cd?.backup_exists),
+      criticalResources: cd?.critical_resources ?? 0,
+      customerFeedback: cd?.customer_feedback ?? "",
     };
   });
+}
+
+const CONTRACT_TYPE_VALUES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
+
+function normalizeContractText(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeContractDate(value) {
+  const text = normalizeContractText(value);
+  return text ? text.slice(0, 10) : null;
+}
+
+function normalizeContractMoney(value) {
+  const amount = Number(String(value ?? "").replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("Contract value must be a valid number.");
+  return Math.round(amount);
+}
+
+function normalizeContractScore(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const score = Number(value);
+  if (!Number.isFinite(score) || score < 0 || score > 10) {
+    throw new Error("Process compliance must be between 0 and 10.");
+  }
+  return Number(score.toFixed(1));
+}
+
+function normalizeContractInteger(value) {
+  if (value === "" || value === null || value === undefined) return 0;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    throw new Error("Critical resources must be a valid number.");
+  }
+  return Math.round(number);
+}
+
+function mapContractDetail(row) {
+  if (!row) return null;
+  const cd = firstRelatedRow(row.contract_details);
+  return {
+    ...mapFlatAccount(row),
+    duration: row.contract_duration ?? cd?.duration ?? "",
+    renewalDate: row.renewal_date ?? row.contract_renewal_date ?? cd?.renewal_date ?? null,
+    autoRenew: Boolean(cd?.auto_renew),
+    nonTerminator: Boolean(cd?.non_terminator),
+    minOneYear: Boolean(cd?.min_one_year),
+    priceHike: cd?.price_hike ?? "",
+    backupExists: Boolean(cd?.backup_exists),
+    criticalResources: cd?.critical_resources ?? 0,
+    customerFeedback: cd?.customer_feedback ?? "",
+    updatedAt: cd?.updated_at ?? row.updated_at ?? null,
+  };
+}
+
+export async function fetchContractDetail(accountId, opts = {}) {
+  const id = normalizeContractText(accountId);
+  if (!id) throw new Error("Account id is required.");
+
+  let q = supabase.from("accounts").select("*, contract_details(*)").eq("id", id);
+  if (opts?.role === "KAM" && opts.userId) {
+    q = q.eq("assigned_kam_id", opts.userId);
+  }
+
+  const { data, error } = await q.maybeSingle();
+  if (error) throw error;
+  return mapContractDetail(data);
+}
+
+function displayContractBoolean(value) {
+  return value ? "Yes" : "No";
+}
+
+function displayContractMoney(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "";
+  return `$${amount.toLocaleString("en-US")}`;
+}
+
+function displayContractText(value) {
+  return normalizeContractText(value);
+}
+
+function displayContractDate(value) {
+  return value ? String(value).slice(0, 10) : "";
+}
+
+function buildContractHistoryChanges(current, next) {
+  const rows = [
+    {
+      field: "Contract Type",
+      oldValue: displayContractText(current.contractType),
+      newValue: displayContractText(next.accountUpdates.contract_type),
+    },
+    {
+      field: "Contract Duration",
+      oldValue: displayContractText(current.duration),
+      newValue: displayContractText(next.accountUpdates.contract_duration),
+    },
+    {
+      field: "Contract Value",
+      oldValue: displayContractMoney(current.contractValue),
+      newValue: displayContractMoney(next.accountUpdates.contract_value),
+    },
+    {
+      field: "Contract Renewal Date",
+      oldValue: displayContractDate(current.renewalDate),
+      newValue: displayContractDate(next.accountUpdates.renewal_date),
+    },
+    {
+      field: "Contract Process Compliance",
+      oldValue: displayContractText(current.contractCompliance),
+      newValue: displayContractText(next.accountUpdates.contract_compliance),
+    },
+    {
+      field: "Auto Renew",
+      oldValue: displayContractBoolean(current.autoRenew),
+      newValue: displayContractBoolean(next.contractUpdates.auto_renew),
+    },
+    {
+      field: "Non Terminator",
+      oldValue: displayContractBoolean(current.nonTerminator),
+      newValue: displayContractBoolean(next.contractUpdates.non_terminator),
+    },
+    {
+      field: "Minimum One Year",
+      oldValue: displayContractBoolean(current.minOneYear),
+      newValue: displayContractBoolean(next.contractUpdates.min_one_year),
+    },
+    {
+      field: "Price Hike",
+      oldValue: displayContractText(current.priceHike),
+      newValue: displayContractText(next.contractUpdates.price_hike),
+    },
+    {
+      field: "Backup Exists",
+      oldValue: displayContractBoolean(current.backupExists),
+      newValue: displayContractBoolean(next.contractUpdates.backup_exists),
+    },
+    {
+      field: "Critical Resources",
+      oldValue: displayContractText(current.criticalResources),
+      newValue: displayContractText(next.contractUpdates.critical_resources),
+    },
+    {
+      field: "Customer Feedback",
+      oldValue: displayContractText(current.customerFeedback),
+      newValue: displayContractText(next.contractUpdates.customer_feedback),
+    },
+  ];
+
+  return rows.filter((row) => row.oldValue !== row.newValue);
+}
+
+function normalizeContractDetailUpdates(values = {}) {
+  const contractType = normalizeContractText(values.contractType);
+  if (!CONTRACT_TYPE_VALUES.has(contractType)) {
+    throw new Error("Select a valid contract type.");
+  }
+
+  const duration = normalizeContractText(values.duration);
+  const renewalDate = normalizeContractDate(values.renewalDate);
+  const contractValue = normalizeContractMoney(values.contractValue);
+  const contractCompliance = normalizeContractScore(values.contractCompliance);
+  const priceHike = normalizeContractText(values.priceHike);
+  const customerFeedback = normalizeContractText(values.customerFeedback);
+  const criticalResources = normalizeContractInteger(values.criticalResources);
+
+  return {
+    accountUpdates: {
+      contract_type: contractType,
+      contract_duration: duration,
+      contract_value: contractValue,
+      renewal_date: renewalDate,
+      contract_compliance: contractCompliance,
+    },
+    contractUpdates: {
+      type: contractType,
+      duration,
+      renewal_date: renewalDate,
+      auto_renew: Boolean(values.autoRenew),
+      non_terminator: Boolean(values.nonTerminator),
+      min_one_year: Boolean(values.minOneYear),
+      price_hike: priceHike,
+      backup_exists: Boolean(values.backupExists),
+      critical_resources: criticalResources,
+      customer_feedback: customerFeedback,
+    },
+  };
+}
+
+export async function updateContractDetail(accountId, values, options = {}) {
+  const role = normalizeRole(options.role);
+  const userId = normalizeContractText(options.userId);
+  if (role !== "Head of KAM" && role !== "KAM") {
+    throw new Error("Only Head of KAM or the assigned KAM can edit contract details.");
+  }
+  if (role === "KAM" && !userId) {
+    throw new Error("Assigned KAM identity is required before editing contract details.");
+  }
+
+  const id = normalizeContractText(accountId);
+  if (!id) throw new Error("Account id is required.");
+
+  const current = await fetchContractDetail(id, options);
+  if (!current) throw new Error("Contract account was not found.");
+  if (role === "KAM" && current.assignedKamId !== userId) {
+    throw new Error("Only the assigned KAM can edit this account's contract details.");
+  }
+
+  const updates = normalizeContractDetailUpdates(values);
+  const changes = buildContractHistoryChanges(current, updates);
+
+  const { error: accountError } = await supabase.from("accounts").update(updates.accountUpdates).eq("id", id);
+  if (accountError) throw accountError;
+
+  const { error: contractError } = await supabase
+    .from("contract_details")
+    .upsert(
+      {
+        account_id: id,
+        ...updates.contractUpdates,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "account_id" },
+    );
+  if (contractError) throw contractError;
+
+  if (changes.length > 0) {
+    await logAccountChanges(id, changes, options.editedBy ?? "Unknown");
+  }
+
+  if (displayContractDate(current.renewalDate) !== displayContractDate(updates.accountUpdates.renewal_date)) {
+    await ensureContractRenewalNotifications(supabase).catch(() => null);
+  }
+
+  return fetchContractDetail(id, options);
 }
 export async function fetchAccountHistory(accountId) {
   const { data, error } = await supabase
@@ -2029,9 +2266,7 @@ export async function fetchAccountTasksForAiSuggestions(accountId) {
     throw error;
   }
 
-  return (data ?? []).map((row, index) =>
-    mapAccountTaskForAiSuggestion(row, index, accountId),
-  );
+  return (data ?? []).map((row, index) => mapAccountTaskForAiSuggestion(row, index, accountId));
 }
 
 export async function fetchActivityScoreHistory(accountId) {
@@ -2113,7 +2348,9 @@ export async function upsertFirefliesMeetingSummaries(accountId, meetings, edite
       .eq("account_id", accountId)
       .in("fireflies_transcript_id", transcriptIds);
     if (existingError) throw existingError;
-    (existingRows ?? []).forEach((row) => existingByTranscriptId.set(row.fireflies_transcript_id, row));
+    (existingRows ?? []).forEach((row) =>
+      existingByTranscriptId.set(row.fireflies_transcript_id, row),
+    );
   }
 
   const now = new Date().toISOString();
@@ -2247,7 +2484,9 @@ export async function upsertRetentionGrowthDraft(accountId, draft, createdBy = "
         field: existingDraft
           ? `Retention/Growth draft updated: ${savedDraft.title}`
           : "Retention/Growth draft created",
-        oldValue: existingDraft ? summarizeRetentionGrowthDraftHistory(mapRetentionGrowthDraft(existingDraft)) : null,
+        oldValue: existingDraft
+          ? summarizeRetentionGrowthDraftHistory(mapRetentionGrowthDraft(existingDraft))
+          : null,
         newValue: summarizeRetentionGrowthDraftHistory(savedDraft),
       },
     ],
@@ -2376,21 +2615,19 @@ export async function createActivityRuleActivity(input) {
   const now = new Date().toISOString();
 
   if (input.sourceType !== "manual") {
-    const [
-      { data: existingRows, error: existingError },
-      { data: legacyRows, error: legacyError },
-    ] = await Promise.all([
-      supabase
-        .from("activity_rule_activities")
-        .select("id,title,next_step,parameter")
-        .eq("account_id", input.accountId)
-        .limit(200),
-      supabase
-        .from("activities")
-        .select("id,title,area")
-        .eq("account_id", input.accountId)
-        .limit(200),
-    ]);
+    const [{ data: existingRows, error: existingError }, { data: legacyRows, error: legacyError }] =
+      await Promise.all([
+        supabase
+          .from("activity_rule_activities")
+          .select("id,title,next_step,parameter")
+          .eq("account_id", input.accountId)
+          .limit(200),
+        supabase
+          .from("activities")
+          .select("id,title,area")
+          .eq("account_id", input.accountId)
+          .limit(200),
+      ]);
 
     if (existingError) throw existingError;
     if (legacyError) throw legacyError;
@@ -2840,8 +3077,7 @@ export async function markAllNotificationsRead(options = {}) {
   const { error } = await query;
   if (
     error &&
-    (isMissingColumnError(error, "read_at") ||
-      isMissingColumnError(error, "recipient_profile_id"))
+    (isMissingColumnError(error, "read_at") || isMissingColumnError(error, "recipient_profile_id"))
   ) {
     let fallback = supabase.from("notifications").update({ read: true }).eq("read", false);
     if (notificationIds.length) {
@@ -2891,10 +3127,7 @@ export async function markNotificationsReadByBadge(badgeKey, options = {}) {
     return;
   }
   if (error && isMissingColumnError(error, "read_at")) {
-    let fallback = supabase
-      .from("notifications")
-      .update({ read: true })
-      .eq("read", false);
+    let fallback = supabase.from("notifications").update({ read: true }).eq("read", false);
     if (notificationIds.length) {
       fallback = fallback.in("id", notificationIds);
     } else {
@@ -2910,11 +3143,13 @@ export async function markNotificationsReadByBadge(badgeKey, options = {}) {
 
 // ─── education log ────────────────────────────────────────────────────────────
 export async function fetchEducationLog(accountId) {
-  let q = supabase
-    .from("education_log")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (accountId) q = q.eq("account_id", accountId);
+  let q = supabase.from("education_log").select("*").order("created_at", { ascending: false });
+  if (Array.isArray(accountId)) {
+    if (!accountId.length) return [];
+    q = q.in("account_id", accountId);
+  } else if (accountId) {
+    q = q.eq("account_id", accountId);
+  }
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map((e) => ({

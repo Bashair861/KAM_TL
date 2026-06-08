@@ -17,7 +17,9 @@ import { Route as EscalationsRouteImport } from './routes/escalations'
 import { Route as EducateRouteImport } from './routes/educate'
 import { Route as ContractsRouteImport } from './routes/contracts'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ContractsIndexRouteImport } from './routes/contracts.index'
 import { Route as AccountsIndexRouteImport } from './routes/accounts.index'
+import { Route as ContractDetailAccountIdRouteImport } from './routes/contract-detail.$accountId'
 import { Route as CalendarCallbackRouteImport } from './routes/calendar.callback'
 import { Route as AccountsAccountIdRouteImport } from './routes/accounts.$accountId'
 
@@ -61,9 +63,19 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 })
+const ContractsIndexRoute = ContractsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ContractsRoute,
+})
 const AccountsIndexRoute = AccountsIndexRouteImport.update({
   id: '/accounts/',
   path: '/accounts/',
+  getParentRoute: () => rootRouteImport,
+})
+const ContractDetailAccountIdRoute = ContractDetailAccountIdRouteImport.update({
+  id: '/contract-detail/$accountId',
+  path: '/contract-detail/$accountId',
   getParentRoute: () => rootRouteImport,
 })
 const CalendarCallbackRoute = CalendarCallbackRouteImport.update({
@@ -77,9 +89,17 @@ const AccountsAccountIdRoute = AccountsAccountIdRouteImport.update({
   getParentRoute: () => rootRouteImport,
 })
 
+const ContractsRouteChildren = {
+  ContractsIndexRoute: ContractsIndexRoute,
+}
+
+const ContractsRouteWithChildren = ContractsRoute._addFileChildren(
+  ContractsRouteChildren,
+)
+
 const rootRouteChildren = {
   IndexRoute: IndexRoute,
-  ContractsRoute: ContractsRoute,
+  ContractsRoute: ContractsRouteWithChildren,
   EducateRoute: EducateRoute,
   EscalationsRoute: EscalationsRoute,
   LoginRoute: LoginRoute,
@@ -88,6 +108,7 @@ const rootRouteChildren = {
   UsersRoute: UsersRoute,
   AccountsAccountIdRoute: AccountsAccountIdRoute,
   CalendarCallbackRoute: CalendarCallbackRoute,
+  ContractDetailAccountIdRoute: ContractDetailAccountIdRoute,
   AccountsIndexRoute: AccountsIndexRoute,
 }
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)
