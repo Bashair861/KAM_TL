@@ -2,11 +2,14 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { getRolePermissions } from "@/data/kam-data";
-import { fetchAccounts } from "@/services/db";
+import { fetchAccounts, createEscalation } from "@/services/db";
 import { analyzeJiraIssue } from "@/services/jiraInsights";
 import { saveJiraEscalations } from "@/services/jira";
 import { useAuth } from "@/context/AuthContext";
-import { Loader2, Search, Zap, Plus, X } from "lucide-react";
+import { Loader2, Search, Zap, Plus, X, AlertTriangle } from "lucide-react";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/escalations")({
   head: () => ({
@@ -34,6 +37,16 @@ function EscalationsPage() {
   const [customItems, setCustomItems] = useState([]);
   const [newItemText, setNewItemText] = useState("");
   const [priority, setPriority] = useState("P1");
+
+  // Create escalation dialog state
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    accountId: "", title: "", description: "", rca: "",
+  });
+  const [createPriority, setCreatePriority] = useState("P1");
+  const [createItems, setCreateItems] = useState([]);
+  const [createItemText, setCreateItemText] = useState("");
+  const [createError, setCreateError] = useState("");
 
   const { data: accounts = [] } = useQuery({
     queryKey: ["accounts", role, profile?.id],
@@ -100,6 +113,40 @@ function EscalationsPage() {
     },
   });
 
+  const createMutation = useMutation({
+    mutationFn: () => {
+      if (!createForm.title.trim()) throw new Error("Title is required.");
+      if (!createForm.accountId) throw new Error("Account is required.");
+      return createEscalation({
+        accountId: createForm.accountId,
+        title: createForm.title.trim(),
+        priority: createPriority,
+        description: createForm.description.trim() || null,
+        rca: createForm.rca.trim() || null,
+        actionItems: createItems,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["escalations"], exact: false });
+      setCreateOpen(false);
+      setCreateForm({ accountId: selectedAccountId, title: "", description: "", rca: "" });
+      setCreatePriority("P1");
+      setCreateItems([]);
+      setCreateItemText("");
+      setCreateError("");
+    },
+    onError: (e) => setCreateError(e.message),
+  });
+
+  function openCreateDialog() {
+    setCreateForm({ accountId: selectedAccountId || accounts[0]?.id || "", title: "", description: "", rca: "" });
+    setCreatePriority("P1");
+    setCreateItems([]);
+    setCreateItemText("");
+    setCreateError("");
+    setCreateOpen(true);
+  }
+
   const priorityColor = (p) =>
     p === "P1"
       ? "bg-red-100 text-red-600 border-red-200"
@@ -122,6 +169,16 @@ function EscalationsPage() {
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {canWrite && (
+              <button
+                onClick={openCreateDialog}
+                disabled={!accounts.length}
+                className="flex items-center gap-1.5 px-4 py-2 bg-crit text-white text-xs font-semibold rounded-md disabled:opacity-50 hover:bg-crit/90"
+              >
+                <AlertTriangle className="size-3" />
+                Create Escalation
+              </button>
+            )}
             <select
               value={selectedAccountId}
               onChange={(e) => setSelectedAccountId(e.target.value)}
@@ -387,6 +444,168 @@ function EscalationsPage() {
           </div>
         </div>
       )}
+      {/* ── Create Escalation Dialog ── */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-crit" />
+              Create Escalation
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {/* Account */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Account *
+              </label>
+              <select
+                value={createForm.accountId}
+                onChange={(e) => setCreateForm((f) => ({ ...f, accountId: e.target.value }))}
+                className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background"
+              >
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Title */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Title *
+              </label>
+              <input
+                value={createForm.title}
+                onChange={(e) => setCreateForm((f) => ({ ...f, title: e.target.value }))}
+                placeholder="e.g. API downtime impacting client workflows"
+                className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background"
+              />
+            </div>
+
+            {/* Priority */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Priority *
+              </label>
+              <div className="flex gap-2 mt-1">
+                {["P1", "P2", "P3"].map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setCreatePriority(p)}
+                    className={`px-4 py-1.5 text-xs font-bold rounded border transition-all ${
+                      createPriority === p
+                        ? priorityColor(p) + " ring-1 ring-offset-1 ring-current"
+                        : "bg-muted text-muted-foreground border-muted hover:bg-muted/80"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+                <span className="text-[10px] text-muted-foreground self-center ml-1">
+                  SLA: {createPriority === "P1" ? "48h" : createPriority === "P2" ? "72h" : "120h"}
+                </span>
+              </div>
+            </div>
+
+            {/* Description */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Description
+              </label>
+              <textarea
+                value={createForm.description}
+                onChange={(e) => setCreateForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="What is the issue? What's the client impact?"
+                rows={3}
+                className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background resize-none"
+              />
+            </div>
+
+            {/* RCA */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Root Cause Analysis
+              </label>
+              <textarea
+                value={createForm.rca}
+                onChange={(e) => setCreateForm((f) => ({ ...f, rca: e.target.value }))}
+                placeholder="Known or suspected root cause"
+                rows={2}
+                className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background resize-none"
+              />
+            </div>
+
+            {/* Action Items */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Action Items
+              </label>
+              <div className="mt-1 space-y-1.5">
+                {createItems.map((item, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs bg-muted/40 rounded px-2 py-1.5">
+                    <span className="flex-1">{item}</span>
+                    <button
+                      type="button"
+                      onClick={() => setCreateItems((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="text-muted-foreground hover:text-destructive"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+                <div className="flex gap-2">
+                  <input
+                    value={createItemText}
+                    onChange={(e) => setCreateItemText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && createItemText.trim()) {
+                        setCreateItems((prev) => [...prev, createItemText.trim()]);
+                        setCreateItemText("");
+                      }
+                    }}
+                    placeholder="Add action item and press Enter"
+                    className="flex-1 text-xs border rounded-md px-2 py-1.5 bg-background"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (createItemText.trim()) {
+                        setCreateItems((prev) => [...prev, createItemText.trim()]);
+                        setCreateItemText("");
+                      }
+                    }}
+                    className="px-2 py-1.5 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80"
+                  >
+                    <Plus className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {createError && <p className="text-xs text-destructive">{createError}</p>}
+          </div>
+
+          <DialogFooter>
+            <button
+              onClick={() => setCreateOpen(false)}
+              className="px-4 py-2 text-xs border rounded-md hover:bg-muted"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => createMutation.mutate()}
+              disabled={createMutation.isPending}
+              className="px-4 py-2 text-xs bg-crit text-white rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:bg-crit/90"
+            >
+              {createMutation.isPending && <Loader2 className="size-3 animate-spin" />}
+              Create Escalation
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
