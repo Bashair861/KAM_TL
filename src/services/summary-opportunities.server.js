@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   fetchAccount,
   fetchOpportunities,
+  logAccountChanges,
   upsertOpportunitiesFromMeetingAgent,
 } from "@/services/db";
 
@@ -402,12 +403,36 @@ function mapPersistedOpportunityRow(row) {
   };
 }
 
+function compactOpportunityHistoryParts(parts) {
+  return parts
+    .map((part) => (part === null || part === undefined ? "" : String(part).trim()))
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function summarizeOpportunityHistory(opportunity = {}) {
+  return compactOpportunityHistoryParts([
+    opportunity.title ? `Title: ${opportunity.title}` : null,
+    opportunity.source ? `Source: ${opportunity.source}` : null,
+    opportunity.signalDate ? `Signal date: ${opportunity.signalDate}` : null,
+    opportunity.potential !== null && opportunity.potential !== undefined
+      ? `Potential: ${opportunity.potential}`
+      : null,
+    opportunity.confidence ? `Confidence: ${opportunity.confidence}` : null,
+    opportunity.nextStep ? `Next step: ${opportunity.nextStep}` : null,
+  ]);
+}
+
 async function persistSummaryOpportunities({ accountId, opportunities }) {
   if (!opportunities?.length) return [];
 
   const admin = getSupabaseAdmin();
   if (!admin) {
-    return upsertOpportunitiesFromMeetingAgent({ accountId, opportunities });
+    return upsertOpportunitiesFromMeetingAgent({
+      accountId,
+      opportunities,
+      editedBy: "Summary scan",
+    });
   }
 
   const rows = opportunities.map((opportunity) => ({
@@ -436,7 +461,17 @@ async function persistSummaryOpportunities({ accountId, opportunities }) {
     throw new Error(`Could not save extracted opportunities: ${error.message}`);
   }
 
-  return (data ?? []).map(mapPersistedOpportunityRow);
+  const savedOpportunities = (data ?? []).map(mapPersistedOpportunityRow);
+  await logAccountChanges(
+    accountId,
+    savedOpportunities.map((opportunity) => ({
+      field: "Opportunity saved from summary scan",
+      oldValue: null,
+      newValue: summarizeOpportunityHistory(opportunity),
+    })),
+    "Summary scan",
+  );
+  return savedOpportunities;
 }
 
 function removeExistingOpportunities(candidates, existingOpportunities) {

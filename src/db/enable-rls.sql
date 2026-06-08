@@ -29,3 +29,12 @@ create policy "public read" on escalations             for select using (true);
 create policy "public read" on escalation_action_items for select using (true);
 create policy "public read" on opportunities           for select using (true);
 create policy "public read" on notifications           for select using (true);
+
+create policy "authenticated can insert notifications"
+  on notifications for insert to authenticated
+  with check (true);
+
+create policy "authenticated can update notifications"
+  on notifications for update to authenticated
+  using (true)
+  with check (true);

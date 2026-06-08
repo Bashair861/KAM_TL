@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 4.5 - Salesforce Integration (lookup + sync + field-mapping modal)
+  Last updated: Phase 4.6 - Project Charter Sheet Upload + Salesforce Integration
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -32,6 +32,7 @@ TECH STACK
 - Lucide React (icons)
 - Radix UI (headless components)
 - Recharts (charts)
+- JSZip (client-side .xlsx parsing for Project Charter Auto-fill)
 - bun (preferred package manager + script runner)
 - Deployed target: Cloudflare Pages (via @cloudflare/vite-plugin)
 
@@ -48,7 +49,7 @@ src/
     index.jsx               ← Dashboard page
     login.jsx               ← Login page (no sidebar)
     accounts.index.jsx      ← Accounts portfolio list + KAM assignment column
-    accounts.$accountId.jsx ← Account detail (Client 360) — largest file, 7 tabs
+    accounts.$accountId.jsx ← Account detail (Client 360) — largest file, 9 tabs
     contracts.jsx           ← Contracts page (dynamic, Supabase-backed)
     strategy.jsx            ← Strategy builder page (still partially static)
     escalations.jsx         ← Escalations list page
@@ -109,6 +110,9 @@ Recent JS additions:
   src/db/add-account-contract-fields.sql <- accounts.renewal_date + contract_duration
   src/services/linkedin-summary.js  <- Server fn: generates/saves Account's Linkedin Summary
   src/services/website-summary.js   <- Server fn: generates/saves Account's Website Summary
+  accounts.$accountId.jsx           <- Project Charter Auto-fill:
+                                       client-side .xlsx parser + confirmation dialog
+                                       for KYC field auto-fill in the Overview tab
 
 Salesforce integration additions (Phase 4.5):
   src/services/salesforce.js        <- Server fn: lookupSalesforceAccountBundle
@@ -121,6 +125,32 @@ Salesforce integration additions (Phase 4.5):
                                        Field-by-field review table with checkboxes
                                        Groups: Account/KYC + one group per Salesforce Contact
   Account Details section           <- Overview tab section below KYC for LinkedIn URL
+
+Project Charter sheet upload additions (Phase 4.6):
+  Project Charter Auto-fill         <- Overview tab upload control beside Salesforce sync
+                                       Accepts .xlsx only; reads in browser with JSZip
+                                       No server upload, no Supabase storage, no env vars
+  extractKycFieldMatchesFromXlsx    <- Inline helper in accounts.$accountId.jsx
+                                       Reads sharedStrings + worksheet XML from the workbook
+                                       Matches known labels, aliases, and inline "Label: value"
+                                       values, then searches nearby cells for valid values
+  CharterMappingDialog              <- Inline review modal in accounts.$accountId.jsx
+                                       Shows matched Excel label, KYC field, value, DB target,
+                                       and whether Save KYC will persist the value
+                                       Preselects rows with extracted values; user can select,
+                                       deselect, apply, or close without saving
+  KYC_CHARTER_FIELD_KEYS            <- Extracts 12 KYC-facing charter fields:
+                                       accountStatus, industry, business, history,
+                                       stakeholdersInfo, revenue, mrrArr, primary, tenure,
+                                       team, competitors, flow
+                                       Does not currently extract Account Details fields:
+                                       contract renewal date, contract duration, LinkedIn URL,
+                                       or website URL
+  Save behavior                     <- Applying selected rows updates local KYC form state.
+                                       DB-backed rows persist only when user clicks Save KYC.
+                                       accountStatus + stakeholdersInfo are local/display-only
+                                       because they do not map to current DB writes.
+                                       Files are never stored after parsing.
 
 USER ROLES & PERMISSIONS (ROLE_PERMISSIONS in kam-data.js)
 ────────────────────────────────────────────────────────────────────────────────
@@ -362,6 +392,29 @@ IMPORTANT DECISIONS & PATTERNS
 
 
 ────────────────────────────────────────────────────────────────────────────────
+11. PROJECT CHARTER SHEET UPLOAD PATTERN
+    - Charter upload is client-side only: accounts.$accountId.jsx imports JSZip,
+      validates .xlsx files, and parses xl/sharedStrings.xml + worksheet XML in browser.
+    - It is not OCR and does not upload/store the workbook in Supabase or on the server.
+    - Upload controls are role-gated by the existing editable permission and disabled
+      while the workbook is being read.
+    - Label matching uses KYC_FORM_FIELDS labels + aliases. It supports both
+      "Label: value" cells and nearby right/below/diagonal value cells.
+    - Extracted values are filtered through field-specific validators so template
+      labels, instructions, placeholders, and generic words are not autofilled.
+    - CharterMappingDialog is mandatory review: only checked rows with extracted
+      values are applied. Rows can show Yes, Local, No value, or No match.
+    - Apply Selected updates local KYC state only. DB-backed values are persisted
+      later through the existing Save KYC flow and history logging.
+    - The dialog stays open after Apply Selected so the user can review the success
+      message, apply another selection, or close manually.
+    - Local-only charter values such as accountStatus and stakeholdersInfo update
+      savedSnapshot immediately because they are visible context but not DB-backed.
+    - Current Charter extraction intentionally excludes Account Details fields
+      (contractRenewalDate, contractDuration, linkedinUrl, websiteUrl), even though
+      those fields exist in KYC_FORM_FIELDS for manual edits and Salesforce sync.
+
+
 WHAT IS NEXT — UPCOMING PHASES
 ────────────────────────────────────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@ import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-rout
 import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
+import JSZip from "jszip";
 import { formatCurrency, getRolePermissions } from "@/data/kam-data";
 import {
   buildActivityTabModel,
@@ -67,6 +68,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -143,6 +145,111 @@ const TABS = [
   "Meeting History",
   "Client History",
 ];
+const KYC_FORM_FIELDS = {
+  accountStatus: {
+    label: "Account Status",
+    dbTarget: "accounts.status stores health only, not Key Account",
+    aliases: ["Account Status"],
+    canSaveToDb: false,
+  },
+  industry: {
+    label: "Industry Info",
+    dbTarget: "accounts.industry",
+    aliases: ["Industry", "Industry Vertical"],
+  },
+  business: {
+    label: "Business Info",
+    dbTarget: "accounts.business_info",
+    aliases: ["Business", "Business Information", "Business Domain", "Business Domain Description"],
+  },
+  history: {
+    label: "Client History",
+    dbTarget: "accounts.client_history",
+    aliases: ["Client History Notes"],
+  },
+  stakeholdersInfo: {
+    label: "Stakeholders Info",
+    dbTarget: "stakeholders table",
+    aliases: ["Stakeholders", "Stakeholder Info", "Stakeholder Information"],
+    canSaveToDb: false,
+  },
+  revenue: {
+    label: "Revenue Info",
+    dbTarget: "accounts.revenue",
+    aliases: ["Revenue", "Revenue Information"],
+  },
+  mrrArr: {
+    label: "MRR / ARR (Startups)",
+    dbTarget: "accounts.mrr_arr",
+    aliases: ["MRR / ARR", "MRR", "ARR", "MRR ARR"],
+  },
+  primary: {
+    label: "Person Info (Primary)",
+    dbTarget: "accounts.primary_contact_name",
+    aliases: ["Person Info Primary", "Primary Contact", "Primary Contact Name", "Contact Name"],
+  },
+  tenure: {
+    label: "Engagement Tenure",
+    dbTarget: "accounts.engagement_tenure",
+    aliases: ["Engagement Duration"],
+  },
+  team: { label: "Team Size", dbTarget: "accounts.team_size", aliases: [] },
+  competitors: {
+    label: "Competitors",
+    dbTarget: "accounts.competitors",
+    aliases: ["Competition", "Competitor"],
+  },
+  flow: {
+    label: "Main Business Flow",
+    dbTarget: "accounts.main_business_flow",
+    aliases: ["Business Flow", "Main Flow", "Project Domain"],
+  },
+  contractRenewalDate: {
+    label: "Contract Renewal Date",
+    dbTarget: "accounts.renewal_date / contract_details.renewal_date",
+    aliases: ["Renewal Date", "Contract Renewal"],
+  },
+  contractDuration: {
+    label: "Contract Duration",
+    dbTarget: "accounts.contract_duration / contract_details.duration",
+    aliases: ["Duration"],
+  },
+  linkedinUrl: {
+    label: "LinkedIn URL",
+    dbTarget: "accounts.linkedin_url",
+    aliases: ["LinkedIn", "LinkedIn Profile", "LinkedIn Company URL"],
+  },
+  websiteUrl: {
+    label: "Website URL",
+    dbTarget: "accounts.website_url",
+    aliases: ["Website", "Company Website", "Website Link"],
+  },
+};
+const KYC_FORM_FIELD_LABELS = Object.fromEntries(
+  Object.entries(KYC_FORM_FIELDS).map(([key, value]) => [key, value.label]),
+);
+const KYC_CHARTER_FIELD_KEYS = [
+  "accountStatus",
+  "industry",
+  "business",
+  "history",
+  "stakeholdersInfo",
+  "revenue",
+  "mrrArr",
+  "primary",
+  "tenure",
+  "team",
+  "competitors",
+  "flow",
+];
+const KYC_DB_FIELD_KEYS = new Set(
+  Object.entries(KYC_FORM_FIELDS)
+    .filter(([, field]) => field.canSaveToDb !== false)
+    .map(([key]) => key),
+);
+const DIRECT_XLSX_FORM_FIELDS = new Set(Object.keys(KYC_FORM_FIELDS));
+const XLSX_DATE_FORM_FIELDS = new Set(["contractRenewalDate"]);
+const KYC_EXTRACTABLE_FIELD_KEYS = KYC_CHARTER_FIELD_KEYS;
 function hasSyncValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== "";
 }
@@ -329,6 +436,426 @@ function normalizeContractTypeValue(value) {
     ["project", "Project"],
   ]);
   return contractTypeMap.get(text) ?? "";
+}
+function isXlsxFile(file) {
+  if (!file) return false;
+  return (
+    /\.xlsx$/i.test(file.name) ||
+    file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+}
+function parseXmlString(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+  const parserError = doc.getElementsByTagName("parsererror")[0];
+  if (parserError) throw new Error("The selected workbook contains invalid XML.");
+  return doc;
+}
+function normalizeXlsxLabel(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+function getKycFieldAliases(formKey) {
+  const field = KYC_FORM_FIELDS[formKey];
+  if (!field) return [];
+  return [field.label, ...(field.aliases ?? [])].filter(Boolean);
+}
+function xlsxLabelsMatch(candidateValue, label) {
+  const candidate = normalizeXlsxLabel(candidateValue);
+  const target = normalizeXlsxLabel(label);
+  if (!candidate || !target) return false;
+  return candidate === target;
+}
+function getInlineLabelValue(cellValue, label) {
+  const text = String(cellValue ?? "").trim();
+  const labelText = String(label ?? "").trim();
+  if (!text || !labelText) return "";
+  if (!text.toLowerCase().startsWith(labelText.toLowerCase())) return "";
+  const suffix = text.slice(labelText.length);
+  if (!/^\s*[:-]\s*/.test(suffix)) return "";
+  const value = suffix.replace(/^\s*[:-]\s*/, "").trim();
+  if (value) return value;
+  return "";
+}
+function isKnownKycFieldLabel(value) {
+  const normalized = normalizeXlsxLabel(value);
+  return KYC_EXTRACTABLE_FIELD_KEYS.some((formKey) =>
+    getKycFieldAliases(formKey).some((label) => normalizeXlsxLabel(label) === normalized),
+  );
+}
+const GENERIC_XLSX_VALUE_LABELS = new Set(
+  [
+    "No",
+    "Name",
+    "Information",
+    "Info",
+    "Vertical",
+    "Domain",
+    "Date",
+    "Allocation Date",
+    "Time Overlap",
+    "Project Charter",
+    "Project",
+    "Charter",
+    "Description",
+    "Value",
+    "Values",
+    "Field",
+    "Fields",
+    "Section",
+    "Details",
+    "Detail",
+    "Status",
+    "Type",
+    "Owner",
+    "Number",
+    "Email",
+    "Phone",
+    "Contact",
+    "Notes",
+    "Business",
+    "Industry",
+    "Revenue",
+    "Engagement",
+    "Team",
+    "Competition",
+    "Competitors",
+    "Link",
+    "URL",
+    "Website",
+    "LinkedIn",
+    "Primary",
+    "Secondary",
+    "Version",
+    "Page",
+    "Title",
+    "Overview",
+  ].map(normalizeXlsxLabel),
+);
+const INSTRUCTIONAL_XLSX_VALUE_PATTERNS = [
+  /\bdescribe\b/i,
+  /\boverall business\b/i,
+  /\bproject objectives\b/i,
+  /\bbusiness terms\b/i,
+  /\ballocation date\b/i,
+  /\btime overlap\b/i,
+  /\bproject charter\b/i,
+  /\btemplate\b/i,
+  /\bversion\b/i,
+  /\bsample\b/i,
+  /\bplaceholder\b/i,
+  /\benter\b/i,
+  /\bselect\b/i,
+  /\bchoose\b/i,
+];
+function isGenericXlsxValue(value) {
+  const text = String(value ?? "").trim();
+  const normalized = normalizeXlsxLabel(text);
+  if (!normalized) return true;
+  if (GENERIC_XLSX_VALUE_LABELS.has(normalized)) return true;
+  if (isKnownKycFieldLabel(text)) return true;
+  return INSTRUCTIONAL_XLSX_VALUE_PATTERNS.some((pattern) => pattern.test(text));
+}
+function hasUrlLikeValue(value) {
+  const text = String(value ?? "").trim();
+  return /^(https?:\/\/)?(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+([/?#].*)?$/i.test(text);
+}
+function hasEmailLikeValue(value) {
+  return /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(String(value ?? ""));
+}
+function hasPhoneLikeValue(value) {
+  return /\+?\d[\d\s().-]{6,}\d/.test(String(value ?? ""));
+}
+function hasMoneyLikeValue(value) {
+  const text = String(value ?? "").trim();
+  if (/^(n\/a|na|not applicable)$/i.test(text)) return true;
+  return /([$]|usd|aed|sar|pkr|inr|eur|gbp|\d[\d,]*(\.\d+)?\s*(k|m|mn|mm|million|billion|bn)?)/i.test(
+    text,
+  );
+}
+function hasDurationLikeValue(value) {
+  const text = String(value ?? "").trim();
+  return (
+    /\b\d+\s*(day|days|week|weeks|month|months|year|years|yr|yrs|quarter|quarters|q)\b/i.test(
+      text,
+    ) ||
+    /\b(since|ongoing|annual|annually|monthly|quarterly)\b/i.test(text) ||
+    /\b\d{4}\s*[-/]\s*\d{4}\b/.test(text)
+  );
+}
+function hasDateLikeValue(value) {
+  const text = String(value ?? "").trim();
+  if (excelSerialDateToIso(text)) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return true;
+  if (!/(\d|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(text)) return false;
+  return !Number.isNaN(Date.parse(text));
+}
+function hasPersonLikeValue(value) {
+  const text = String(value ?? "").trim();
+  if (hasEmailLikeValue(text) || hasPhoneLikeValue(text)) return true;
+  if (hasDateLikeValue(text) || hasUrlLikeValue(text)) return false;
+  if (/\b(date|allocation|time|overlap|sales|project|charter|domain|vertical|information)\b/i.test(text)) {
+    return false;
+  }
+  const words = text.split(/\s+/).filter((word) => /^[A-Za-z][A-Za-z'.-]*$/.test(word));
+  return words.length >= 2 && text.length <= 80;
+}
+function hasMeaningfulTextValue(value, minLength = 4) {
+  const text = String(value ?? "").trim();
+  if (isGenericXlsxValue(text)) return false;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && text.length < minLength) return false;
+  return true;
+}
+function isValidExtractedValueForField(formKey, value) {
+  if (!hasSyncValue(value)) return false;
+  const text = String(value).trim();
+  if (isGenericXlsxValue(text)) return false;
+  switch (formKey) {
+    case "accountStatus":
+      return hasMeaningfulTextValue(text, 4);
+    case "industry":
+      return hasMeaningfulTextValue(text, 3) && !/\b(vertical|domain|information)\b/i.test(text);
+    case "business":
+      return hasMeaningfulTextValue(text, 6) && !/\bdomain describe\b/i.test(text);
+    case "history":
+      return hasMeaningfulTextValue(text, 12) && text.split(/\s+/).length > 1;
+    case "stakeholdersInfo":
+      return hasMeaningfulTextValue(text, 3);
+    case "revenue":
+    case "mrrArr":
+      return hasMoneyLikeValue(text);
+    case "primary":
+      return hasPersonLikeValue(text);
+    case "tenure":
+    case "contractDuration":
+      return hasDurationLikeValue(text);
+    case "team": {
+      const teamSize = normalizeIntegerSyncValue(text);
+      return teamSize !== "" && teamSize > 0 && teamSize <= 100000;
+    }
+    case "contractRenewalDate":
+      return hasDateLikeValue(text);
+    case "linkedinUrl":
+      return hasUrlLikeValue(text) && /linkedin/i.test(text);
+    case "websiteUrl":
+      return hasUrlLikeValue(text);
+    case "competitors":
+      return hasMeaningfulTextValue(text, 3) && !/^(competition|competitors)$/i.test(text);
+    case "flow":
+      return hasMeaningfulTextValue(text, 8) && !/\bproject objectives\b/i.test(text);
+    default:
+      return hasMeaningfulTextValue(text);
+  }
+}
+function parseXlsxCellRef(ref) {
+  const match = String(ref ?? "")
+    .trim()
+    .match(/^([A-Z]+)(\d+)$/i);
+  if (!match) return null;
+  const [, letters, rowText] = match;
+  let col = 0;
+  for (const letter of letters.toUpperCase()) {
+    col = col * 26 + (letter.charCodeAt(0) - 64);
+  }
+  return { row: Number(rowText), col };
+}
+function getXlsxCellText(cell, sharedStrings) {
+  const type = cell.getAttribute("t");
+  if (type === "inlineStr") {
+    return Array.from(cell.getElementsByTagName("t"))
+      .map((node) => node.textContent ?? "")
+      .join("");
+  }
+  const value = cell.getElementsByTagName("v")[0]?.textContent ?? "";
+  if (type === "s") return sharedStrings[Number(value)] ?? "";
+  if (type === "b") return value === "1" ? "Yes" : "No";
+  return value;
+}
+async function readXlsxSharedStrings(zip) {
+  const sharedStringsFile = zip.file("xl/sharedStrings.xml");
+  if (!sharedStringsFile) return [];
+  const doc = parseXmlString(await sharedStringsFile.async("string"));
+  return Array.from(doc.getElementsByTagName("si")).map((item) =>
+    Array.from(item.getElementsByTagName("t"))
+      .map((node) => node.textContent ?? "")
+      .join(""),
+  );
+}
+function parseXlsxWorksheet(xmlText, sharedStrings) {
+  const doc = parseXmlString(xmlText);
+  const cells = [];
+  const byPosition = new Map();
+  let maxRow = 0;
+  let maxCol = 0;
+  Array.from(doc.getElementsByTagName("c")).forEach((cell) => {
+    const ref = parseXlsxCellRef(cell.getAttribute("r"));
+    if (!ref) return;
+    const value = getXlsxCellText(cell, sharedStrings).trim();
+    if (!hasSyncValue(value)) return;
+    const parsedCell = { ...ref, value };
+    cells.push(parsedCell);
+    byPosition.set(`${ref.row}:${ref.col}`, parsedCell);
+    maxRow = Math.max(maxRow, ref.row);
+    maxCol = Math.max(maxCol, ref.col);
+  });
+  return { cells, byPosition, maxRow, maxCol };
+}
+function getNearbyXlsxValue(sheet, labelCell, formKey) {
+  const candidates = [];
+  for (let col = labelCell.col + 1; col <= sheet.maxCol; col += 1) {
+    candidates.push(sheet.byPosition.get(`${labelCell.row}:${col}`));
+  }
+  for (let row = labelCell.row + 1; row <= sheet.maxRow; row += 1) {
+    candidates.push(sheet.byPosition.get(`${row}:${labelCell.col}`));
+  }
+  for (let rowOffset = 1; rowOffset <= 3; rowOffset += 1) {
+    for (let colOffset = 1; colOffset <= 4; colOffset += 1) {
+      candidates.push(
+        sheet.byPosition.get(`${labelCell.row + rowOffset}:${labelCell.col + colOffset}`),
+      );
+    }
+  }
+  const match = candidates.find((candidate) => {
+    if (!candidate || !hasSyncValue(candidate.value)) return false;
+    return isValidExtractedValueForField(formKey, candidate.value);
+  });
+  return match?.value ?? "";
+}
+function excelSerialDateToIso(value) {
+  const serial = Number(String(value).trim());
+  if (!Number.isFinite(serial) || serial < 20_000 || serial > 80_000) return "";
+  const utcMs = Math.round((serial - 25569) * 86_400_000);
+  const date = new Date(utcMs);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+function normalizeExtractedXlsxValue(formKey, value) {
+  if (!hasSyncValue(value)) return null;
+  if (!XLSX_DATE_FORM_FIELDS.has(formKey)) return value;
+  return excelSerialDateToIso(value) || value;
+}
+function findXlsxFieldMatch(sheets, formKey) {
+  const aliases = getKycFieldAliases(formKey);
+  for (const sheet of sheets) {
+    for (const cell of sheet.cells) {
+      for (const alias of aliases) {
+        const inlineValue = getInlineLabelValue(cell.value, alias);
+        if (isValidExtractedValueForField(formKey, inlineValue)) {
+          return {
+            formKey,
+            matchedLabel: alias,
+            workbookLabel: cell.value,
+            value: normalizeExtractedXlsxValue(formKey, inlineValue),
+          };
+        }
+        if (hasSyncValue(inlineValue) && xlsxLabelsMatch(cell.value.slice(0, alias.length), alias)) {
+          return {
+            formKey,
+            matchedLabel: alias,
+            workbookLabel: cell.value,
+            value: null,
+          };
+        }
+        if (xlsxLabelsMatch(cell.value, alias)) {
+          const nearbyValue = getNearbyXlsxValue(sheet, cell, formKey);
+          return {
+            formKey,
+            matchedLabel: alias,
+            workbookLabel: cell.value,
+            value: normalizeExtractedXlsxValue(formKey, nearbyValue),
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+async function extractKycFieldMatchesFromXlsx(file) {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const sharedStrings = await readXlsxSharedStrings(zip);
+  const worksheetFiles = zip
+    .file(/^xl\/worksheets\/sheet\d+\.xml$/)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (worksheetFiles.length === 0) {
+    throw new Error("No worksheets were found in the selected .xlsx file.");
+  }
+  const sheets = await Promise.all(
+    worksheetFiles.map(async (worksheetFile) =>
+      parseXlsxWorksheet(await worksheetFile.async("string"), sharedStrings),
+    ),
+  );
+  return KYC_EXTRACTABLE_FIELD_KEYS.map((formKey) => {
+    const match = findXlsxFieldMatch(sheets, formKey);
+    const field = KYC_FORM_FIELDS[formKey];
+    const value = match?.value ?? null;
+    const hasValue = hasSyncValue(value);
+    const canSaveToDb = field.canSaveToDb !== false && hasValue;
+    return {
+      id: formKey,
+      formKey,
+      xlsxLabel: match?.workbookLabel ?? null,
+      matchedLabel: match?.matchedLabel ?? field.label,
+      formLabel: field.label,
+      dbTarget: field.dbTarget,
+      isMatched: Boolean(match),
+      canAutofill: hasValue,
+      canSaveToDb,
+      value,
+    };
+  });
+}
+function normalizeCharterFieldValue(formKey, value) {
+  if (!hasSyncValue(value)) return "";
+  if (Array.isArray(value)) {
+    return value.filter(hasSyncValue).map(String).join(", ");
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  if (formKey === "contractRenewalDate") return normalizeDateValue(value);
+  if (formKey === "team") {
+    const normalized = normalizeIntegerSyncValue(value);
+    return Number.isFinite(normalized) ? String(normalized) : String(value).trim();
+  }
+  return String(value).trim();
+}
+function formatStakeholdersInfo(stakeholders) {
+  const rows = stakeholders ?? [];
+  if (rows.length === 0) return "";
+  return [
+    `${rows.length} stakeholder${rows.length === 1 ? "" : "s"}`,
+    ...rows.map((stakeholder) =>
+      [stakeholder.name, stakeholder.role, stakeholder.influence]
+        .filter(hasSyncValue)
+        .join(" - "),
+    ),
+  ].join("\n");
+}
+function buildXlsxFieldPatch(currentFields, matches, selectedIds) {
+  const selected = new Set(selectedIds);
+  const fieldPatch = {};
+  (matches ?? []).forEach((match) => {
+    if (!selected.has(match.id)) return;
+    const { formKey, value } = match;
+    if (!formKey || !Object.prototype.hasOwnProperty.call(currentFields, formKey)) {
+      return;
+    }
+    const normalized = normalizeCharterFieldValue(formKey, value);
+    if (!hasSyncValue(normalized)) return;
+    fieldPatch[formKey] = normalized;
+  });
+  const nextFields = { ...currentFields };
+  const updatedKeys = [];
+  Object.entries(fieldPatch).forEach(([formKey, value]) => {
+    if (nextFields[formKey] !== value) {
+      nextFields[formKey] = value;
+      updatedKeys.push(formKey);
+    }
+  });
+  return { fieldPatch, nextFields, selectedKeys: Object.keys(fieldPatch), updatedKeys };
 }
 function formatDisplayDate(value) {
   const dateText = normalizeDateValue(value);
@@ -1234,7 +1761,7 @@ function AccountDetailPage() {
               Growth Upside
             </p>
             <span className="text-3xl font-bold text-accent">
-              {formatCurrency(account.growthUpside)}
+              {formatCurrency(account.growthPipelineValue)}
             </span>
             <p className="text-xs text-muted-foreground mt-2">
               {account.whiteSpaceCount} white-space items
@@ -1555,9 +2082,10 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
   const loadRetentionGrowthDrafts = useServerFn(fetchRetentionGrowthDraftsServer);
   const saveRetentionGrowthDraftServer = useServerFn(upsertRetentionGrowthDraftServer);
   const { mutate: refreshRetentionGrowthScoring } = useMutation({
-    mutationFn: () => refreshAccountRetentionGrowthScoring(account.id),
+    mutationFn: () => refreshAccountRetentionGrowthScoring(account.id, profile?.name ?? "System"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
   const { data: savedDrafts = [] } = useQuery({
@@ -1599,6 +2127,7 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
       storeRetentionGrowthDraftInCache(savedDraft);
       setDraftSaveStatus("Draft submitted to Head of KAM for approval.");
       queryClient.invalidateQueries({ queryKey: ["retention-growth-drafts", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error, draft) => {
       setLocalDrafts((current) => dedupeRetentionDrafts([draft, ...current]));
@@ -2983,9 +3512,11 @@ function OverviewTab({ account }) {
   });
   const initialFields = useMemo(
     () => ({
+      accountStatus: "Key Account - all accounts in our system are key accounts",
       industry: account.industry,
       business: account.businessInfo,
       history: account.clientHistory,
+      stakeholdersInfo: formatStakeholdersInfo(account.stakeholders),
       revenue: account.revenue,
       mrrArr: account.isStartup && account.mrrArr ? account.mrrArr : "N/A - not a startup client",
       tenure: account.engagementTenure,
@@ -2996,6 +3527,7 @@ function OverviewTab({ account }) {
       contractDuration: account.contractDuration || account.contractScoring?.duration || "",
       linkedinUrl: account.linkedinUrl ?? "",
       websiteUrl: account.websiteUrl ?? "",
+      primary: account.primaryContact?.name ?? "",
     }),
     [
       account.businessInfo,
@@ -3004,6 +3536,7 @@ function OverviewTab({ account }) {
       account.engagementTenure,
       account.industry,
       account.isStartup,
+      account.stakeholders,
       account.contractRenewalDate,
       account.contractDuration,
       account.contractScoring?.duration,
@@ -3013,11 +3546,14 @@ function OverviewTab({ account }) {
       account.revenue,
       account.teamSize,
       account.websiteUrl,
+      account.primaryContact?.name,
     ],
   );
   const [fields, setFields] = useState(initialFields);
   const [savedSnapshot, setSavedSnapshot] = useState(initialFields);
   const [showSaved, setShowSaved] = useState(false);
+  const [kycSaveError, setKycSaveError] = useState("");
+  const [autofilledFieldKeys, setAutofilledFieldKeys] = useState([]);
   const savedTimerRef = useRef(null);
   const isDirty = JSON.stringify(fields) !== JSON.stringify(savedSnapshot);
   // Auto-hide the "saved" confirmation after 3 s
@@ -3029,24 +3565,26 @@ function OverviewTab({ account }) {
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
     };
   }, [showSaved]);
-  const KYC_LABELS = {
-    industry: "Industry Info",
-    business: "Business Info",
-    history: "Client History Notes",
-    revenue: "Revenue Info",
-    mrrArr: "MRR / ARR",
-    primary: "Primary Contact",
-    tenure: "Engagement Tenure",
-    team: "Team Size",
-    competitors: "Competitors",
-    flow: "Main Business Flow",
-    contractRenewalDate: "Contract Renewal Date",
-    contractDuration: "Contract Duration",
-    linkedinUrl: "LinkedIn URL",
-    websiteUrl: "Website URL",
-  };
+  useEffect(() => {
+    if (autofilledFieldKeys.length === 0) return undefined;
+    const timer = setTimeout(() => setAutofilledFieldKeys([]), 4000);
+    return () => clearTimeout(timer);
+  }, [autofilledFieldKeys]);
+  const KYC_LABELS = KYC_FORM_FIELD_LABELS;
+  const dirtyFieldKeys = Object.keys(fields).filter((key) => fields[key] !== savedSnapshot[key]);
+  const unsupportedDirtyFieldKeys = dirtyFieldKeys.filter((key) => !KYC_DB_FIELD_KEYS.has(key));
   const { mutate: saveKyc, isPending: savingKyc } = useMutation({
     mutationFn: async () => {
+      const unsupportedKeys = Object.keys(fields).filter(
+        (key) => fields[key] !== savedSnapshot[key] && !KYC_DB_FIELD_KEYS.has(key),
+      );
+      if (unsupportedKeys.length > 0) {
+        throw new Error(
+          `These changed fields are not mapped to the database: ${unsupportedKeys
+            .map((key) => KYC_LABELS[key] ?? key)
+            .join(", ")}.`,
+        );
+      }
       const teamNum = parseInt(fields.team);
       await updateAccountKyc(account.id, {
         industry: fields.industry,
@@ -3076,17 +3614,28 @@ function OverviewTab({ account }) {
         }));
       await logAccountChanges(account.id, diffs, profile?.name ?? "Unknown");
     },
+    onMutate: () => {
+      setKycSaveError("");
+    },
     onSuccess: () => {
       setSavedSnapshot({ ...fields });
       setShowSaved(true);
+      setKycSaveError("");
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
       queryClient.invalidateQueries({ queryKey: ["contracts"] });
       queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
+    onError: (error) => {
+      setKycSaveError(error?.message ?? "Could not save KYC fields to the database.");
+    },
   });
-  // OCR file state
-  const [ocrFile, setOcrFile] = useState(null);
-  const [ocrStatus, setOcrStatus] = useState("idle");
+  const charterInputRef = useRef(null);
+  const [charterFile, setCharterFile] = useState(null);
+  const [charterMatches, setCharterMatches] = useState([]);
+  const [charterMappingOpen, setCharterMappingOpen] = useState(false);
+  const [checkedCharterFields, setCheckedCharterFields] = useState([]);
+  const [charterMessage, setCharterMessage] = useState("");
+  const [charterError, setCharterError] = useState("");
   const [salesforceLookup, setSalesforceLookup] = useState({
     status: "idle",
     text: "",
@@ -3263,18 +3812,89 @@ function OverviewTab({ account }) {
       );
     },
   });
-  function runOcrSimulation() {
-    if (!ocrFile) return;
-    setOcrStatus("processing");
-    // Front-end simulation only - real OCR will be wired later
-    setTimeout(() => {
-      setFields((f) => ({
-        ...f,
-        industry: `${account.industry} - ${account.region} (auto-filled from "${ocrFile.name}")`,
-        business: `${account.businessInfo} - extracted from uploaded document.`,
-      }));
-      setOcrStatus("done");
-    }, 1200);
+  const { mutate: extractCharterMatches, isPending: readingCharter } = useMutation({
+    mutationFn: async (file) => extractKycFieldMatchesFromXlsx(file),
+    onMutate: (file) => {
+      setCharterFile(file);
+      setCharterMatches([]);
+      setCheckedCharterFields([]);
+      setCharterMappingOpen(false);
+      setCharterMessage("");
+      setCharterError("");
+    },
+    onSuccess: (matches) => {
+      setCharterMatches(matches);
+      setCheckedCharterFields(matches.filter((match) => match.canAutofill).map((match) => match.id));
+      setCharterMappingOpen(true);
+    },
+    onError: (error) => {
+      setCharterError(error?.message ?? "Could not read the project charter. Please try again.");
+      setCharterFile(null);
+      setCharterMatches([]);
+      setCheckedCharterFields([]);
+      if (charterInputRef.current) charterInputRef.current.value = "";
+    },
+  });
+  function clearCharterSelection() {
+    setCharterMappingOpen(false);
+    setCharterFile(null);
+    setCharterMatches([]);
+    setCheckedCharterFields([]);
+    setCharterMessage("");
+    if (charterInputRef.current) charterInputRef.current.value = "";
+  }
+  function handleCharterFile(file) {
+    setCharterMessage("");
+    setCharterError("");
+    if (!file) {
+      clearCharterSelection();
+      return;
+    }
+    if (!isXlsxFile(file)) {
+      clearCharterSelection();
+      setCharterError("Choose a valid .xlsx project charter file.");
+      return;
+    }
+    extractCharterMatches(file);
+  }
+  function handleAutofillSelectedCharterFields() {
+    const selectedIds = charterMatches
+      .filter((match) => checkedCharterFields.includes(match.id) && match.canAutofill)
+      .map((match) => match.id);
+    if (selectedIds.length === 0) {
+      setCharterError("Select at least one field with an extracted value to autofill.");
+      return;
+    }
+    const { fieldPatch, nextFields, selectedKeys, updatedKeys } = buildXlsxFieldPatch(
+      fields,
+      charterMatches,
+      selectedIds,
+    );
+    if (selectedKeys.length === 0) {
+      setCharterError("No selected extracted values could be mapped to the KYC form.");
+      return;
+    }
+    setFields((current) => ({ ...current, ...fieldPatch }));
+    setSavedSnapshot((current) => {
+      const localOnlyUpdates = Object.fromEntries(
+        selectedKeys
+          .filter((key) => !KYC_DB_FIELD_KEYS.has(key))
+          .map((key) => [key, nextFields[key]]),
+      );
+      return Object.keys(localOnlyUpdates).length > 0
+        ? { ...current, ...localOnlyUpdates }
+        : current;
+    });
+    setAutofilledFieldKeys(selectedKeys);
+    setCharterMessage(
+      updatedKeys.length > 0
+        ? `Project charter autofilled ${selectedKeys
+            .map((key) => KYC_LABELS[key] ?? key)
+            .join(", ")}. Click Save KYC to write DB-backed changes.`
+        : `Project charter reapplied ${selectedKeys
+            .map((key) => KYC_LABELS[key] ?? key)
+            .join(", ")}. The selected value is already shown in the form.`,
+    );
   }
   return (
     <div className="space-y-6">
@@ -3294,48 +3914,55 @@ function OverviewTab({ account }) {
         </span>
       </div>
 
-      {/* OCR Auto-fill upload */}
+      {/* Project Charter Auto-fill upload */}
       <div className="border rounded-xl p-5 bg-card">
         <div className="flex items-start gap-3 mb-3">
           <span className="size-9 rounded-md bg-accent/10 text-accent flex items-center justify-center shrink-0">
             <Sparkles className="size-4" />
           </span>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-bold">OCR Auto-fill from Document</h3>
+            <h3 className="text-sm font-bold">Project Charter Auto-fill</h3>
             <p className="text-[11px] text-muted-foreground">
-              Upload a brief, RFP, NDA, deck or scanned card. We'll extract industry, business,
-              stakeholders, revenue and auto-populate any KYC field that's empty or unverified.
-              (Front-end preview - OCR engine wires up later.)
+              Upload a .xlsx project charter, confirm the fields to include, and autofill the
+              matching KYC inputs.
             </p>
           </div>
         </div>
         <div className="flex flex-col md:flex-row md:items-center gap-2">
-          <label className="flex-1 flex items-center gap-2 border-2 border-dashed rounded-md px-3 py-2.5 cursor-pointer hover:bg-muted/40 transition-colors">
+          <label
+            className={`flex-1 flex items-center gap-2 border-2 border-dashed rounded-md px-3 py-2.5 hover:bg-muted/40 transition-colors ${
+              !editable || readingCharter
+                ? "opacity-50 cursor-not-allowed"
+                : "cursor-pointer"
+            }`}
+          >
             <Upload className="size-4 text-muted-foreground" />
             <span className="text-xs truncate">
-              {ocrFile ? ocrFile.name : "Choose a file (PDF, PNG, JPG, DOCX)..."}
+              {charterFile ? charterFile.name : "Choose a project charter (.xlsx)..."}
             </span>
             <input
+              ref={charterInputRef}
               type="file"
               className="hidden"
-              accept=".pdf,.png,.jpg,.jpeg,.docx"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              disabled={!editable || readingCharter}
               onChange={(e) => {
-                setOcrFile(e.target.files?.[0] ?? null);
-                setOcrStatus("idle");
+                handleCharterFile(e.target.files?.[0] ?? null);
               }}
             />
           </label>
           <button
-            onClick={runOcrSimulation}
-            disabled={!ocrFile || !editable || ocrStatus === "processing"}
+            type="button"
+            onClick={() => charterInputRef.current?.click()}
+            disabled={!editable || readingCharter}
             className="px-4 py-2.5 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            <Sparkles className="size-3.5" />
-            {ocrStatus === "processing"
-              ? "Extracting..."
-              : ocrStatus === "done"
-                ? "Re-extract"
-                : "Extract & Auto-fill"}
+            {readingCharter ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="size-3.5" />
+            )}
+            {readingCharter ? "Reading..." : "Upload Charter"}
           </button>
           <button
             type="button"
@@ -3356,6 +3983,20 @@ function OverviewTab({ account }) {
             {checkingSalesforce ? "Checking Salesforce..." : "Sync from Salesforce"}
           </button>
         </div>
+        {(charterError || charterMessage) && (
+          <p
+            className={`text-[11px] mt-2 flex items-center gap-1 ${
+              charterError ? "text-crit" : "text-success"
+            }`}
+          >
+            {charterError ? (
+              <AlertTriangle className="size-3" />
+            ) : (
+              <CheckCircle2 className="size-3" />
+            )}
+            {charterError || charterMessage}
+          </p>
+        )}
         {salesforceLookup.status !== "idle" && (
           <div
             className={`mt-4 rounded-lg border p-4 ${
@@ -3401,12 +4042,6 @@ function OverviewTab({ account }) {
               </button>
             ) : null}
           </div>
-        )}
-        {ocrStatus === "done" && (
-          <p className="text-[11px] text-success mt-2 flex items-center gap-1">
-            <CheckCircle2 className="size-3" />
-            Extraction complete - 2 KYC fields updated. Review highlighted fields below.
-          </p>
         )}
       </div>
 
@@ -3456,13 +4091,9 @@ function OverviewTab({ account }) {
           label="Account Status"
           icon={<CheckCircle2 className="size-4" />}
           editable={false}
-        >
-          <span className="text-success font-semibold">Key Account</span>
-          <span className="text-muted-foreground">
-            {" "}
-            - all accounts in our system are key accounts
-          </span>
-        </KycField>
+          value={fields.accountStatus}
+          highlighted={autofilledFieldKeys.includes("accountStatus")}
+        />
 
         <KycField
           n={2}
@@ -3471,6 +4102,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.industry}
           onChange={(v) => setFields((f) => ({ ...f, industry: v }))}
+          highlighted={autofilledFieldKeys.includes("industry")}
         />
 
         <KycField
@@ -3481,6 +4113,7 @@ function OverviewTab({ account }) {
           value={fields.business}
           onChange={(v) => setFields((f) => ({ ...f, business: v }))}
           multiline
+          highlighted={autofilledFieldKeys.includes("business")}
         />
 
         <KycField
@@ -3491,6 +4124,7 @@ function OverviewTab({ account }) {
           value={fields.history}
           onChange={(v) => setFields((f) => ({ ...f, history: v }))}
           multiline
+          highlighted={autofilledFieldKeys.includes("history")}
         />
 
         <KycField
@@ -3498,16 +4132,10 @@ function OverviewTab({ account }) {
           label="Stakeholders Info"
           icon={<Users className="size-4" />}
           editable={false}
-        >
-          <p className="font-semibold">{account.stakeholders.length} stakeholders</p>
-          <ul className="text-[11px] text-muted-foreground mt-1 space-y-0.5">
-            {account.stakeholders.slice(0, 3).map((s) => (
-              <li key={s.name}>
-                - {s.name} - {s.role} <span className="text-accent">({s.influence})</span>
-              </li>
-            ))}
-          </ul>
-        </KycField>
+          value={fields.stakeholdersInfo}
+          multiline
+          highlighted={autofilledFieldKeys.includes("stakeholdersInfo")}
+        />
 
         <KycField
           n={6}
@@ -3516,6 +4144,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.revenue}
           onChange={(v) => setFields((f) => ({ ...f, revenue: v }))}
+          highlighted={autofilledFieldKeys.includes("revenue")}
         />
 
         <KycField
@@ -3525,6 +4154,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.mrrArr}
           onChange={(v) => setFields((f) => ({ ...f, mrrArr: v }))}
+          highlighted={autofilledFieldKeys.includes("mrrArr")}
         />
 
         <KycField
@@ -3534,6 +4164,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.primary}
           onChange={(v) => setFields((f) => ({ ...f, primary: v }))}
+          highlighted={autofilledFieldKeys.includes("primary")}
         />
 
         <KycField
@@ -3543,6 +4174,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.tenure}
           onChange={(v) => setFields((f) => ({ ...f, tenure: v }))}
+          highlighted={autofilledFieldKeys.includes("tenure")}
         />
 
         <KycField
@@ -3552,6 +4184,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.team}
           onChange={(v) => setFields((f) => ({ ...f, team: v }))}
+          highlighted={autofilledFieldKeys.includes("team")}
         />
 
         <KycField
@@ -3561,6 +4194,7 @@ function OverviewTab({ account }) {
           editable={editable}
           value={fields.competitors}
           onChange={(v) => setFields((f) => ({ ...f, competitors: v }))}
+          highlighted={autofilledFieldKeys.includes("competitors")}
         />
 
         <KycField
@@ -3572,6 +4206,7 @@ function OverviewTab({ account }) {
           value={fields.flow}
           onChange={(v) => setFields((f) => ({ ...f, flow: v }))}
           multiline
+          highlighted={autofilledFieldKeys.includes("flow")}
         />
       </div>
 
@@ -3849,11 +4484,27 @@ function OverviewTab({ account }) {
       {editable && (isDirty || showSaved) && (
         <div className="fixed bottom-0 left-0 md:left-64 right-0 z-50 border-t bg-card px-6 py-3 flex items-center justify-between shadow-lg">
           <p
-            className={`text-xs font-medium ${showSaved && !isDirty ? "text-success" : "text-muted-foreground"}`}
+            className={`text-xs font-medium ${
+              kycSaveError
+                ? "text-crit"
+                : showSaved && !isDirty
+                  ? "text-success"
+                  : unsupportedDirtyFieldKeys.length > 0
+                    ? "text-warn"
+                    : "text-muted-foreground"
+            }`}
           >
-            {showSaved && !isDirty
-              ? "KYC fields saved successfully"
-              : "You have unsaved changes in KYC fields"}
+            {kycSaveError
+              ? kycSaveError
+              : showSaved && !isDirty
+                ? "KYC fields saved successfully to the database"
+                : unsupportedDirtyFieldKeys.length > 0
+                  ? `Some changes are not DB-backed: ${unsupportedDirtyFieldKeys
+                      .map((key) => KYC_LABELS[key] ?? key)
+                      .join(", ")}`
+                  : `${dirtyFieldKeys.length} DB-backed field${
+                      dirtyFieldKeys.length === 1 ? "" : "s"
+                    } ready to save`}
           </p>
           <div className="flex gap-2">
             {isDirty && (
@@ -3861,6 +4512,7 @@ function OverviewTab({ account }) {
                 onClick={() => {
                   setFields(savedSnapshot);
                   setShowSaved(false);
+                  setKycSaveError("");
                 }}
                 className="px-3 py-1.5 text-xs border rounded-md hover:bg-muted transition-colors"
               >
@@ -3870,7 +4522,7 @@ function OverviewTab({ account }) {
             {isDirty && (
               <button
                 onClick={() => saveKyc()}
-                disabled={savingKyc}
+                disabled={savingKyc || unsupportedDirtyFieldKeys.length > 0}
                 className="px-3 py-1.5 text-xs bg-accent text-white rounded-md disabled:opacity-50 flex items-center gap-1.5 transition-opacity"
               >
                 {savingKyc ? (
@@ -3938,6 +4590,30 @@ function OverviewTab({ account }) {
           </table>
         </div>
       </Card>
+      <CharterMappingDialog
+        open={charterMappingOpen}
+        fileName={charterFile?.name ?? ""}
+        matches={charterMatches}
+        checkedFields={checkedCharterFields}
+        uploading={readingCharter}
+        error={charterError}
+        onCancel={clearCharterSelection}
+        message={charterMessage}
+        onToggle={(fieldKey, checked) =>
+          setCheckedCharterFields((current) =>
+            checked
+              ? Array.from(new Set([...current, fieldKey]))
+              : current.filter((key) => key !== fieldKey),
+          )
+        }
+        onSelectAll={() =>
+          setCheckedCharterFields(
+            charterMatches.filter((match) => match.canAutofill).map((match) => match.id),
+          )
+        }
+        onDeselectAll={() => setCheckedCharterFields([])}
+        onConfirm={handleAutofillSelectedCharterFields}
+      />
       {salesforceMappingOpen && (
         <SalesforceMappingModal
           rows={salesforceMappingRows}
@@ -3962,6 +4638,166 @@ function OverviewTab({ account }) {
         />
       )}
     </div>
+  );
+}
+function CharterMappingDialog({
+  open,
+  fileName,
+  matches,
+  checkedFields,
+  uploading,
+  error,
+  message,
+  onCancel,
+  onToggle,
+  onSelectAll,
+  onDeselectAll,
+  onConfirm,
+}) {
+  const matchedCount = matches.filter((match) => match.isMatched).length;
+  const selectableMatches = matches.filter((match) => match.canAutofill);
+  const selectedCount = checkedFields.filter((fieldKey) =>
+    selectableMatches.some((match) => match.id === fieldKey),
+  ).length;
+  const selectedNoValueCount = matches.filter(
+    (match) => checkedFields.includes(match.id) && !match.canAutofill,
+  ).length;
+  const selectedLocalOnlyCount = matches.filter(
+    (match) => checkedFields.includes(match.id) && match.canAutofill && !match.canSaveToDb,
+  ).length;
+  const allSelected = selectableMatches.length > 0 && selectedCount === selectableMatches.length;
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !uploading && onCancel()}>
+      <DialogContent className="sm:max-w-5xl max-h-[88vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Confirm Extracted Field Mapping</DialogTitle>
+          <DialogDescription>
+            {fileName
+              ? `${fileName} - ${matchedCount}/${matches.length} charter field(s) matched. DB-backed rows save when you click Save KYC.`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <p className="text-[11px] font-mono text-muted-foreground">
+            {selectedCount}/{matches.length} selected
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={allSelected ? onDeselectAll : onSelectAll}
+            disabled={uploading || selectableMatches.length === 0}
+          >
+            {allSelected ? "Deselect All" : "Select All"}
+          </Button>
+        </div>
+
+        <div className="border rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
+            <div className="min-w-[960px]">
+              <div className="grid grid-cols-[2.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(10rem,1fr)_7rem] gap-3 px-3 py-2 bg-muted/40 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                <span />
+                <span>Matched Excel label</span>
+                <span>Main form field</span>
+                <span>Extracted value</span>
+                <span>DB target</span>
+                <span>Will save?</span>
+              </div>
+              <div className="divide-y max-h-[46vh] overflow-y-auto">
+                {matches.map((match) => {
+                  const checked = checkedFields.includes(match.id);
+                  const canAutofill = match.canAutofill;
+                  return (
+                    <label
+                      key={match.id}
+                      className={`grid grid-cols-[2.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(10rem,1fr)_7rem] gap-3 px-3 py-3 items-center hover:bg-muted/30 ${
+                        canAutofill ? "cursor-pointer" : "cursor-not-allowed opacity-70"
+                      }`}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        disabled={uploading || !canAutofill}
+                        onCheckedChange={(nextChecked) =>
+                          onToggle(match.id, Boolean(nextChecked))
+                        }
+                        aria-label={`Include ${match.formLabel}`}
+                      />
+                      <span className="text-sm font-medium min-w-0 truncate">
+                        {hasSyncValue(match.xlsxLabel) ? match.xlsxLabel : "null"}
+                      </span>
+                      <span className="text-xs font-semibold min-w-0 truncate">
+                        {match.formLabel}
+                      </span>
+                      <span className="text-xs min-w-0 truncate">
+                        {hasSyncValue(match.value) ? match.value : "null"}
+                      </span>
+                      <code className="text-[11px] bg-muted rounded px-2 py-1 truncate">
+                        {match.dbTarget || "Not mapped"}
+                      </code>
+                      <span
+                        className={`text-[10px] font-bold uppercase tracking-wider ${
+                          match.canSaveToDb
+                            ? "text-success"
+                            : match.canAutofill
+                              ? "text-warn"
+                              : "text-muted-foreground"
+                        }`}
+                      >
+                        {match.canSaveToDb
+                          ? "Yes"
+                          : match.canAutofill
+                            ? "Local"
+                            : match.isMatched
+                              ? "No value"
+                              : "No match"}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {selectedNoValueCount > 0 && (
+          <p className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-md px-3 py-2">
+            {selectedNoValueCount} selected field(s) have no extracted value.
+          </p>
+        )}
+        {selectedLocalOnlyCount > 0 && (
+          <p className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-md px-3 py-2">
+            {selectedLocalOnlyCount} selected field(s) can be shown in the KYC cards but are not
+            written by Save KYC.
+          </p>
+        )}
+
+        {error && (
+          <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">
+            {error}
+          </p>
+        )}
+        {message && !error && (
+          <p className="text-xs text-success bg-success/10 border border-success/20 rounded-md px-3 py-2">
+            {message}
+          </p>
+        )}
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel} disabled={uploading}>
+            Close
+          </Button>
+          <Button
+            type="button"
+            onClick={onConfirm}
+            disabled={uploading || selectedCount === 0 || selectedNoValueCount > 0}
+          >
+            {uploading && <Loader2 className="size-3.5 animate-spin" />}
+            Apply Selected
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 function SalesforceMappingModal({
@@ -4120,11 +4956,24 @@ function SalesforceMappingModal({
     </div>
   );
 }
-function KycField({ n, label, icon, children, wide, editable, value, onChange, multiline }) {
+function KycField({
+  n,
+  label,
+  icon,
+  children,
+  wide,
+  editable,
+  value,
+  onChange,
+  multiline,
+  highlighted,
+}) {
   const [editing, setEditing] = useState(false);
   return (
     <div
-      className={`bg-card border rounded-xl p-4 hover:border-accent/40 transition-colors group ${wide ? "md:col-span-2 lg:col-span-3" : ""}`}
+      className={`bg-card border rounded-xl p-4 hover:border-accent/40 transition-colors group ${
+        highlighted ? "border-accent ring-2 ring-accent/25 bg-accent/5" : ""
+      } ${wide ? "md:col-span-2 lg:col-span-3" : ""}`}
     >
       <div className="flex items-center gap-2 mb-2">
         <span className="size-6 rounded-md bg-accent/10 text-accent flex items-center justify-center text-[10px] font-bold font-mono">
@@ -4145,8 +4994,8 @@ function KycField({ n, label, icon, children, wide, editable, value, onChange, m
         )}
       </div>
       <div className="text-xs">
-        {value !== undefined && onChange ? (
-          editing ? (
+        {value !== undefined ? (
+          editing && onChange ? (
             multiline ? (
               <textarea
                 autoFocus
@@ -4183,14 +5032,28 @@ function KycField({ n, label, icon, children, wide, editable, value, onChange, m
 function ScoreMatricsTab({ account }) {
   const [expanded, setExpanded] = useState(null);
   const open = (title, hint, block, area) => setExpanded({ title, hint, block, area });
+  const areaScores = [
+    account.relationshipHealth.score,
+    account.projectHealth.score,
+    account.whiteSpace.score,
+    account.contractScoring.score,
+    account.csat.score,
+    account.riskScoring.score,
+    account.resourceHealth.score,
+    account.financialHealth.score,
+  ];
+  const overallScore = parseFloat(
+    (areaScores.reduce((a, b) => a + b, 0) / areaScores.length).toFixed(1),
+  );
   return (
     <div className="space-y-6">
       {/* All 8 health areas + overall at a glance */}
       <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2">
         <ScoreCard
           title="Overall"
-          score={account.health / 10}
+          score={overallScore}
           subtitle={`${account.trend >= 0 ? "+" : ""}${account.trend}%`}
+          bold
         />
         <ScoreCard title="Relationship" score={account.relationshipHealth.score} />
         <ScoreCard title="Project" score={account.projectHealth.score} />
@@ -4316,16 +5179,18 @@ function ScoreMatricsTab({ account }) {
     </div>
   );
 }
-function ScoreCard({ title, score, subtitle, inverse }) {
+function ScoreCard({ title, score, subtitle, inverse, bold }) {
   const good = inverse ? score >= 7 : score >= 8;
   const ok = inverse ? score >= 5 : score >= 6;
   const color = good ? "text-success" : ok ? "text-warn" : "text-crit";
   return (
-    <div className="bg-card border rounded-xl p-3">
-      <p className="text-[9px] uppercase tracking-widest text-muted-foreground font-bold truncate">
+    <div className={`bg-card border rounded-xl p-3 ${bold ? "ring-2 ring-primary" : ""}`}>
+      <p
+        className={`uppercase tracking-widest text-muted-foreground font-bold truncate ${bold ? "text-[10px]" : "text-[9px]"}`}
+      >
         {title}
       </p>
-      <p className={`text-xl font-bold mt-0.5 ${color}`}>
+      <p className={`font-bold mt-0.5 ${bold ? "text-2xl" : "text-xl"} ${color}`}>
         {score.toFixed(1)}
         <span className="text-[10px] text-muted-foreground">/10</span>
       </p>
@@ -4583,6 +5448,131 @@ function buildDefaultSections(area, existingMetrics) {
     })),
   }));
 }
+
+function getKpiBaseSections(area, block) {
+  return block.kpiData ?? buildDefaultSections(area, block.metrics);
+}
+
+function mapKpiSectionsById(sections) {
+  return new Map((sections ?? []).map((section) => [section.id, section]));
+}
+
+function mapKpiFieldsById(section) {
+  return new Map((section?.fields ?? []).map((field) => [field.id, field]));
+}
+
+function kpiSectionValue(section = {}) {
+  return compactHistoryParts([
+    section.name ? `Section: ${section.name}` : null,
+    Array.isArray(section.fields) ? `Fields: ${section.fields.length}` : null,
+  ]);
+}
+
+function kpiFieldValue(field = {}) {
+  return compactHistoryParts([
+    field.label ? `Criterion: ${field.label}` : null,
+    field.weight !== undefined ? `Weight: ${field.weight}%` : null,
+    `Status: ${field.checked ? "Checked" : "Open"}`,
+  ]);
+}
+
+function buildScoreMatrixHistoryChanges({
+  title,
+  oldScore,
+  newScore,
+  beforeSections,
+  afterSections,
+}) {
+  const changes = [
+    {
+      field: `Score: ${title}`,
+      oldValue: oldScore,
+      newValue: newScore,
+    },
+  ];
+  const beforeById = mapKpiSectionsById(beforeSections);
+  const afterById = mapKpiSectionsById(afterSections);
+
+  for (const [sectionId, section] of beforeById.entries()) {
+    if (!afterById.has(sectionId)) {
+      changes.push({
+        field: `Score matrix section removed: ${title}`,
+        oldValue: kpiSectionValue(section),
+        newValue: null,
+      });
+    }
+  }
+
+  for (const [sectionId, section] of afterById.entries()) {
+    const previousSection = beforeById.get(sectionId);
+    if (!previousSection) {
+      changes.push({
+        field: `Score matrix section added: ${title}`,
+        oldValue: null,
+        newValue: kpiSectionValue(section),
+      });
+      for (const field of section.fields ?? []) {
+        changes.push({
+          field: `Score matrix criterion added: ${section.name}`,
+          oldValue: null,
+          newValue: kpiFieldValue(field),
+        });
+      }
+      continue;
+    }
+
+    changes.push({
+      field: `Score matrix section name: ${title}`,
+      oldValue: previousSection.name,
+      newValue: section.name,
+    });
+
+    const previousFields = mapKpiFieldsById(previousSection);
+    const currentFields = mapKpiFieldsById(section);
+
+    for (const [fieldId, field] of previousFields.entries()) {
+      if (!currentFields.has(fieldId)) {
+        changes.push({
+          field: `Score matrix criterion removed: ${previousSection.name}`,
+          oldValue: kpiFieldValue(field),
+          newValue: null,
+        });
+      }
+    }
+
+    for (const [fieldId, field] of currentFields.entries()) {
+      const previousField = previousFields.get(fieldId);
+      if (!previousField) {
+        changes.push({
+          field: `Score matrix criterion added: ${section.name}`,
+          oldValue: null,
+          newValue: kpiFieldValue(field),
+        });
+        continue;
+      }
+      changes.push(
+        {
+          field: `Score matrix criterion label: ${section.name}`,
+          oldValue: previousField.label,
+          newValue: field.label,
+        },
+        {
+          field: `Score matrix criterion weight: ${section.name} / ${field.label}`,
+          oldValue: `${previousField.weight}%`,
+          newValue: `${field.weight}%`,
+        },
+        {
+          field: `Score matrix criterion status: ${section.name} / ${field.label}`,
+          oldValue: previousField.checked ? "Checked" : "Open",
+          newValue: field.checked ? "Checked" : "Open",
+        },
+      );
+    }
+  }
+
+  return changes;
+}
+
 function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const { profile, session } = useAuth();
   const editable = getRolePermissions(profile?.role).write;
@@ -4592,8 +5582,7 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
   const saveActivityScoreSnapshot = useServerFn(upsertActivityScoreSnapshotServer);
 
   const [sections, setSections] = useState(() => {
-    if (block.kpiData) return block.kpiData;
-    return buildDefaultSections(area, block.metrics);
+    return getKpiBaseSections(area, block);
   });
 
   function addSection() {
@@ -4690,16 +5679,16 @@ function KpiEditorModal({ title, hint, block, area, accountId, onClose }) {
       });
       await logAccountChanges(
         accountId,
-        [
-          {
-            field: `Score: ${title}`,
-            oldValue: block.score.toFixed(1),
-            newValue: newScore.toFixed(1),
-          },
-        ],
+        buildScoreMatrixHistoryChanges({
+          title,
+          oldScore: block.score.toFixed(1),
+          newScore: newScore.toFixed(1),
+          beforeSections: getKpiBaseSections(area, block),
+          afterSections: sections,
+        }),
         editorUser,
       );
-      await refreshAccountRetentionGrowthScoring(accountId).catch(() => null);
+      await refreshAccountRetentionGrowthScoring(accountId, editorUser).catch(() => null);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["account-history", accountId] });
@@ -4956,11 +5945,6 @@ function ContractScoringBlock({ account, onExpand }) {
             </button>
           )}
         </div>
-      </div>
-      <div className="px-4 md:px-6 py-4 border-b grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-        <ContractFact label="Type" value={c.type || account.contractType} />
-        <ContractFact label="Duration" value={c.duration} />
-        <ContractFact label="Renewal Date" value={formatDisplayDate(c.renewalDate)} />
       </div>
       {c.metrics.length > 0 && (
         <div className="p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
@@ -5413,6 +6397,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         expectedLift:
           opportunity.expectedLift ??
           `+${formatCurrency(opportunity.potentialValue ?? 0)} potential`,
+        editedBy: profile?.name ?? "Unknown",
       }),
     onMutate: (opportunity) => {
       setPursuingOpportunityId(opportunity.id);
@@ -5435,6 +6420,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
       );
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setOpportunityStatus(error?.message ?? "Could not add this opportunity to action items.");
@@ -5454,6 +6440,17 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
           reviewer: profile?.name ?? "Unknown",
         }),
       );
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "Activity rejected",
+            oldValue: buildActivityHistoryValue(target),
+            newValue: buildRejectedActivityHistoryValue(target, reason, rejectedActivity),
+          },
+        ],
+      });
 
       if (target.sourceKind === "meeting") {
         await markMeetingInsightActionItemState({
@@ -5464,7 +6461,6 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
           status: "dismissed",
         });
       }
-
       return rejectedActivity;
     },
     onSuccess: (_, { target, reason }) => {
@@ -5482,6 +6478,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       setOpportunityStatus(`Rejected "${target.title}".`);
       setRejectTarget(null);
       setRejectReason("");
@@ -5835,6 +6832,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
       queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
       queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setFirefliesStatus(error?.message ?? "Fireflies extraction failed.");
@@ -5885,14 +6883,27 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: saveRuleActivity, isPending: savingRuleActivity } = useMutation({
-    mutationFn: ({ target, form }) =>
-      createActivityRuleActivity(
+    mutationFn: async ({ target, form }) => {
+      const createdActivity = await createActivityRuleActivity(
         buildActivityRuleActivityInput({
           accountId: account.id,
           target,
           form,
         }),
-      ),
+      );
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "Activity created",
+            oldValue: null,
+            newValue: buildSavedActivityHistoryValue(target, form, createdActivity),
+          },
+        ],
+      });
+      return createdActivity;
+    },
     onSuccess: (_, { target }) => {
       setResolvedItems((current) => ({
         ...current,
@@ -5902,6 +6913,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       router.invalidate();
       closeReview();
     },
@@ -5917,6 +6929,17 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           reviewer: profile?.name ?? "Unknown",
         }),
       );
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "Activity rejected",
+            oldValue: buildActivityHistoryValue(target),
+            newValue: buildRejectedActivityHistoryValue(target, reason, rejectedActivity),
+          },
+        ],
+      });
 
       if (target.sourceKind === "meeting") {
         await markMeetingInsightActionItemState({
@@ -5927,7 +6950,6 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           status: "dismissed",
         });
       }
-
       return rejectedActivity;
     },
     onSuccess: (_, { target, reason }) => {
@@ -5945,6 +6967,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
       queryClient.invalidateQueries({ queryKey: ["meeting-insight-action-states", account.id] });
       if (target.sourceKind === "meeting") {
         setFirefliesStatus(
@@ -5979,6 +7002,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         source: suggestion.sourceSummary,
         healthArea: suggestion.healthArea,
         expectedLift: suggestion.expectedLift,
+        editedBy: profile?.name ?? "Unknown",
       });
       await updateStagedAiRecommendationStatus({
         id: suggestion.id,
@@ -6005,6 +7029,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         });
       }
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setAiSuggestionError(error?.message ?? "AI recommendation could not be added.");
@@ -6015,12 +7040,25 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: stageAiRecommendation } = useMutation({
-    mutationFn: (suggestion) =>
-      stageAccountAiRecommendation({
+    mutationFn: async (suggestion) => {
+      const stagedRecommendation = await stageAccountAiRecommendation({
         accountId: account.id,
         requestedBy: profile?.id,
         suggestion,
-      }),
+      });
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "AI activity recommendation selected",
+            oldValue: null,
+            newValue: buildAiRecommendationHistoryValue(stagedRecommendation),
+          },
+        ],
+      });
+      return stagedRecommendation;
+    },
     onMutate: (suggestion) => {
       setAddingAiSuggestionId(suggestion.id);
       setAiSuggestionError("");
@@ -6050,6 +7088,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           queryKey: ["staged-ai-recommendations", account.id],
         });
       }
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setAiSuggestionError(error?.message ?? "AI recommendation could not be staged.");
@@ -6060,11 +7099,24 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: dismissStagedAiRecommendation } = useMutation({
-    mutationFn: (suggestion) =>
-      updateStagedAiRecommendationStatus({
+    mutationFn: async (suggestion) => {
+      const result = await updateStagedAiRecommendationStatus({
         id: suggestion.id,
         status: "dismissed",
-      }),
+      });
+      await logActivityHistoryChange({
+        accountId: account.id,
+        profile,
+        changes: [
+          {
+            field: "AI activity recommendation removed",
+            oldValue: buildAiRecommendationHistoryValue(suggestion),
+            newValue: "Dismissed",
+          },
+        ],
+      });
+      return result;
+    },
     onMutate: (suggestion) => {
       setAddingAiSuggestionId(suggestion.id);
       setAiSuggestionError("");
@@ -6080,6 +7132,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           queryKey: ["staged-ai-recommendations", account.id],
         });
       }
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setAiSuggestionError(error?.message ?? "AI recommendation could not be removed.");
@@ -6099,6 +7152,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         source: item.meetingTitle ? `Meeting Insight: ${item.meetingTitle}` : "Meeting Insight",
         healthArea: item.healthArea,
         expectedLift: item.expectedLift,
+        editedBy: profile?.name ?? "Unknown",
       });
       await markMeetingInsightActionItemState({
         accountId: account.id,
@@ -6130,6 +7184,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items"] });
       queryClient.invalidateQueries({ queryKey: ["meeting-insight-action-states", account.id] });
       queryClient.invalidateQueries({ queryKey: ["account-open-action-items", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setFirefliesStatus(error?.message ?? "Meeting insight could not be added.");
@@ -6474,6 +7529,16 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
         await markActivityRuleActivityDone(created.id);
       }),
     );
+
+    await logActivityHistoryChange({
+      accountId: account.id,
+      profile,
+      changes: rowsToComplete.map((entry) => ({
+        field: `Activity status: ${getActivityHistoryTitle(entry)}`,
+        oldValue: entry.status ?? "Open",
+        newValue: "Done",
+      })),
+    });
 
     setResolvedItems((current) => ({
       ...current,
@@ -8549,6 +9614,106 @@ function buildRejectedRuleActivityInput({ accountId, target, reason, reviewer })
     sourceType: sourceKind,
     sourceRef: getSuggestionSourceRef(target),
   };
+}
+
+function normalizeHistoryText(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function compactHistoryParts(parts) {
+  return parts.map(normalizeHistoryText).filter(Boolean).join(" | ");
+}
+
+function getActivityHistoryTitle(row = {}) {
+  return (
+    normalizeHistoryText(row.title) ??
+    normalizeHistoryText(row.nextStep) ??
+    normalizeHistoryText(row.reason) ??
+    normalizeHistoryText(row.weakSignal) ??
+    "Untitled activity"
+  );
+}
+
+function buildActivityHistoryValue(row = {}) {
+  const area = row.area ?? row.healthArea ?? row.parameter;
+  const dueDate = row.dueDate ?? row.due ?? row.due_date;
+  const rag = row.rag ?? row.urgency;
+  const expectedLift = row.expectedLift ?? row.expected_lift;
+  const nextStep = row.nextStep ?? row.next_step ?? row.reason;
+
+  return compactHistoryParts([
+    `Title: ${getActivityHistoryTitle(row)}`,
+    area ? `Area: ${area}` : null,
+    row.status ? `Status: ${row.status}` : null,
+    row.owner ? `Owner: ${row.owner}` : null,
+    dueDate ? `Due: ${dueDate}` : null,
+    rag ? `RAG: ${rag}` : null,
+    expectedLift ? `Expected lift: ${expectedLift}` : null,
+    nextStep ? `Next step: ${nextStep}` : null,
+  ]);
+}
+
+function buildSavedActivityHistoryValue(target, form, createdActivity) {
+  const item = target?.item ?? target ?? {};
+  return buildActivityHistoryValue({
+    ...item,
+    ...createdActivity,
+    title: form?.title ?? createdActivity?.title ?? item.title,
+    owner: form?.owner ?? createdActivity?.owner ?? item.owner,
+    dueDate: form?.dueDate ?? createdActivity?.dueDate ?? item.dueDate,
+    nextStep: form?.nextStep ?? createdActivity?.nextStep ?? item.nextStep,
+    area: createdActivity?.parameter ?? item.area ?? item.healthArea ?? item.parameter,
+    parameter: createdActivity?.parameter ?? item.parameter,
+    status: createdActivity?.status ?? "Planned",
+    rag: createdActivity?.rag ?? item.rag ?? item.urgency,
+    expectedLift: createdActivity?.expectedLift ?? item.expectedLift,
+  });
+}
+
+function buildRejectedActivityHistoryValue(target, reason, rejectedActivity) {
+  return compactHistoryParts([
+    buildActivityHistoryValue({
+      ...target,
+      ...rejectedActivity,
+      area: rejectedActivity?.parameter ?? target?.area ?? target?.healthArea ?? target?.parameter,
+      status: "Rejected",
+      nextStep: null,
+    }),
+    reason ? `Rejection reason: ${reason}` : null,
+  ]);
+}
+
+function buildAiRecommendationHistoryValue(suggestion = {}) {
+  return compactHistoryParts([
+    suggestion.title ? `Title: ${suggestion.title}` : null,
+    suggestion.healthArea ? `Area: ${suggestion.healthArea}` : null,
+    suggestion.expectedLift ? `Expected lift: ${suggestion.expectedLift}` : null,
+    suggestion.reason ? `Reason: ${suggestion.reason}` : null,
+    suggestion.description ? `Description: ${suggestion.description}` : null,
+    suggestion.sourceSummary ? `Source: ${suggestion.sourceSummary}` : null,
+  ]);
+}
+
+async function logActivityHistoryChange({ accountId, profile, changes }) {
+  const seen = new Set();
+  const normalizedChanges = changes
+    .map((change) => ({
+      field: normalizeHistoryText(change.field),
+      oldValue: normalizeHistoryText(change.oldValue),
+      newValue: normalizeHistoryText(change.newValue),
+    }))
+    .filter((change) => {
+      if (!change.field || change.oldValue === change.newValue) return false;
+      const key = `${change.field}|${change.oldValue ?? ""}|${change.newValue ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  if (!normalizedChanges.length) return;
+  await logAccountChanges(accountId, normalizedChanges, profile?.name ?? "Unknown");
 }
 
 function scoreAreaToParameter(area) {

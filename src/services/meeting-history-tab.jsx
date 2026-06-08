@@ -139,6 +139,7 @@ export function MeetingHistoryTab({ account, profile, session }) {
       queryClient.invalidateQueries({ queryKey: ["fireflies-meeting-summaries", account.id] });
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
       queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setSyncStatus(error?.message ?? "Fireflies meeting sync failed.");
@@ -151,9 +152,12 @@ export function MeetingHistoryTab({ account, profile, session }) {
         meetingIds: target.scope === "single" ? [target.meeting.id] : undefined,
         deleteActionItems: target.deleteActionItems,
         deleteOpportunities: target.deleteOpportunities,
+        editedBy: profile?.name ?? "Unknown",
       });
       if (target.deleteOpportunities) {
-        await refreshAccountRetentionGrowthScoring(account.id).catch(() => null);
+        await refreshAccountRetentionGrowthScoring(account.id, profile?.name ?? "Unknown").catch(
+          () => null,
+        );
       }
       return result;
     },
@@ -166,6 +170,7 @@ export function MeetingHistoryTab({ account, profile, session }) {
       queryClient.invalidateQueries({ queryKey: ["activity-rule-activities", account.id] });
       queryClient.invalidateQueries({ queryKey: ["opportunities", account.id] });
       queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
     onError: (error) => {
       setSyncStatus(error?.message ?? "Meeting history delete failed.");
