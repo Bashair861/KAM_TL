@@ -97,6 +97,7 @@ create table if not exists stakeholders (
   role         text not null,
   influence    influence_type not null,
   email        text,
+  phone        text,
   last_contact text,
   created_at   timestamptz default now()
 );

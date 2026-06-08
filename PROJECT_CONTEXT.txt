@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 4.6 - Project Charter Sheet Upload + Salesforce Integration
+  Last updated: Phase 4.10 - Dynamic Overview Sections
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -108,11 +108,15 @@ Recent JS additions:
   src/db/add-linkedin-summary-updated-at.sql <- accounts.linkedin_summary_updated_at timestamp
   src/db/add-account-website-summary.sql <- accounts.website_url + website_summary fields
   src/db/add-account-contract-fields.sql <- accounts.renewal_date + contract_duration
+  src/db/add-stakeholder-phone.sql <- stakeholders.phone for Salesforce Contact.Phone/MobilePhone
+  src/db/add-stakeholder-delete-policy.sql <- authenticated stakeholder delete policy
   src/services/linkedin-summary.js  <- Server fn: generates/saves Account's Linkedin Summary
   src/services/website-summary.js   <- Server fn: generates/saves Account's Website Summary
   accounts.$accountId.jsx           <- Project Charter Auto-fill:
                                        client-side .xlsx parser + confirmation dialog
                                        for KYC field auto-fill in the Overview tab
+  OverviewSectionsDialog            <- Edit Sections dialog for Overview KYC
+                                       + Account Details field visibility
 
 Salesforce integration additions (Phase 4.5):
   src/services/salesforce.js        <- Server fn: lookupSalesforceAccountBundle
@@ -120,11 +124,56 @@ Salesforce integration additions (Phase 4.5):
                                        Auth: OAuth Client Credentials flow (CLIENT_ID + CLIENT_SECRET)
   src/services/salesforce-sync.js   <- Server fn: syncSalesforceMappedFieldsServer
                                        Writes selected fields to Supabase accounts + stakeholders
+                                       Stakeholder sync supports name, role, email, phone, influence
                                        Uses service role key to bypass RLS
   SalesforceMappingModal            <- Inline component in accounts.$accountId.jsx
                                        Field-by-field review table with checkboxes
                                        Groups: Account/KYC + one group per Salesforce Contact
+                                       Stakeholder groups show create/update target,
+                                       match basis, and visible stakeholder fields
   Account Details section           <- Overview tab section below KYC for LinkedIn URL
+
+Overview display configuration additions (Phase 4.10):
+  OVERVIEW_SECTION_FIELD_GROUPS      <- Defines the configurable first two Overview sections:
+                                       KYC and Account Details
+  Edit Sections button               <- In the KYC header; opens OverviewSectionsDialog
+  OverviewSectionsDialog             <- Lets users choose which KYC / Account Details fields
+                                       are visible on the account Overview tab; popup is
+                                       max-height constrained with an internal scroll area
+  Field persistence                  <- Saved per account in browser localStorage with key
+                                       kam-overview-sections:v1:{accountId}
+                                       No Supabase schema change or migration is required
+  Field catalog                      <- Lists the broader account-level field catalog, not
+                                       only the fields currently visible by default; backend/
+                                       system fields are intentionally hidden
+  Field editing                      <- Selected DB-backed fields render pencil edit controls
+                                       for KAM + Head of KAM only; C Level/CEO remains
+                                       read-only through ROLE_PERMISSIONS
+  Save behavior                      <- Edited selected fields use the existing Overview save
+                                       bar; updateAccountKyc splits account columns from
+                                       contract_details columns when needed
+  Protected sections                 <- Account's Linkedin Summary, Account's Website Summary,
+                                       and Stakeholders - full detail stay unchanged
+  Excluded field                     <- Stakeholders Info is not listed in Edit Sections because
+                                       stakeholder data belongs to the protected full-detail
+                                       Stakeholders section
+
+Stakeholder management additions (Phase 4.7):
+  src/services/db.js                <- createStakeholder() + updateStakeholder()
+                                       + deleteStakeholder()
+                                       fetchAccount() returns stakeholder id, email, phone
+  Stakeholders - full detail        <- Overview tab table shows email + phone
+                                       Create stakeholder button opens system create dialog
+                                       Pencil action edits each stakeholder row
+                                       Trash action deletes a stakeholder after confirmation
+                                       Saves write account_history entries
+
+Dynamic stakeholder sync additions (Phase 4.8):
+  src/services/salesforce.js        <- Contact query no longer hard-limits to 20 contacts
+  buildSalesforceMappingRows        <- Every returned Contact maps to visible stakeholder fields:
+                                       Name, Role, Email, Phone, Influence
+                                       Match priority: email -> phone -> name -> create new
+  src/services/salesforce-sync.js   <- Uses matched stakeholderId first, then fallback matching
 
 Project Charter sheet upload additions (Phase 4.6):
   Project Charter Auto-fill         <- Overview tab upload control beside Salesforce sync
@@ -413,6 +462,48 @@ IMPORTANT DECISIONS & PATTERNS
     - Current Charter extraction intentionally excludes Account Details fields
       (contractRenewalDate, contractDuration, linkedinUrl, websiteUrl), even though
       those fields exist in KYC_FORM_FIELDS for manual edits and Salesforce sync.
+
+
+12. OVERVIEW SECTION FIELD VISIBILITY PATTERN
+    - Account Detail -> Overview has five business sections:
+      KYC, Account Details, Account's Linkedin Summary, Account's Website Summary,
+      and Stakeholders - full detail.
+    - Only KYC and Account Details are configurable through the Edit Sections button.
+    - The protected last three sections are not changed by the field picker.
+    - The configurable list is driven by OVERVIEW_SECTION_FIELD_GROUPS in
+      src/routes/accounts.$accountId.jsx.
+    - Default visible fields preserve the previous first-two-section layout.
+    - The picker also exposes other account-level fields that are not part of the
+      protected summary/stakeholder sections.
+    - KYC selectable fields include accountStatus, industry, business, description,
+      history, revenue, mrrArr, primary, region, founded, employees, isStartup,
+      tenure, team, competitors, and flow.
+    - Account Details selectable fields include tier, operational status, contract
+      value/ARR, contract date/duration/type, selected contract flags, customer
+      feedback, meetings per month, LinkedIn URL, and Website URL.
+    - Backend/system fields are intentionally hidden from Edit Sections:
+      Account Name, Account ID, Short Code, Health Score, Trend, Last Touch,
+      Backup Exists, Critical Resources, Retention Risk, Growth Upside,
+      White Space Count, Retention Health Score, Calculated Retention Risk,
+      Growth Potential Score, Growth Potential Level, Revenue At Risk,
+      Growth Pipeline Value, Retention/Growth Quadrant, Retention/Growth Next
+      Action, Retention/Growth Calculated At, News Keywords, Last News Sync,
+      Cooperation, Service Consumption, and Contract Compliance.
+    - Primary Contact Role remains mapped for Salesforce/account data, but it is
+      hidden from the Overview Edit Sections list.
+    - stakeholdersInfo is intentionally not selectable because the full stakeholder
+      data is already represented in Stakeholders - full detail.
+    - linkedinSummary, linkedinSummaryUpdatedAt, websiteSummary, websiteSummaryUpdatedAt,
+      and stakeholder row fields are intentionally not selectable because they belong
+      to the protected last three sections.
+    - Display choices are browser-only UI preferences saved per account in localStorage.
+      They do not write to Supabase and do not affect Salesforce sync or Project
+      Charter parsing.
+    - Selected DB-backed fields show pencil edit controls when editable is true.
+      Role permissions keep C Level/CEO read-only and allow KAM / Head of KAM edits.
+    - Field edits are persisted through the existing Save KYC bar. updateAccountKyc
+      now splits account table updates from contract_details updates for selected
+      contract/resource fields.
 
 
 WHAT IS NEXT — UPCOMING PHASES
