@@ -2084,8 +2084,12 @@ function normalizeContractDetailUpdates(values = {}) {
 
 export async function updateContractDetail(accountId, values, options = {}) {
   const role = normalizeRole(options.role);
-  if (role !== "Head of KAM") {
-    throw new Error("Only Head of KAM can edit contract details.");
+  const userId = normalizeContractText(options.userId);
+  if (role !== "Head of KAM" && role !== "KAM") {
+    throw new Error("Only Head of KAM or the assigned KAM can edit contract details.");
+  }
+  if (role === "KAM" && !userId) {
+    throw new Error("Assigned KAM identity is required before editing contract details.");
   }
 
   const id = normalizeContractText(accountId);
@@ -2093,6 +2097,9 @@ export async function updateContractDetail(accountId, values, options = {}) {
 
   const current = await fetchContractDetail(id, options);
   if (!current) throw new Error("Contract account was not found.");
+  if (role === "KAM" && current.assignedKamId !== userId) {
+    throw new Error("Only the assigned KAM can edit this account's contract details.");
+  }
 
   const updates = normalizeContractDetailUpdates(values);
   const changes = buildContractHistoryChanges(current, updates);

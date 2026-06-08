@@ -78,7 +78,6 @@ function ContractDetailPage() {
   const { profile, loading } = useAuth();
   const queryClient = useQueryClient();
   const role = profile?.role ?? "KAM";
-  const canEdit = role === "Head of KAM";
   const [form, setForm] = useState(null);
   const [saveMessage, setSaveMessage] = useState("");
 
@@ -91,6 +90,8 @@ function ContractDetailPage() {
     queryFn: () => fetchContractDetail(accountId, { role, userId: profile?.id }),
     enabled: !loading && Boolean(profile),
   });
+  const isAssignedKam = role === "KAM" && contract?.assignedKamId === profile?.id;
+  const canEdit = role === "Head of KAM" || isAssignedKam;
 
   useEffect(() => {
     if (contract) setForm(contractToForm(contract));
