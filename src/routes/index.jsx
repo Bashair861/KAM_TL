@@ -365,6 +365,7 @@ function DashboardPage() {
                 </h3>
                 <Link
                   to="/escalations"
+                  search={{ tab: "open" }}
                   className="text-[11px] font-semibold text-accent hover:underline"
                 >
                   Open console -&gt;
@@ -375,6 +376,7 @@ function DashboardPage() {
                   <Link
                     key={e.id}
                     to="/escalations"
+                    search={{ tab: "open" }}
                     className="block px-6 py-4 hover:bg-muted/40 transition-colors"
                   >
                     <div className="flex items-center justify-between mb-1">

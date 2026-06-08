@@ -15,6 +15,9 @@ import {
 } from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/escalations")({
+  validateSearch: (search) => ({
+    tab: typeof search.tab === "string" ? search.tab : "import",
+  }),
   head: () => ({
     meta: [
       { title: "Escalations — Aether KAM" },
@@ -25,12 +28,13 @@ export const Route = createFileRoute("/escalations")({
 });
 
 function EscalationsPage() {
+  const { tab: initialTab } = Route.useSearch();
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const canWrite = Boolean(profile && getRolePermissions(role).write);
   const queryClient = useQueryClient();
 
-  const [activeTab, setActiveTab] = useState("import");
+  const [activeTab, setActiveTab] = useState(initialTab ?? "import");
 
   // Jira import state
   const [selectedAccountId, setSelectedAccountId] = useState("");
