@@ -114,16 +114,16 @@ function EscalationsPage() {
   });
 
   const createMutation = useMutation({
-    mutationFn: () => {
-      if (!createForm.title.trim()) throw new Error("Title is required.");
-      if (!createForm.accountId) throw new Error("Account is required.");
+    mutationFn: ({ form, priority, items }) => {
+      if (!form.title.trim()) throw new Error("Title is required.");
+      if (!form.accountId) throw new Error("Account is required.");
       return createEscalation({
-        accountId: createForm.accountId,
-        title: createForm.title.trim(),
-        priority: createPriority,
-        description: createForm.description.trim() || null,
-        rca: createForm.rca.trim() || null,
-        actionItems: createItems,
+        accountId: form.accountId,
+        title: form.title.trim(),
+        priority,
+        description: form.description.trim() || null,
+        rca: form.rca.trim() || null,
+        actionItems: items,
       });
     },
     onSuccess: () => {
@@ -596,7 +596,7 @@ function EscalationsPage() {
               Cancel
             </button>
             <button
-              onClick={() => createMutation.mutate()}
+              onClick={() => createMutation.mutate({ form: createForm, priority: createPriority, items: createItems })}
               disabled={createMutation.isPending}
               className="px-4 py-2 text-xs bg-crit text-white rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:bg-crit/90"
             >
