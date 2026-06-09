@@ -394,13 +394,7 @@ function areaLabel(area) {
 }
 function actionLabelFromKpi(label) {
   const clean = String(label ?? "").trim();
-  if (!clean) return "Complete KPI follow-up";
-  if (
-    /^(complete|send|schedule|share|review|prepare|confirm|resolve|submit|update)\b/i.test(clean)
-  ) {
-    return clean;
-  }
-  return `Complete: ${clean}`;
+  return clean || "KPI follow-up";
 }
 function priorityRank(priority) {
   if (priority === "P1") return 0;

@@ -56,6 +56,17 @@ export const Route = createFileRoute("/")({
   }),
   component: DashboardPage,
 });
+const ACTION_ITEM_TYPE_FILTERS = [
+  { value: "all", label: "All action types" },
+  { value: "escalation", label: "Escalations" },
+  { value: "kpi", label: "KPI gaps" },
+  { value: "task", label: "Tasks" },
+];
+function getActionItemType(item) {
+  if (item.isEscalation) return "escalation";
+  if (item.sourceType === "kpi_data") return "kpi";
+  return "task";
+}
 function DashboardPage() {
   const { session, profile } = useAuth();
   const role = profile?.role ?? "KAM";
@@ -65,6 +76,10 @@ function DashboardPage() {
   const [calendarView, setCalendarView] = useState("month");
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [portfolioAiOpen, setPortfolioAiOpen] = useState(false);
+  const [actionCompanyFilter, setActionCompanyFilter] = useState("all");
+  const [actionTypeFilter, setActionTypeFilter] = useState("all");
+  const [actionItemFeedback, setActionItemFeedback] = useState(null);
+  const [actionItemPendingId, setActionItemPendingId] = useState(null);
   const startCalendarConnect = useServerFn(createGoogleCalendarAuthUrl);
   const loadGoogleCalendar = useServerFn(fetchGoogleCalendarDashboard);
   const loadPortfolioNews = useServerFn(fetchPortfolioNewsFeed);
@@ -108,9 +123,22 @@ function DashboardPage() {
   });
   const { mutate: completeActionItem, isPending: actionItemUpdating } = useMutation({
     mutationFn: (action) => updateDashboardActionItemComplete(action),
-    onSuccess: () => {
+    onSuccess: (_result, action) => {
       queryClient.invalidateQueries({ queryKey: ["dashboard-action-items", userId, role] });
       queryClient.invalidateQueries({ queryKey: ["accounts", userId, role] });
+      setActionItemFeedback({
+        type: "success",
+        message: `${action.title || "Action item"} marked as done.`,
+      });
+    },
+    onError: (error) => {
+      setActionItemFeedback({
+        type: "error",
+        message: error?.message || "Could not mark action item as done.",
+      });
+    },
+    onSettled: () => {
+      setActionItemPendingId(null);
     },
   });
   const {
@@ -193,13 +221,55 @@ function DashboardPage() {
       total: actionItems.length,
       escalations: actionItems.filter((item) => item.isEscalation).length,
       kpiGaps: actionItems.filter((item) => item.sourceType === "kpi_data").length,
-      tasks: actionItems.filter((item) => item.sourceType === "task").length,
+      tasks: actionItems.filter((item) => item.sourceType === "task" && !item.isEscalation).length,
     }),
     [actionItems],
   );
-  function requestActionItemCompletion(item) {
+  const actionCompanyOptions = useMemo(() => {
+    const optionMap = new Map();
+    for (const item of actionItems) {
+      const value = item.accountId ?? "__portfolio";
+      const account = item.accountId
+        ? (accounts.find((candidate) => candidate.id === item.accountId) ??
+          getAccount(item.accountId))
+        : undefined;
+      optionMap.set(value, account?.name ?? item.accountName ?? "Portfolio");
+    }
+    return [...optionMap.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [accounts, actionItems]);
+  const filteredActionItems = useMemo(
+    () =>
+      actionItems.filter((item) => {
+        const accountValue = item.accountId ?? "__portfolio";
+        const matchesCompany =
+          actionCompanyFilter === "all" || accountValue === actionCompanyFilter;
+        const matchesType =
+          actionTypeFilter === "all" || getActionItemType(item) === actionTypeFilter;
+        return matchesCompany && matchesType;
+      }),
+    [actionCompanyFilter, actionItems, actionTypeFilter],
+  );
+  const hasActionFilters = actionCompanyFilter !== "all" || actionTypeFilter !== "all";
+  useEffect(() => {
+    if (
+      actionCompanyFilter !== "all" &&
+      !actionCompanyOptions.some((option) => option.value === actionCompanyFilter)
+    ) {
+      setActionCompanyFilter("all");
+    }
+  }, [actionCompanyFilter, actionCompanyOptions]);
+  useEffect(() => {
+    if (!actionItemFeedback) return undefined;
+    const timer = setTimeout(() => setActionItemFeedback(null), 4000);
+    return () => clearTimeout(timer);
+  }, [actionItemFeedback]);
+  function markActionItemDone(item) {
     if (item.readOnlyFallback) return;
-    completeActionItem({ ...item, complete: !item.complete });
+    setActionItemFeedback(null);
+    setActionItemPendingId(item.id);
+    completeActionItem({ ...item, complete: true });
   }
   const revenueMetrics = buildPortfolioRevenueMetrics(accounts);
   const portfolioTotals = {
@@ -498,7 +568,9 @@ function DashboardPage() {
                   My Open Action Items
                 </h3>
                 <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
-                  {actionItemSummary.total} open
+                  {hasActionFilters
+                    ? `${filteredActionItems.length} of ${actionItemSummary.total} open`
+                    : `${actionItemSummary.total} open`}
                 </span>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -518,19 +590,76 @@ function DashboardPage() {
                   {actionItemSummary.tasks} tasks
                 </span>
               </div>
+              <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
+                <select
+                  value={actionCompanyFilter}
+                  onChange={(event) => setActionCompanyFilter(event.target.value)}
+                  disabled={actionCompanyOptions.length === 0}
+                  className="h-9 rounded-md border bg-background px-3 text-xs font-medium text-foreground outline-none focus:border-accent disabled:opacity-50"
+                >
+                  <option value="all">All companies</option>
+                  {actionCompanyOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={actionTypeFilter}
+                  onChange={(event) => setActionTypeFilter(event.target.value)}
+                  className="h-9 rounded-md border bg-background px-3 text-xs font-medium text-foreground outline-none focus:border-accent"
+                >
+                  {ACTION_ITEM_TYPE_FILTERS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {hasActionFilters && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActionCompanyFilter("all");
+                      setActionTypeFilter("all");
+                    }}
+                    className="h-9 rounded-md border px-3 text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-accent flex items-center justify-center gap-1"
+                  >
+                    <X className="size-3" />
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
             {(actionItemsError || actionItemsFetching) && (
               <div className="px-6 py-2 border-b bg-muted/30 text-[11px] text-muted-foreground">
                 {actionItemsError?.message || "Loading action items..."}
               </div>
             )}
+            {actionItemFeedback && (
+              <div
+                className={`px-6 py-2 border-b text-[11px] flex items-center gap-2 ${
+                  actionItemFeedback.type === "success"
+                    ? "bg-success/10 text-success"
+                    : "bg-crit/10 text-crit"
+                }`}
+              >
+                {actionItemFeedback.type === "success" ? (
+                  <CheckCircle2 className="size-3.5 shrink-0" />
+                ) : (
+                  <AlertTriangle className="size-3.5 shrink-0" />
+                )}
+                <span>{actionItemFeedback.message}</span>
+              </div>
+            )}
             <div className="divide-y max-h-[420px] overflow-y-auto">
-              {actionItems.length === 0 && (
+              {filteredActionItems.length === 0 && (
                 <div className="px-6 py-6 text-xs text-muted-foreground">
-                  No open action items found.
+                  {actionItems.length === 0
+                    ? "No open action items found."
+                    : "No action items match the selected filters."}
                 </div>
               )}
-              {actionItems.map((a) => {
+              {filteredActionItems.map((a) => {
                 const acc = a.accountId
                   ? (accounts.find((account) => account.id === a.accountId) ??
                     getAccount(a.accountId))
@@ -546,21 +675,6 @@ function DashboardPage() {
                           : "border-transparent"
                     }`}
                   >
-                    <button
-                      type="button"
-                      disabled={actionItemUpdating || a.readOnlyFallback}
-                      onClick={() => requestActionItemCompletion(a)}
-                      className="mt-0.5 size-4 rounded border flex items-center justify-center hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                      title={
-                        a.readOnlyFallback
-                          ? "Run src/db/add-tasks.sql to enable task completion."
-                          : a.sourceType === "kpi_data"
-                            ? "Mark KPI action checked"
-                            : "Mark task complete"
-                      }
-                    >
-                      {a.complete && <CheckCircle2 className="size-3 text-success" />}
-                    </button>
                     <span
                       className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${
                         a.isEscalation || a.priority === "P1"
@@ -584,9 +698,35 @@ function DashboardPage() {
                         </p>
                       )}
                     </div>
-                    <span className="text-[11px] font-mono text-muted-foreground whitespace-nowrap">
-                      {a.due}
-                    </span>
+                    <div className="shrink-0 flex flex-col items-end gap-2">
+                      <span className="text-[11px] font-mono text-muted-foreground whitespace-nowrap">
+                        {a.due}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={actionItemUpdating || a.readOnlyFallback}
+                        onClick={() => markActionItemDone(a)}
+                        className={`h-7 rounded-md px-2.5 text-[10px] font-bold uppercase tracking-wider border flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                          a.isEscalation
+                            ? "bg-crit/10 text-crit border-crit/20 hover:bg-crit/15"
+                            : "bg-success/10 text-success border-success/20 hover:bg-success/15"
+                        }`}
+                        title={
+                          a.readOnlyFallback
+                            ? "This fallback item cannot be marked complete."
+                            : a.sourceType === "kpi_data"
+                              ? "Mark KPI action checked"
+                              : "Mark task complete"
+                        }
+                      >
+                        {actionItemPendingId === a.id ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="size-3" />
+                        )}
+                        {actionItemPendingId === a.id ? "Saving..." : "Mark as done"}
+                      </button>
+                    </div>
                   </div>
                 );
               })}
