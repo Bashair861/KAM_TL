@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT DOCUMENTATION
   Purpose: Technical reference for database, configs, setup, and architecture.
   Keep this file updated after every major phase.
-  Last updated: Phase 4.10 - Dynamic Overview Sections
+  Last updated: Phase 4.11 - System-Wide Data Validation
 ================================================================================
 
 
@@ -75,8 +75,30 @@ How env vars are consumed:
 
 
 ────────────────────────────────────────────────────────────────────────────────
-CURRENT EDITION SUMMARY - PHASE 4.10
+CURRENT EDITION SUMMARY - PHASE 4.11
 --------------------------------------------------------------------------------
+Phase 4.11 adds system-wide data validation:
+- src/services/validation.js centralizes reusable validators and normalizers for
+    text, ids, enums, dates, numbers, money, email, phone, URLs, and string lists.
+- src/services/db.js validates account creation, Overview/KYC updates,
+    stakeholders, Score Marking Metrics, account action items, manual activities,
+    opportunity upserts, contract detail fields, education sessions, and
+    escalations before Supabase writes.
+- Integration write paths now normalize and validate external data before saving:
+    Salesforce sync, SOW upload, Jira sync, Fireflies/opportunity upserts, and
+    user administration.
+- Invalid optional integration values are skipped where possible so external
+    systems do not overwrite trusted account data with garbage.
+- Salesforce stakeholder names follow the same letters/spaces-only rule used by
+    manual stakeholder entry.
+- User-facing validation errors are human-readable and flow through the existing
+    form/modal/toast error handlers.
+- Manual forms validate only fields the user can see/edit in that flow. Hidden
+    DB/integration-only fields must not block a save.
+- Whole-number fields reject decimals instead of silently rounding/truncating.
+- No mandatory database migration is required. Optional PostgreSQL NOT VALID
+    check constraints can be added later as defense-in-depth after auditing data.
+
 Phase 4 added user administration and invite-based login setup:
 - /users: Head of KAM can list/create/role-change/activate users.
 - /set-password: Invite recipients set their password after clicking the email.
@@ -463,6 +485,12 @@ READ functions:
 
 WRITE functions:
 
+  Validation rule for all writes:
+    All create/update/import functions should validate through
+    src/services/validation.js before writing to Supabase. UI validation is useful
+    for quick feedback, but service-layer validation is the required guardrail
+    because it also protects server functions and integrations.
+
   updateAccountKam(accountId, kamId)
     → Updates accounts.assigned_kam_id
 
@@ -487,6 +515,23 @@ WRITE functions:
     → Auto-set defaults: health=50, trend=0, status='healthy', retention_risk='Low',
       growth_upside=0, white_space_count=0, is_startup=false, last_touch='Just now'
     → Requires INSERT RLS policy (add-account-insert-policy.sql)
+
+  Account/stakeholder validation notes:
+    -> createAccount() validates id/name/shortCode, enums, dates, non-negative
+       contract values/ARR, and optional owner/contact fields before insert.
+    -> Account-table update paths call repairAccountConstraintUpdates() before
+       writing. This self-repairs invalid legacy values covered by account CHECK
+       constraints: name, short_code, non-negative money/count fields, score
+       ranges, optional score fields, and founded year. This prevents unrelated
+       edits such as Meetings Per Month from failing hidden legacy constraints.
+    -> createStakeholder() and updateStakeholder() validate meaningful name/role/
+       influence plus optional email/phone before manual writes. Stakeholder name
+       accepts letters and spaces only; numbers and special characters are blocked
+       in the UI and rejected by the service layer.
+    -> last_contact is still supported for integration/DB payloads, but the
+       current Overview stakeholder dialog does not show it and does not send it.
+    -> deleteStakeholder() keeps the existing confirmation/RLS behavior and does
+       not need value validation beyond the target row id.
 
   createUserProfile(user)
     -> Creates a real Supabase Auth user through createManagedAuthUser()
@@ -969,7 +1014,110 @@ Persistence rules:
     only tracks DB-backed changes.
 
 
-18. DESIGN TOKENS (Tailwind / CSS custom properties in src/styles.css)
+18. SYSTEM-WIDE DATA VALIDATION
+────────────────────────────────────────────────────────────────────────────────
+Primary file: src/services/validation.js
+Account constraint repair helper: src/services/account-constraint-repairs.js
+
+Purpose:
+  The system validates at the service layer before data is written to Supabase.
+  This protects all write paths consistently: browser forms, TanStack mutations,
+  TanStack Start server functions, and external integrations.
+
+Shared helpers:
+  normalizeText()
+    -> Trims strings, enforces required/meaningful text, rejects unsafe/control
+       text, script-like payloads, symbol-only garbage, and overly long values.
+
+  normalizeId()
+    -> Normalizes ids/slugs and rejects invalid id formats.
+
+  normalizeEnum()
+    -> Ensures incoming values belong to an allowed set.
+
+  normalizeDate()
+    -> Accepts valid date-like values and emits normalized YYYY-MM-DD dates.
+
+  normalizeNumber()
+    -> Parses numeric input, supports min/max bounds, and rejects NaN/Infinity.
+
+  normalizeMoney()
+    -> Parses currency-like values and enforces non-negative money by default.
+
+  normalizeEmail()
+    -> Lowercases valid email addresses and rejects invalid email formats.
+
+  normalizePhone()
+    -> Accepts realistic phone formatting characters and rejects short/garbage
+       phone values.
+
+  normalizeUrl()
+    -> Adds https:// to plain domains, validates URL shape, and supports
+       allowLocalhost for development redirect URLs.
+
+  normalizeStringList()
+    -> Normalizes arrays/comma-separated lists and validates each item.
+
+Validated application write paths:
+  - Account creation from the Accounts portfolio page.
+  - Account Overview / KYC / Account Details edits through updateAccountKyc().
+  - Stakeholder create, edit, and delete target id handling.
+  - Score Marking Metrics health block saves, including score range, KPI
+    section names, criterion labels, weights, and section weight totals.
+  - Account action item task creation.
+  - Manual activity creation/rejection rules.
+  - Opportunity upserts from meeting/AI integration candidates.
+  - Contract detail values such as money, dates, scores, critical resources,
+    and free-text fields.
+  - Education session saves.
+  - Manual escalation creation.
+  - User administration name/email/id/redirect URL validation.
+
+Validated integration write paths:
+  - Salesforce sync:
+      Normalizes account, contract, and stakeholder data before writing.
+      Invalid optional Salesforce values are skipped where possible instead of
+      clearing trusted existing values.
+  - SOW upload:
+      Validates extracted account/contract values and skips invalid optional
+      extracted fields.
+  - Jira sync:
+      Validates imported escalations and action items before direct DB writes.
+  - Fireflies/opportunity flow:
+      Validates candidate opportunity data before upsert; malformed optional
+      candidates are skipped rather than poisoning account data.
+
+Frontend behavior:
+  - Browser form controls are still useful for quick feedback, but they are not
+    the source of truth.
+  - Manual forms should submit only fields visible/editable in the current flow.
+    Hidden backend or integration fields should be ignored unless explicitly
+    supplied by that flow.
+  - Overview numeric fields no longer silently coerce invalid text to 0. Invalid
+    values reach service validation so the user receives a clear error.
+  - Integer fields such as Meetings Per Month, Team Size, Critical Resources,
+    Renewal Days, and Jira SLA hours must be whole numbers.
+  - Existing mutation error handlers surface readable ValidationError messages in
+    forms, modals, or toasts.
+
+Database-side note:
+  - Phase 4.11 does not require a SQL migration.
+  - Optional PostgreSQL CHECK constraints can be added later as defense-in-depth.
+  - If constraints are added to an existing populated database, prefer NOT VALID
+    constraints first so new writes are protected without immediately failing on
+    legacy rows. Run VALIDATE CONSTRAINT only after auditing and cleaning existing
+    data.
+
+Suggested optional DB hardening targets:
+  - accounts: meaningful name, short_code format, non-negative money/count fields,
+    score ranges, and realistic founded year.
+  - stakeholders: email and phone format checks.
+  - health_scores: score between 0 and 10.
+  - opportunities: non-negative potential value.
+  - escalations and education_log: meaningful required text fields.
+
+
+19. DESIGN TOKENS (Tailwind / CSS custom properties in src/styles.css)
 ────────────────────────────────────────────────────────────────────────────────
 --accent              → primary blue/teal accent color
 --success             → green (healthy, positive)

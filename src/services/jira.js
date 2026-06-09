@@ -4,6 +4,14 @@ import {
   createActionItemNotifications,
   createEscalationNotifications,
 } from "@/services/notifications";
+import {
+  normalizeEnum,
+  normalizeId,
+  normalizeNumber,
+  normalizeText,
+} from "@/services/validation";
+
+const JIRA_PRIORITY_VALUES = new Set(["P1", "P2", "P3"]);
 
 function readEnv(name) {
   if (typeof process !== "undefined" && process.env?.[name]) return process.env[name];
@@ -33,6 +41,55 @@ function normalizeJiraBaseUrl(baseUrl) {
 
 function randomId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function normalizeJiraActionItems(items = []) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .slice(0, 50)
+    .map((item, index) => {
+      const label = normalizeText(item?.label ?? item, {
+        field: `Jira action item ${index + 1}`,
+        maxLength: 240,
+        meaningful: Boolean(item?.label ?? item),
+      });
+      return label ? { label, done: Boolean(item?.done) } : null;
+    })
+    .filter(Boolean);
+}
+
+function normalizeJiraIssue(issue = {}) {
+  const openedAt = issue.openedAt ? new Date(issue.openedAt) : new Date();
+  return {
+    ...issue,
+    id: normalizeText(issue.key ?? issue.id, {
+      field: "Jira issue key",
+      required: true,
+      maxLength: 120,
+      meaningful: true,
+    }),
+    title: normalizeText(issue.title, {
+      field: "Jira issue title",
+      required: true,
+      maxLength: 240,
+      meaningful: true,
+    }),
+    description: normalizeText(issue.description, {
+      field: "Jira issue description",
+      maxLength: 3000,
+      multiline: true,
+    }),
+    priority: normalizeEnum(issue.priority ?? "P3", JIRA_PRIORITY_VALUES, "Priority"),
+    slaRemainingHours: normalizeNumber(issue.slaRemainingHours, {
+      field: "SLA remaining hours",
+      min: 0,
+      max: 10000,
+      integer: true,
+      defaultValue: slaHours(issue.priority),
+    }),
+    openedAt: Number.isNaN(openedAt.getTime()) ? new Date().toISOString() : openedAt.toISOString(),
+    actionItems: normalizeJiraActionItems(issue.actionItems),
+  };
 }
 
 function compactHistoryParts(parts) {
@@ -133,10 +190,11 @@ export const fetchJiraIssues = createServerFn({ method: "GET" }).handler(async (
 export const saveJiraEscalations = createServerFn({ method: "POST" })
   .inputValidator((data) => data)
   .handler(async ({ data }) => {
-    const { issues, accountId, editedBy = "Unknown" } = data;
+    const { issues, editedBy = "Unknown" } = data;
+    const accountId = normalizeId(data.accountId, "Account ID");
 
     if (!issues?.length) throw new Error("No issues to save.");
-    if (!accountId) throw new Error("Account is required.");
+    const normalizedIssues = issues.map(normalizeJiraIssue);
 
     const supabaseUrl = readEnv("VITE_SUPABASE_URL");
     const supabaseKey = readEnv("SUPABASE_SERVICE_ROLE_KEY") ?? readEnv("VITE_SUPABASE_ANON_KEY");
@@ -144,9 +202,8 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    for (const issue of issues) {
-      const escalId = issue.key ?? issue.id;
-      if (!escalId) throw new Error("Issue is missing an id/key field.");
+    for (const issue of normalizedIssues) {
+      const escalId = issue.id;
 
       const { data: existingEscalation, error: existingEscalationError } = await supabase
         .from("escalations")
@@ -222,5 +279,5 @@ export const saveJiraEscalations = createServerFn({ method: "POST" })
       if (historyError) throw historyError;
     }
 
-    return { saved: issues.length };
+    return { saved: normalizedIssues.length };
   });

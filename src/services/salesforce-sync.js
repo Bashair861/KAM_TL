@@ -1,5 +1,16 @@
 import { createServerFn } from "@tanstack/react-start";
 import { ensureContractRenewalNotifications } from "@/services/notifications";
+import { repairAccountConstraintUpdates } from "@/services/account-constraint-repairs";
+import {
+  normalizeDate,
+  normalizeEmail,
+  normalizeEnum,
+  normalizeMoney,
+  normalizeNumber,
+  normalizePhone,
+  normalizeText,
+  normalizeUrl,
+} from "@/services/validation";
 
 const ACCOUNT_SYNC_COLUMNS = new Set([
   "industry",
@@ -51,6 +62,8 @@ const STAKEHOLDER_SYNC_COLUMNS = new Set([
   "last_contact",
 ]);
 const INFLUENCE_VALUES = new Set(["Champion", "Decision Maker", "Influencer", "Blocker"]);
+const CONTRACT_TYPE_VALUES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
+const STAKEHOLDER_NAME_RE = /^\p{L}+(?: \p{L}+)*$/u;
 
 function readEnv(name) {
   if (typeof process !== "undefined" && process.env?.[name]) return process.env[name];
@@ -58,14 +71,15 @@ function readEnv(name) {
 }
 
 function normalizedText(value) {
-  const text = String(value ?? "").trim();
-  return text.length > 0 ? text : null;
+  return safeIntegrationValue(() =>
+    normalizeText(value, { field: "Salesforce text", maxLength: 1200, multiline: true }),
+  );
 }
 
 function normalizedNumber(value) {
-  if (value === null || value === undefined || value === "") return null;
-  const number = Number(String(value).replace(/[$,\s]/g, ""));
-  return Number.isFinite(number) ? Math.round(number) : null;
+  return safeIntegrationValue(() =>
+    Math.round(normalizeMoney(String(value ?? "").replace(/[$,\s]/g, ""), "Salesforce amount")),
+  );
 }
 
 function normalizedBoolean(value) {
@@ -83,6 +97,38 @@ function stakeholderMatchKey(value) {
 
 function normalizeInfluence(value) {
   return INFLUENCE_VALUES.has(value) ? value : "Influencer";
+}
+
+function normalizedStakeholderName(value) {
+  const text = normalizedText(value);
+  if (!text) return undefined;
+  const cleaned = text.replace(/[^\p{L} ]/gu, "").replace(/\s+/g, " ").trim();
+  return STAKEHOLDER_NAME_RE.test(cleaned) ? cleaned : undefined;
+}
+
+function safeIntegrationValue(resolver) {
+  try {
+    const value = resolver();
+    return value === null ? undefined : value;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeSalesforceAccountValue(column, value) {
+  if (ACCOUNT_NUMBER_COLUMNS.has(column)) return normalizedNumber(value);
+  switch (column) {
+    case "renewal_date":
+      return safeIntegrationValue(() => normalizeDate(value, "Renewal date"));
+    case "contract_type":
+      return safeIntegrationValue(() => normalizeEnum(value, CONTRACT_TYPE_VALUES, "Contract type"));
+    case "linkedin_url":
+      return safeIntegrationValue(() => normalizeUrl(value, "LinkedIn URL"));
+    case "website_url":
+      return safeIntegrationValue(() => normalizeUrl(value, "Website URL"));
+    default:
+      return normalizedText(value);
+  }
 }
 
 function validateSyncInput(input) {
@@ -124,7 +170,8 @@ function cleanAccountUpdates(updates) {
   const clean = {};
   Object.entries(updates ?? {}).forEach(([column, value]) => {
     if (!ACCOUNT_SYNC_COLUMNS.has(column) || value === undefined) return;
-    clean[column] = ACCOUNT_NUMBER_COLUMNS.has(column) ? normalizedNumber(value) : value;
+    const normalized = normalizeSalesforceAccountValue(column, value);
+    if (normalized !== undefined) clean[column] = normalized;
   });
   return clean;
 }
@@ -134,14 +181,22 @@ function cleanContractUpdates(updates) {
   Object.entries(updates ?? {}).forEach(([column, value]) => {
     if (!CONTRACT_SYNC_COLUMNS.has(column) || value === undefined) return;
     if (CONTRACT_BOOLEAN_COLUMNS.has(column)) {
-      clean[column] = normalizedBoolean(value);
+      const normalized = normalizedBoolean(value);
+      if (normalized !== null) clean[column] = normalized;
       return;
     }
     if (CONTRACT_NUMBER_COLUMNS.has(column)) {
-      clean[column] = normalizedNumber(value);
+      const normalized = normalizedNumber(value);
+      if (normalized !== undefined) clean[column] = normalized;
       return;
     }
-    clean[column] = value;
+    const normalized =
+      column === "renewal_date"
+        ? safeIntegrationValue(() => normalizeDate(value, "Renewal date"))
+        : column === "type"
+          ? safeIntegrationValue(() => normalizeEnum(value, CONTRACT_TYPE_VALUES, "Contract type"))
+          : normalizedText(value);
+    if (normalized !== undefined) clean[column] = normalized;
   });
   return clean;
 }
@@ -151,10 +206,12 @@ function cleanRetentionGrowthFields(fields) {
   Object.entries(fields ?? {}).forEach(([column, value]) => {
     if (!RETENTION_GROWTH_SYNC_COLUMNS.has(column) || value === undefined) return;
     if (RETENTION_GROWTH_BOOLEAN_COLUMNS.has(column)) {
-      clean[column] = normalizedBoolean(value);
+      const normalized = normalizedBoolean(value);
+      if (normalized !== null) clean[column] = normalized;
       return;
     }
-    clean[column] = normalizedText(value);
+    const normalized = normalizedText(value);
+    if (normalized !== undefined) clean[column] = normalized;
   });
   return clean;
 }
@@ -187,7 +244,7 @@ async function syncRetentionGrowth(admin, accountId, retentionGrowthUpdates) {
     const payload = {
       account_id: accountId,
       service,
-      ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null)),
+      ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null && value !== undefined)),
     };
 
     const { data: existingRows, error: fetchError } = await admin
@@ -220,7 +277,17 @@ function cleanStakeholderFields(fields) {
       clean.influence = normalizeInfluence(value);
       return;
     }
-    clean[column] = normalizedText(value);
+    const normalized =
+      column === "name"
+        ? normalizedStakeholderName(value)
+        : column === "email"
+        ? safeIntegrationValue(() => normalizeEmail(value, "Stakeholder email"))
+        : column === "phone"
+          ? safeIntegrationValue(() => normalizePhone(value, "Stakeholder phone"))
+          : column === "last_contact"
+            ? safeIntegrationValue(() => normalizeDate(value, "Last contact date"))
+            : normalizedText(value);
+    if (normalized !== undefined) clean[column] = normalized;
   });
   return clean;
 }
@@ -248,7 +315,7 @@ async function syncStakeholders(admin, accountId, stakeholderUpdates) {
   for (const update of stakeholderUpdates) {
     const fields = cleanStakeholderFields(update.fields);
     const stakeholderId = normalizedText(update.stakeholderId);
-    const sourceName = normalizedText(update.sourceName);
+    const sourceName = normalizedStakeholderName(update.sourceName);
     const sourceEmail = normalizedText(update.sourceEmail);
     const sourcePhone = normalizedText(update.sourcePhone);
     const match =
@@ -298,7 +365,12 @@ export const syncSalesforceMappedFieldsServer = createServerFn({ method: "POST" 
       : [];
 
     if (Object.keys(accountUpdates).length > 0) {
-      const { error } = await admin.from("accounts").update(accountUpdates).eq("id", data.accountId);
+      const repairedAccountUpdates = await repairAccountConstraintUpdates(
+        admin,
+        data.accountId,
+        accountUpdates,
+      );
+      const { error } = await admin.from("accounts").update(repairedAccountUpdates).eq("id", data.accountId);
       if (error) throw error;
     }
 

@@ -2,7 +2,7 @@
   AETHER KAM — PROJECT CONTEXT FILE
   Purpose: Copy-paste this entire file into a new chat to give full context.
   Keep this file updated after every major phase.
-  Last updated: Phase 4.10 - Dynamic Overview Sections
+  Last updated: Phase 4.11 - System-Wide Data Validation
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -112,11 +112,56 @@ Recent JS additions:
   src/db/add-stakeholder-delete-policy.sql <- authenticated stakeholder delete policy
   src/services/linkedin-summary.js  <- Server fn: generates/saves Account's Linkedin Summary
   src/services/website-summary.js   <- Server fn: generates/saves Account's Website Summary
+  src/services/validation.js        <- Shared input normalization and validation helpers
   accounts.$accountId.jsx           <- Project Charter Auto-fill:
                                        client-side .xlsx parser + confirmation dialog
                                        for KYC field auto-fill in the Overview tab
   OverviewSectionsDialog            <- Edit Sections dialog for Overview KYC
                                        + Account Details field visibility
+
+System-wide data validation additions (Phase 4.11):
+  Validation location                <- Service-layer first, not only UI-only checks.
+                                       src/services/validation.js centralizes
+                                       reusable normalization and friendly errors.
+  DB write validation                <- src/services/db.js validates create/edit
+                                       payloads before Supabase writes for accounts,
+                                       Overview/KYC fields, stakeholders, health
+                                       scores, KPI sections, action items,
+                                       activities, opportunities, education logs,
+                                       and escalations.
+  Integration validation             <- Salesforce sync, SOW upload, Jira imports,
+                                       Fireflies/opportunity upserts, and user admin
+                                       normalize external data before writing.
+                                       Invalid optional external values are skipped
+                                       where possible instead of overwriting good
+                                       existing data with garbage. Salesforce
+                                       stakeholder names also follow the same
+                                       letters/spaces-only rule as manual entry.
+  User-friendly behavior             <- Validation errors throw readable messages
+                                       that existing mutation error handlers can
+                                       show in forms/modals/toasts.
+  Hidden-field behavior              <- Manual forms only submit and validate
+                                       fields visible/editable in that flow.
+                                       Stakeholder manual create/edit validates
+                                       Name (letters/spaces only), Role,
+                                       Influence, Email, and Phone;
+                                       last_contact remains integration/DB data
+                                       only unless a visible field is added.
+                                       All account-table update paths self-repair
+                                       invalid legacy values covered by account
+                                       check constraints (name, short_code, money,
+                                       score, count, and founded-year fields)
+                                       because PostgreSQL re-evaluates the whole
+                                       row whenever any accounts field is updated.
+  Frontend behavior                  <- Numeric Overview inputs no longer silently
+                                       coerce invalid text to 0; invalid values now
+                                       reach service validation and show an error.
+                                       Whole-number fields reject decimals instead
+                                       of rounding/truncating them.
+  Database side                      <- No mandatory SQL migration is required for
+                                       this phase. Optional NOT VALID PostgreSQL
+                                       check constraints can be added later as
+                                       defense-in-depth after auditing existing data.
 
 Salesforce integration additions (Phase 4.5):
   src/services/salesforce.js        <- Server fn: lookupSalesforceAccountBundle
@@ -504,6 +549,28 @@ IMPORTANT DECISIONS & PATTERNS
     - Field edits are persisted through the existing Save KYC bar. updateAccountKyc
       now splits account table updates from contract_details updates for selected
       contract/resource fields.
+
+13. SYSTEM-WIDE VALIDATION PATTERN
+    - Shared validation lives in src/services/validation.js.
+    - Validate at the service layer before writes, even when the UI already has
+      form controls. This protects browser forms, server functions, and integrations
+      consistently.
+    - Prefer normalization over rejection for harmless formatting differences:
+      trim text, lowercase emails, add https:// to plain domains, parse numeric
+      strings, and remove blank optional values.
+    - Reject unsafe/control/script-like text, empty required fields, symbol-only
+      garbage, invalid email/phone/URL/date values, and out-of-range numbers.
+    - For integrations, skip invalid optional external values where possible instead
+      of clearing existing trusted values. Required invalid data should fail with a
+      readable validation error.
+    - Hidden or absent fields must not block manual saves. Only validate hidden
+      fields when they are explicitly supplied by a visible UI control or an
+      integration payload.
+    - Existing mutation error handlers should surface ValidationError.message to
+      users. Keep messages specific and human-readable.
+    - No required DB migration was introduced with Phase 4.11. Optional PostgreSQL
+      NOT VALID check constraints may be added later for defense-in-depth after
+      auditing existing production data.
 
 
 WHAT IS NEXT — UPCOMING PHASES

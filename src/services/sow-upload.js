@@ -1,4 +1,12 @@
 import { createServerFn } from "@tanstack/react-start";
+import { repairAccountConstraintUpdates } from "@/services/account-constraint-repairs";
+import {
+  normalizeDate,
+  normalizeEnum,
+  normalizeId,
+  normalizeMoney,
+  normalizeText,
+} from "@/services/validation";
 
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 const VALID_CONTRACT_TYPES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
@@ -86,24 +94,41 @@ async function runPython(candidates, args) {
 
 function normalizeExtractedFields(fields) {
   return {
-    accountName: fields.accountName || null,
-    arr: Number.isFinite(Number(fields.arr)) ? Number(fields.arr) : null,
-    contractValue: Number.isFinite(Number(fields.contractValue))
-      ? Number(fields.contractValue)
-      : null,
-    renewalDate: fields.renewalDate || null,
-    contractType: fields.contractType || null,
-    contractDuration: fields.contractDuration || null,
+    accountName: safeSowValue(() =>
+      normalizeText(fields.accountName, {
+        field: "Account name",
+        maxLength: 255,
+        meaningful: Boolean(fields.accountName),
+      }),
+    ),
+    arr: safeSowValue(() => normalizeMoney(fields.arr, "ARR")),
+    contractValue: safeSowValue(() => normalizeMoney(fields.contractValue, "Contract value")),
+    renewalDate: safeSowValue(() => normalizeDate(fields.renewalDate, "Renewal date")),
+    contractType: safeSowValue(() => normalizeEnum(fields.contractType, VALID_CONTRACT_TYPES, "Contract type")),
+    contractDuration: safeSowValue(() =>
+      normalizeText(fields.contractDuration, {
+        field: "Contract duration",
+        maxLength: 80,
+        meaningful: Boolean(fields.contractDuration),
+      }),
+    ),
     textLength: Number.isFinite(Number(fields.textLength)) ? Number(fields.textLength) : 0,
   };
 }
 
+function safeSowValue(resolver) {
+  try {
+    return resolver();
+  } catch {
+    return null;
+  }
+}
+
 function validateSowApply(input) {
   if (!input || typeof input !== "object") throw new Error("Invalid SOW apply payload.");
-  const accountId = String(input.accountId ?? "").trim();
+  const accountId = normalizeId(input.accountId, "Account ID");
   const accessToken = String(input.accessToken ?? "");
   const fields = input.fields && typeof input.fields === "object" ? input.fields : {};
-  if (!accountId) throw new Error("Account ID is required before applying SOW fields.");
   if (!accessToken) throw new Error("Please sign in again before applying SOW fields.");
   return { accountId, accessToken, fields: normalizeExtractedFields(fields) };
 }
@@ -205,7 +230,12 @@ export const applySowFieldsServer = createServerFn({ method: "POST" })
     const admin = await createSowAdminClient(data.accessToken);
 
     if (Object.keys(accountUpdates).length > 0) {
-      const { error } = await admin.from("accounts").update(accountUpdates).eq("id", data.accountId);
+      const repairedAccountUpdates = await repairAccountConstraintUpdates(
+        admin,
+        data.accountId,
+        accountUpdates,
+      );
+      const { error } = await admin.from("accounts").update(repairedAccountUpdates).eq("id", data.accountId);
       if (error) throw error;
     }
 
