@@ -238,6 +238,19 @@ const checks = [
         })),
       });
       assert.equal(model.dashboard.matrix.quadrant, "Protect & Recover");
+      assert.ok(model.dashboard.matrix.x < 50);
+      assert.ok(model.dashboard.matrix.y < 50);
+
+      const reassessModel = buildModel({
+        account: createAccount({
+          health: 0,
+          growthUpside: 0,
+          meetingsPerMonth: 0,
+        }),
+      });
+      assert.equal(reassessModel.dashboard.matrix.quadrant, "Reassess / Monitor");
+      assert.ok(reassessModel.dashboard.matrix.x < 50);
+      assert.ok(reassessModel.dashboard.matrix.y > 50);
     }),
 
   () =>

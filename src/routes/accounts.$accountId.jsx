@@ -1549,6 +1549,9 @@ function AccountDetailPage() {
   const role = profile?.role ?? "KAM";
   const perms = getRolePermissions(role);
   const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
+  const openWhitespaceCount = (account.retentionGrowth ?? []).filter(
+    (service) => service.applicable && !service.offered,
+  ).length;
   const { mutate: uploadSow, isPending: uploadingSow } = useMutation({
     mutationFn: async (file) => {
       const contentBase64 = await fileToBase64(file);
@@ -1764,7 +1767,8 @@ function AccountDetailPage() {
               {formatCurrency(account.growthPipelineValue)}
             </span>
             <p className="text-xs text-muted-foreground mt-2">
-              {account.whiteSpaceCount} white-space items
+              {openWhitespaceCount} open white-space{" "}
+              {openWhitespaceCount === 1 ? "service" : "services"}
             </p>
           </div>
         </section>
@@ -2710,10 +2714,10 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
         </RetentionGrowthDisclosure>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-6">
+      <div className="grid grid-cols-1 gap-6">
         <RetentionGrowthDisclosure
           title="Recommended Offers"
-          description="AI-assisted offers built from whitespace, client interest, retention signals, and current service context."
+          description="Offers built from whitespace, client interest, retention signals, and current service context."
           meta={`${activeOffers.length} active`}
           defaultOpen={activeOffers.length > 0}
           className="h-full"
@@ -2767,46 +2771,6 @@ function RetentionGrowthTabPlanner({ account, opportunities, escalations, profil
           )}
         </RetentionGrowthDisclosure>
 
-        <RetentionGrowthDisclosure
-          title="Commercial Guardrails"
-          description="What can be offered, how much is allowed, and when Head of KAM approval is needed."
-          className="h-full"
-        >
-          <div className="p-6 space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <MiniStat label="POC limit" value={model.guardrails.summary.pocLimit} />
-              <MiniStat label="Discount limit" value={model.guardrails.summary.discountLimit} />
-              <MiniStat
-                label="Service credit"
-                value={model.guardrails.summary.serviceCreditLimit}
-              />
-              <MiniStat label="KAM proposal limit" value={model.guardrails.summary.proposalLimit} />
-            </div>
-            <p className="text-xs text-muted-foreground">{model.guardrails.narrative}</p>
-            <div className="space-y-3">
-              {model.guardrails.rules.map((rule) => (
-                <div key={rule.id} className="rounded-xl border p-4 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <OfferTypeBadge type={rule.offer} />
-                    <ApprovalPill
-                      required={rule.approvalRequired !== "No"}
-                      approverRole={rule.approverRole}
-                      viewerRole={role}
-                    />
-                  </div>
-                  <p className="text-sm font-semibold">{rule.allowedOffer}</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                    <MiniStat label="Allowed value" value={rule.allowedValue} />
-                    <MiniStat label="Discount limit" value={rule.discountLimit} />
-                    <MiniStat label="Service credit" value={rule.serviceCreditLimit} />
-                    <MiniStat label="POC limit" value={rule.pocLimit} />
-                  </div>
-                  <p className="text-xs text-muted-foreground">{rule.reason}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </RetentionGrowthDisclosure>
       </div>
 
       <RetentionGrowthDisclosure
