@@ -72,6 +72,8 @@ const CONTACT_FIELDS = [
   "LastName",
   "Name",
   "Email",
+  "Phone",
+  "MobilePhone",
   "Title",
   "MailingCity",
   "MailingStateCode",
@@ -159,6 +161,8 @@ const CONTACT_LABELS = {
   LastName: "Last Name",
   Name: "Full Name",
   Email: "Email",
+  Phone: "Phone",
+  MobilePhone: "Mobile Phone",
   Title: "Title",
   MailingCity: "Mailing City",
   MailingStateCode: "Mailing State Code",
@@ -192,18 +196,24 @@ function validateLookupInput(input) {
 }
 
 async function assertSignedIn(accessToken) {
-  const supabaseUrl = readEnv("VITE_SUPABASE_URL");
-  const supabaseAnonKey = readEnv("VITE_SUPABASE_ANON_KEY");
-  if (!supabaseUrl || !supabaseAnonKey) {
+  const supabaseUrl = readEnv("VITE_SUPABASE_URL") ?? readEnv("SUPABASE_URL");
+  const supabaseAuthKey =
+    readEnv("VITE_SUPABASE_ANON_KEY") ??
+    readEnv("SUPABASE_ANON_KEY") ??
+    readEnv("SUPABASE_SERVICE_ROLE_KEY");
+  if (!supabaseUrl || !supabaseAuthKey) {
     throw new Error("Supabase environment variables are required before searching Salesforce.");
   }
 
   const { createClient } = await import("@supabase/supabase-js");
-  const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  const supabase = createClient(supabaseUrl, supabaseAuthKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   const { data, error } = await supabase.auth.getUser(accessToken);
-  if (error || !data?.user) throw new Error("Please sign in again before searching Salesforce.");
+  if (error || !data?.user) {
+    const reason = error?.message ? ` (${error.message})` : "";
+    throw new Error(`Your app session could not be validated before Salesforce lookup${reason}.`);
+  }
 }
 
 async function getSalesforceAuth() {
@@ -356,7 +366,7 @@ async function fetchContactsForAccount(auth, accountId, contactFields) {
   orderFields.push(contactFields.includes("LastName") ? "LastName ASC" : "Name ASC");
   const result = await runSoql(
     auth,
-    `SELECT ${fields} FROM Contact WHERE AccountId = '${escapedAccountId}' ORDER BY ${orderFields.join(", ")} LIMIT 20`,
+    `SELECT ${fields} FROM Contact WHERE AccountId = '${escapedAccountId}' ORDER BY ${orderFields.join(", ")}`,
   );
   return result.records ?? [];
 }

@@ -1,4 +1,4 @@
--- Fix RLS for Score Marking Matrics snapshot saves.
+-- Fix RLS for Score Marking Metrics snapshot saves.
 -- The app uses upsert on activity_score_history, so existing rows need UPDATE access.
 -- Run once in Supabase SQL Editor.
 

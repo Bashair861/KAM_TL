@@ -347,42 +347,42 @@ function getScoreSignals(account) {
       area: "Relationship",
       label: "Relationship",
       block: account.relationshipHealth,
-      metricPrefix: "Score Marking Matrics",
+      metricPrefix: "Score Marking Metrics",
     },
     {
       key: "project",
       area: "Project",
       label: "Project",
       block: account.projectHealth,
-      metricPrefix: "Score Marking Matrics",
+      metricPrefix: "Score Marking Metrics",
     },
     {
       key: "resource",
       area: "Resource",
       label: "Resource",
       block: account.resourceHealth,
-      metricPrefix: "Score Marking Matrics",
+      metricPrefix: "Score Marking Metrics",
     },
     {
       key: "financial",
       area: "Financial",
       label: "Financial",
       block: account.financialHealth,
-      metricPrefix: "Score Marking Matrics",
+      metricPrefix: "Score Marking Metrics",
     },
     {
       key: "risk",
       area: "Risk",
       label: "Risk",
       block: account.riskScoring,
-      metricPrefix: "Score Marking Matrics",
+      metricPrefix: "Score Marking Metrics",
     },
     {
       key: "csat",
       area: "CSAT",
       label: "CSAT",
       block: account.csat,
-      metricPrefix: "Score Marking Matrics",
+      metricPrefix: "Score Marking Metrics",
     },
   ];
 }
@@ -535,16 +535,16 @@ function getScoreMetricActivities(account) {
           impactedMetric: section.name,
           weakSignal: `${section.name} has an unchecked score-marking criterion: ${field.label}`,
           currentValue: `${block?.score ?? "n/a"}/10`,
-          targetValue: "Checked and saved in Score Marking Matrics",
+          targetValue: "Checked and saved in Score Marking Metrics",
           triggerLogic: {
             primary: "A score-marking checklist item is unchecked.",
-            source: "Score Marking Matrics",
+            source: "Score Marking Metrics",
           },
           evidenceLiftPolicy: [],
           activityScoreLogic: [],
           approvalSla: {},
           reviewCadence: {
-            cadence: "Re-evaluate after Score Marking Matrics are saved.",
+            cadence: "Re-evaluate after Score Marking Metrics are saved.",
             autoCloseRule:
               "Remove this suggested activity once the checklist item is checked and saved.",
           },
@@ -554,13 +554,13 @@ function getScoreMetricActivities(account) {
           thresholdSource: null,
           thresholdReason: null,
           successCriteria:
-            "Complete this checklist item, mark it checked in Score Marking Matrics, and save the score.",
+            "Complete this checklist item, mark it checked in Score Marking Metrics, and save the score.",
           evidenceRequired: ["Updated score marking checklist", "Completion note"],
           reason: `${config.title} > ${section.name} still needs: ${field.label}.`,
           evidence: [
             buildEvidence({
-              source: "Score Marking Matrics",
-              sourceType: "Score Marking Matrics",
+              source: "Score Marking Metrics",
+              sourceType: "Score Marking Metrics",
               date: "Current score snapshot",
               excerpt: `${section.name}: ${field.label} is unchecked with ${field.weight ?? 0}% weight.`,
               reason:
@@ -859,8 +859,8 @@ function buildMeetingActions(account, opportunities, escalations) {
         "Meeting context points to a technical follow-up that can improve delivery confidence.",
       extraEvidence: [
         buildEvidence({
-          source: "Score Marking Matrics",
-          sourceType: "Score Marking Matrics",
+          source: "Score Marking Metrics",
+          sourceType: "Score Marking Metrics",
           date: "Current score snapshot",
           excerpt: `Project score is ${account.projectHealth.score}/10 with ${summarizeMetrics(account.projectHealth)}`,
           reason: "Project signals support a technical follow-up action.",
@@ -983,8 +983,8 @@ function buildExistingEvidence(account, activity, area) {
 
   return [
     buildEvidence({
-      source: area === "Growth" ? "Retention VS Growth" : "Score Marking Matrics",
-      sourceType: area === "Growth" ? "Retention VS Growth" : "Score Marking Matrics",
+      source: area === "Growth" ? "Retention VS Growth" : "Score Marking Metrics",
+      sourceType: area === "Growth" ? "Retention VS Growth" : "Score Marking Metrics",
       date: "Current account state",
       excerpt:
         area === "Growth"

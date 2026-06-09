@@ -42,7 +42,14 @@ const CONTRACT_BOOLEAN_COLUMNS = new Set([
 const CONTRACT_NUMBER_COLUMNS = new Set(["critical_resources"]);
 const RETENTION_GROWTH_SYNC_COLUMNS = new Set(["service", "offered", "delivered"]);
 const RETENTION_GROWTH_BOOLEAN_COLUMNS = new Set(["offered", "delivered"]);
-const STAKEHOLDER_SYNC_COLUMNS = new Set(["name", "role", "email", "influence", "last_contact"]);
+const STAKEHOLDER_SYNC_COLUMNS = new Set([
+  "name",
+  "role",
+  "email",
+  "phone",
+  "influence",
+  "last_contact",
+]);
 const INFLUENCE_VALUES = new Set(["Champion", "Decision Maker", "Influencer", "Blocker"]);
 
 function readEnv(name) {
@@ -89,20 +96,23 @@ function validateSyncInput(input) {
 }
 
 async function createSupabaseClients(accessToken) {
-  const supabaseUrl = readEnv("VITE_SUPABASE_URL");
-  const supabaseAnonKey = readEnv("VITE_SUPABASE_ANON_KEY");
+  const supabaseUrl = readEnv("VITE_SUPABASE_URL") ?? readEnv("SUPABASE_URL");
+  const supabaseAnonKey = readEnv("VITE_SUPABASE_ANON_KEY") ?? readEnv("SUPABASE_ANON_KEY");
   const serviceRoleKey = readEnv("SUPABASE_SERVICE_ROLE_KEY");
 
-  if (!supabaseUrl || !supabaseAnonKey || !serviceRoleKey) {
+  if (!supabaseUrl || !serviceRoleKey) {
     throw new Error("Supabase environment variables are required before syncing Salesforce fields.");
   }
 
   const { createClient } = await import("@supabase/supabase-js");
-  const requester = createClient(supabaseUrl, supabaseAnonKey, {
+  const requester = createClient(supabaseUrl, supabaseAnonKey ?? serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   const { data, error } = await requester.auth.getUser(accessToken);
-  if (error || !data?.user) throw new Error("Please sign in again before syncing Salesforce fields.");
+  if (error || !data?.user) {
+    const reason = error?.message ? ` (${error.message})` : "";
+    throw new Error(`Your app session could not be validated before Salesforce sync${reason}.`);
+  }
 
   const admin = createClient(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -225,18 +235,26 @@ async function syncStakeholders(admin, accountId, stakeholderUpdates) {
   if (fetchError) throw fetchError;
 
   const byEmail = new Map();
+  const byPhone = new Map();
+  const byId = new Map();
   const byName = new Map();
   (existingStakeholders ?? []).forEach((stakeholder) => {
+    if (stakeholder.id) byId.set(stakeholderMatchKey(stakeholder.id), stakeholder);
     if (stakeholder.email) byEmail.set(stakeholderMatchKey(stakeholder.email), stakeholder);
+    if (stakeholder.phone) byPhone.set(stakeholderMatchKey(stakeholder.phone), stakeholder);
     byName.set(stakeholderMatchKey(stakeholder.name), stakeholder);
   });
 
   for (const update of stakeholderUpdates) {
     const fields = cleanStakeholderFields(update.fields);
+    const stakeholderId = normalizedText(update.stakeholderId);
     const sourceName = normalizedText(update.sourceName);
     const sourceEmail = normalizedText(update.sourceEmail);
+    const sourcePhone = normalizedText(update.sourcePhone);
     const match =
+      (stakeholderId && byId.get(stakeholderMatchKey(stakeholderId))) ||
       (sourceEmail && byEmail.get(stakeholderMatchKey(sourceEmail))) ||
+      (sourcePhone && byPhone.get(stakeholderMatchKey(sourcePhone))) ||
       (sourceName && byName.get(stakeholderMatchKey(sourceName)));
 
     if (match) {
@@ -258,6 +276,7 @@ async function syncStakeholders(admin, accountId, stakeholderUpdates) {
       role: fields.role ?? "Stakeholder",
       influence: fields.influence ?? "Influencer",
       email: fields.email ?? null,
+      phone: fields.phone ?? null,
       last_contact: fields.last_contact ?? null,
     };
     const { error } = await admin.from("stakeholders").insert(insertPayload);

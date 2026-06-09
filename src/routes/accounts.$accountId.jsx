@@ -25,6 +25,9 @@ import {
   fetchKamUsers,
   updateAccountKam,
   updateAccountKyc,
+  createStakeholder,
+  updateStakeholder,
+  deleteStakeholder,
   syncSalesforceMappedFields,
   applySowFields,
   updateHealthBlock,
@@ -61,6 +64,16 @@ import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -80,6 +93,12 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { askAccountAi } from "@/services/ai";
 import {
   ArrowLeft,
@@ -110,6 +129,8 @@ import {
   ExternalLink,
   History,
   RefreshCw,
+  SlidersHorizontal,
+  Info,
   Search,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
@@ -137,7 +158,7 @@ export const Route = createFileRoute("/accounts/$accountId")({
 });
 const TABS = [
   "Overview",
-  "Score Marking Matrices",
+  "Score Marking Metrics",
   "Activity to Increase Score",
   "Opportunities",
   "Retention VS Growth",
@@ -243,14 +264,323 @@ const KYC_CHARTER_FIELD_KEYS = [
   "competitors",
   "flow",
 ];
-const KYC_DB_FIELD_KEYS = new Set(
-  Object.entries(KYC_FORM_FIELDS)
-    .filter(([, field]) => field.canSaveToDb !== false)
-    .map(([key]) => key),
-);
 const DIRECT_XLSX_FORM_FIELDS = new Set(Object.keys(KYC_FORM_FIELDS));
 const XLSX_DATE_FORM_FIELDS = new Set(["contractRenewalDate"]);
 const KYC_EXTRACTABLE_FIELD_KEYS = KYC_CHARTER_FIELD_KEYS;
+const ACCOUNT_TIER_OPTIONS = ["Enterprise", "Growth", "Strategic"];
+const ACCOUNT_STATUS_OPTIONS = ["healthy", "at-risk", "critical"];
+const CONTRACT_TYPE_OPTIONS = ["Staff Augmented", "Time Based", "Retainer", "Project"];
+const ACCOUNT_SNAPSHOT_CARD_INFO = {
+  health: [
+    "Calculated when health areas are saved by averaging all health scores exist in Score Marking Metrics.",
+  ],
+  contractValue: [
+    "This is the stored commercial contract value for the account. It can be updated from Account Details or Salesforce sync.",
+  ],
+  retentionRisk: [
+    "Refreshed by the Retention/Growth scoring flow as Low, Medium, or High using retention health, renewal timing, risk, relationship, CSAT, financial health, escalations, and risk signals.",
+  ],
+  growthUpside: [
+    "Calculated by the Retention/Growth flow as the highest known value from recommended offer potential, applicable whitespace service potential, or stored growth upside.",
+  ],
+};
+const OVERVIEW_SECTION_STORAGE_VERSION = "v1";
+const OVERVIEW_KYC_FIELD_CONFIG = [
+  { id: "accountStatus", label: KYC_FORM_FIELDS.accountStatus.label, icon: "check", defaultVisible: true },
+  { id: "industry", label: KYC_FORM_FIELDS.industry.label, icon: "building", defaultVisible: true },
+  { id: "business", label: KYC_FORM_FIELDS.business.label, icon: "workflow", defaultVisible: true },
+  { id: "description", label: "Description", icon: "building", wide: true },
+  { id: "history", label: KYC_FORM_FIELDS.history.label, icon: "clock", defaultVisible: true },
+  { id: "revenue", label: KYC_FORM_FIELDS.revenue.label, icon: "money", defaultVisible: true },
+  { id: "mrrArr", label: KYC_FORM_FIELDS.mrrArr.label, icon: "growth", defaultVisible: true },
+  { id: "primary", label: KYC_FORM_FIELDS.primary.label, icon: "user", defaultVisible: true },
+  { id: "region", label: "Region", icon: "building" },
+  { id: "founded", label: "Founded", icon: "calendar", type: "number" },
+  { id: "employees", label: "Employees", icon: "users" },
+  { id: "isStartup", label: "Startup Client", icon: "check", type: "boolean" },
+  { id: "tenure", label: KYC_FORM_FIELDS.tenure.label, icon: "calendar", defaultVisible: true },
+  { id: "team", label: KYC_FORM_FIELDS.team.label, icon: "users", defaultVisible: true },
+  { id: "competitors", label: KYC_FORM_FIELDS.competitors.label, icon: "swords", defaultVisible: true },
+  { id: "flow", label: KYC_FORM_FIELDS.flow.label, icon: "workflow", wide: true, defaultVisible: true },
+];
+const OVERVIEW_ACCOUNT_DETAIL_FIELD_CONFIG = [
+  { id: "tier", label: "Tier", icon: "check", options: ACCOUNT_TIER_OPTIONS },
+  { id: "operationalStatus", label: "Operational Status", icon: "check", options: ACCOUNT_STATUS_OPTIONS },
+  { id: "contractValue", label: "Contract Value", icon: "money", type: "money" },
+  { id: "arr", label: "ARR", icon: "money", type: "money" },
+  { id: "contractRenewalDate", label: KYC_FORM_FIELDS.contractRenewalDate.label, icon: "calendar", type: "date", defaultVisible: true },
+  { id: "contractDuration", label: KYC_FORM_FIELDS.contractDuration.label, icon: "clock", defaultVisible: true },
+  { id: "contractType", label: "Contract Type", icon: "check", options: CONTRACT_TYPE_OPTIONS },
+  { id: "autoRenew", label: "Auto Renew", icon: "refresh", type: "boolean" },
+  { id: "nonTerminator", label: "Non Terminator", icon: "check", type: "boolean" },
+  { id: "minOneYear", label: "Minimum One Year", icon: "calendar", type: "boolean" },
+  { id: "priceHike", label: "Price Hike", icon: "money" },
+  { id: "customerFeedback", label: "Customer Feedback", icon: "history", wide: true },
+  { id: "meetingsPerMonth", label: "Meetings Per Month", icon: "calendar", type: "number" },
+  { id: "linkedinUrl", label: KYC_FORM_FIELDS.linkedinUrl.label, icon: "external", type: "url", defaultVisible: true },
+  { id: "websiteUrl", label: KYC_FORM_FIELDS.websiteUrl.label, icon: "external", type: "url", defaultVisible: true },
+];
+const OVERVIEW_SECTION_FIELD_GROUPS = [
+  { id: "kyc", label: "KYC", fields: OVERVIEW_KYC_FIELD_CONFIG },
+  { id: "accountDetails", label: "Account Details", fields: OVERVIEW_ACCOUNT_DETAIL_FIELD_CONFIG },
+];
+const OVERVIEW_CONFIGURABLE_FIELD_IDS = OVERVIEW_SECTION_FIELD_GROUPS.flatMap((group) =>
+  group.fields.map((field) => field.id),
+);
+const DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS = OVERVIEW_SECTION_FIELD_GROUPS.flatMap((group) =>
+  group.fields.filter((field) => field.defaultVisible).map((field) => field.id),
+);
+const OVERVIEW_ACCOUNT_FIELD_COLUMNS = {
+  industry: "industry",
+  business: "business_info",
+  description: "description",
+  history: "client_history",
+  revenue: "revenue",
+  mrrArr: "mrr_arr",
+  primary: "primary_contact_name",
+  primaryRole: "primary_contact_role",
+  region: "region",
+  founded: "founded",
+  employees: "employees",
+  isStartup: "is_startup",
+  tenure: "engagement_tenure",
+  team: "team_size",
+  competitors: "competitors",
+  flow: "main_business_flow",
+  accountName: "name",
+  shortCode: "short_code",
+  tier: "tier",
+  health: "health",
+  trend: "trend",
+  operationalStatus: "status",
+  contractValue: "contract_value",
+  arr: "arr",
+  contractRenewalDate: "renewal_date",
+  contractDuration: "contract_duration",
+  contractType: "contract_type",
+  lastTouch: "last_touch",
+  retentionRisk: "retention_risk",
+  growthUpside: "growth_upside",
+  whiteSpaceCount: "white_space_count",
+  retentionHealthScore: "retention_health_score",
+  calculatedRetentionRisk: "calculated_retention_risk",
+  growthPotentialScore: "growth_potential_score",
+  growthPotentialLevel: "growth_potential_level",
+  revenueAtRisk: "revenue_at_risk",
+  growthPipelineValue: "growth_pipeline_value",
+  retentionGrowthQuadrant: "retention_growth_quadrant",
+  retentionGrowthNextAction: "retention_growth_next_action",
+  retentionGrowthCalculatedAt: "retention_growth_calculated_at",
+  cooperation: "cooperation",
+  serviceConsumption: "service_consumption",
+  meetingsPerMonth: "meetings_per_month",
+  contractCompliance: "contract_compliance",
+  linkedinUrl: "linkedin_url",
+  websiteUrl: "website_url",
+  newsKeywords: "news_keywords",
+  lastNewsSyncAt: "last_news_sync_at",
+};
+const OVERVIEW_CONTRACT_DETAIL_FIELD_COLUMNS = {
+  autoRenew: "auto_renew",
+  nonTerminator: "non_terminator",
+  minOneYear: "min_one_year",
+  priceHike: "price_hike",
+  customerFeedback: "customer_feedback",
+  backupExists: "backup_exists",
+  criticalResources: "critical_resources",
+};
+const OVERVIEW_EDITABLE_FIELD_IDS = new Set([
+  ...Object.keys(OVERVIEW_ACCOUNT_FIELD_COLUMNS),
+  ...Object.keys(OVERVIEW_CONTRACT_DETAIL_FIELD_COLUMNS),
+]);
+const OVERVIEW_FIELD_LABELS = {
+  ...KYC_FORM_FIELD_LABELS,
+  ...Object.fromEntries(
+    OVERVIEW_SECTION_FIELD_GROUPS.flatMap((group) =>
+      group.fields.map((field) => [field.id, field.label]),
+    ),
+  ),
+};
+const OVERVIEW_FIELD_CONFIG_BY_ID = Object.fromEntries(
+  OVERVIEW_SECTION_FIELD_GROUPS.flatMap((group) =>
+    group.fields.map((field) => [field.id, field]),
+  ),
+);
+const KYC_DB_FIELD_KEYS = new Set(OVERVIEW_EDITABLE_FIELD_IDS);
+function normalizeOverviewVisibleFieldIds(value) {
+  if (!Array.isArray(value)) return DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS;
+  const allowedFieldIds = new Set(OVERVIEW_CONFIGURABLE_FIELD_IDS);
+  const visibleFieldIds = Array.from(
+    new Set(value.filter((fieldId) => allowedFieldIds.has(fieldId))),
+  );
+  return visibleFieldIds.length > 0 ? visibleFieldIds : DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS;
+}
+function getOverviewSectionStorageKey(accountId) {
+  return `kam-overview-sections:${OVERVIEW_SECTION_STORAGE_VERSION}:${accountId}`;
+}
+function readOverviewVisibleFieldIds(accountId) {
+  if (typeof window === "undefined") return DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS;
+  try {
+    const savedValue = window.localStorage.getItem(getOverviewSectionStorageKey(accountId));
+    return normalizeOverviewVisibleFieldIds(savedValue ? JSON.parse(savedValue) : null);
+  } catch {
+    return DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS;
+  }
+}
+function writeOverviewVisibleFieldIds(accountId, fieldIds) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    getOverviewSectionStorageKey(accountId),
+    JSON.stringify(normalizeOverviewVisibleFieldIds(fieldIds)),
+  );
+}
+function stringifyOverviewFieldValue(value) {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return value.join(", ");
+  return String(value);
+}
+function buildOverviewInitialFields(account) {
+  return {
+    accountStatus: "Key Account - all accounts in our system are key accounts",
+    industry: account.industry ?? "",
+    business: account.businessInfo ?? "",
+    description: account.description ?? "",
+    history: account.clientHistory ?? "",
+    stakeholdersInfo: formatStakeholdersInfo(account.stakeholders),
+    revenue: account.revenue ?? "",
+    mrrArr:
+      account.isStartup && account.mrrArr ? account.mrrArr : "N/A - not a startup client",
+    primary: account.primaryContact?.name ?? "",
+    primaryRole: account.primaryContact?.role ?? "",
+    region: account.region ?? "",
+    founded: stringifyOverviewFieldValue(account.founded),
+    employees: account.employees ?? "",
+    isStartup: Boolean(account.isStartup),
+    tenure: account.engagementTenure ?? "",
+    team: stringifyOverviewFieldValue(account.teamSize),
+    competitors: (account.competitors ?? []).join(", "),
+    flow: account.mainBusinessFlow ?? "",
+    accountName: account.name ?? "",
+    shortCode: account.shortCode ?? "",
+    tier: account.tier ?? "Enterprise",
+    health: stringifyOverviewFieldValue(account.health),
+    trend: stringifyOverviewFieldValue(account.trend),
+    operationalStatus: account.status ?? "healthy",
+    contractValue: stringifyOverviewFieldValue(account.contractValue),
+    arr: stringifyOverviewFieldValue(account.arr),
+    contractRenewalDate: normalizeDateValue(account.contractRenewalDate),
+    contractDuration: account.contractDuration || account.contractScoring?.duration || "",
+    contractType: account.contractType ?? "Staff Augmented",
+    autoRenew: Boolean(account.contractScoring?.autoRenew),
+    nonTerminator: Boolean(account.contractScoring?.nonTerminator),
+    minOneYear: Boolean(account.contractScoring?.minOneYear),
+    priceHike: account.contractScoring?.priceHike ?? "",
+    customerFeedback: account.contractScoring?.customerFeedback ?? "",
+    backupExists: Boolean(account.resourceHealth?.backupExists),
+    criticalResources: stringifyOverviewFieldValue(account.resourceHealth?.criticalResources),
+    lastTouch: account.lastTouch ?? "",
+    retentionRisk: account.retentionRisk ?? "Low",
+    growthUpside: stringifyOverviewFieldValue(account.growthUpside),
+    whiteSpaceCount: stringifyOverviewFieldValue(account.whiteSpaceCount),
+    retentionHealthScore: stringifyOverviewFieldValue(account.retentionHealthScore),
+    calculatedRetentionRisk: account.calculatedRetentionRisk ?? account.retentionRisk ?? "Low",
+    growthPotentialScore: stringifyOverviewFieldValue(account.growthPotentialScore),
+    growthPotentialLevel: account.growthPotentialLevel ?? "",
+    revenueAtRisk: stringifyOverviewFieldValue(account.revenueAtRisk),
+    growthPipelineValue: stringifyOverviewFieldValue(account.growthPipelineValue),
+    retentionGrowthQuadrant: account.retentionGrowthQuadrant ?? "",
+    retentionGrowthNextAction: account.retentionGrowthNextAction ?? "",
+    retentionGrowthCalculatedAt: account.retentionGrowthCalculatedAt ?? "",
+    cooperation: stringifyOverviewFieldValue(account.cooperation),
+    serviceConsumption: stringifyOverviewFieldValue(account.serviceConsumption),
+    meetingsPerMonth: stringifyOverviewFieldValue(account.meetingsPerMonth),
+    contractCompliance: stringifyOverviewFieldValue(account.contractCompliance),
+    linkedinUrl: account.linkedinUrl ?? "",
+    websiteUrl: account.websiteUrl ?? "",
+    newsKeywords: (account.newsKeywords ?? []).join(", "),
+    lastNewsSyncAt: account.lastNewsSyncAt ?? "",
+  };
+}
+function normalizeOverviewNumber(value, fallback = null) {
+  const text = String(value ?? "").trim().replace(/[$,]/g, "");
+  if (!text) return fallback;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : fallback;
+}
+function normalizeOverviewInteger(value, fallback = null) {
+  const number = normalizeOverviewNumber(value, fallback);
+  return number === null || number === undefined ? fallback : Math.trunc(number);
+}
+function normalizeOverviewBoolean(value) {
+  if (typeof value === "boolean") return value;
+  return String(value ?? "").toLowerCase() === "true";
+}
+function normalizeOverviewArray(value) {
+  if (Array.isArray(value)) return value;
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+function normalizeOverviewFieldForSave(fieldId, value) {
+  switch (fieldId) {
+    case "mrrArr":
+      return String(value ?? "").startsWith("N/A") ? null : value;
+    case "team":
+    case "founded":
+    case "meetingsPerMonth":
+    case "whiteSpaceCount":
+    case "criticalResources":
+      return normalizeOverviewInteger(value, 0);
+    case "health":
+    case "trend":
+    case "contractValue":
+    case "arr":
+    case "growthUpside":
+    case "retentionHealthScore":
+    case "growthPotentialScore":
+    case "revenueAtRisk":
+    case "growthPipelineValue":
+    case "cooperation":
+    case "serviceConsumption":
+    case "contractCompliance":
+      return normalizeOverviewNumber(value, 0);
+    case "isStartup":
+    case "autoRenew":
+    case "nonTerminator":
+    case "minOneYear":
+    case "backupExists":
+      return normalizeOverviewBoolean(value);
+    case "competitors":
+    case "newsKeywords":
+      return normalizeOverviewArray(value);
+    case "contractRenewalDate":
+    case "retentionGrowthCalculatedAt":
+    case "lastNewsSyncAt":
+      return value || null;
+    case "linkedinUrl":
+    case "websiteUrl":
+    case "description":
+    case "retentionGrowthQuadrant":
+    case "retentionGrowthNextAction":
+    case "priceHike":
+    case "customerFeedback":
+      return String(value ?? "").trim() || null;
+    default:
+      return value;
+  }
+}
+function buildOverviewSavePayload(fields, dirtyFieldKeys) {
+  return dirtyFieldKeys.reduce((payload, fieldId) => {
+    const accountColumn = OVERVIEW_ACCOUNT_FIELD_COLUMNS[fieldId];
+    const contractColumn = OVERVIEW_CONTRACT_DETAIL_FIELD_COLUMNS[fieldId];
+    if (accountColumn) payload[accountColumn] = normalizeOverviewFieldForSave(fieldId, fields[fieldId]);
+    if (contractColumn) {
+      payload[contractColumn] = normalizeOverviewFieldForSave(fieldId, fields[fieldId]);
+    }
+    return payload;
+  }, {});
+}
 function hasSyncValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== "";
 }
@@ -835,6 +1165,63 @@ function formatStakeholdersInfo(stakeholders) {
     ),
   ].join("\n");
 }
+const STAKEHOLDER_INFLUENCE_OPTIONS = [
+  "Champion",
+  "Decision Maker",
+  "Influencer",
+  "Blocker",
+];
+function createStakeholderForm(stakeholder = {}) {
+  const influence = STAKEHOLDER_INFLUENCE_OPTIONS.includes(stakeholder.influence)
+    ? stakeholder.influence
+    : "Influencer";
+  return {
+    name: stakeholder.name ?? "",
+    role: stakeholder.role ?? "",
+    influence,
+    email: stakeholder.email ?? "",
+    phone: stakeholder.phone ?? "",
+    lastContact: normalizeDateValue(stakeholder.lastContact),
+  };
+}
+function normalizeStakeholderForm(form) {
+  return {
+    name: String(form.name ?? "").trim(),
+    role: String(form.role ?? "").trim(),
+    influence: STAKEHOLDER_INFLUENCE_OPTIONS.includes(form.influence)
+      ? form.influence
+      : "Influencer",
+    email: String(form.email ?? "").trim(),
+    phone: String(form.phone ?? "").trim(),
+    lastContact: normalizeDateValue(form.lastContact),
+  };
+}
+function summarizeStakeholderForHistory(stakeholder) {
+  return [
+    stakeholder.name,
+    stakeholder.role,
+    stakeholder.influence,
+    stakeholder.email,
+    stakeholder.phone,
+  ]
+    .filter(hasSyncValue)
+    .join(" | ");
+}
+function buildStakeholderHistoryChanges(before, after) {
+  const target = after.name || before.name || "Stakeholder";
+  const labels = {
+    name: "Name",
+    role: "Role",
+    influence: "Influence",
+    email: "Email",
+    phone: "Phone",
+  };
+  return Object.entries(labels).map(([key, label]) => ({
+    field: `Stakeholder ${label} - ${target}`,
+    oldValue: before[key] ?? "",
+    newValue: after[key] ?? "",
+  }));
+}
 function buildXlsxFieldPatch(currentFields, matches, selectedIds) {
   const selected = new Set(selectedIds);
   const fieldPatch = {};
@@ -882,28 +1269,50 @@ function deriveStakeholderInfluence(contact) {
   if (contact?.Primary_KYC_Contact__c) return "Champion";
   return "Influencer";
 }
-function findStakeholderForContact(stakeholders, contact) {
+function getSalesforceContactPhone(contact) {
+  return contact?.Phone || contact?.MobilePhone || "";
+}
+function findStakeholderMatchForContact(stakeholders, contact) {
   const email = String(contact?.Email ?? "")
+    .trim()
+    .toLowerCase();
+  const phone = String(getSalesforceContactPhone(contact))
     .trim()
     .toLowerCase();
   const name = String(contact?.Name ?? "")
     .trim()
     .toLowerCase();
-  return (
-    stakeholders.find(
-      (stakeholder) =>
-        String(stakeholder.email ?? "")
-          .trim()
-          .toLowerCase() === email && email,
-    ) ||
-    stakeholders.find(
-      (stakeholder) =>
-        String(stakeholder.name ?? "")
-          .trim()
-          .toLowerCase() === name && name,
-    ) ||
-    null
+  const emailMatch = stakeholders.find(
+    (stakeholder) =>
+      String(stakeholder.email ?? "")
+        .trim()
+        .toLowerCase() === email && email,
   );
+  if (emailMatch) return { stakeholder: emailMatch, matchBy: "email" };
+
+  const phoneMatch = stakeholders.find(
+    (stakeholder) =>
+      String(stakeholder.phone ?? "")
+        .trim()
+        .toLowerCase() === phone && phone,
+  );
+  if (phoneMatch) return { stakeholder: phoneMatch, matchBy: "phone" };
+
+  const nameMatch = stakeholders.find(
+    (stakeholder) =>
+      String(stakeholder.name ?? "")
+        .trim()
+        .toLowerCase() === name && name,
+  );
+  if (nameMatch) return { stakeholder: nameMatch, matchBy: "name" };
+
+  return { stakeholder: null, matchBy: "new" };
+}
+function stakeholderMatchLabel(matchBy) {
+  if (matchBy === "email") return "Matched by email";
+  if (matchBy === "phone") return "Matched by phone";
+  if (matchBy === "name") return "Matched by name";
+  return "Create new stakeholder";
 }
 function retentionServiceKey(value) {
   return String(value ?? "")
@@ -1308,9 +1717,25 @@ function buildSalesforceMappingRows(bundle, account, fields) {
   ];
 
   contacts.forEach((contact, index) => {
-    const existing = findStakeholderForContact(account.stakeholders, contact);
+    const { stakeholder: existing, matchBy } = findStakeholderMatchForContact(
+      account.stakeholders ?? [],
+      contact,
+    );
     const contactKey = contact.Id ?? `${index}-${contact.Name}`;
-    const group = `Stakeholder: ${contact.Name ?? `Contact ${index + 1}`}`;
+    const contactPhone = getSalesforceContactPhone(contact);
+    const fallbackContactName = contact.Name ?? `Contact ${index + 1}`;
+    const targetStakeholderName = existing?.name ?? fallbackContactName;
+    const stakeholderMeta = {
+      stakeholderId: existing?.id ?? null,
+      stakeholderMatchBy: matchBy,
+      stakeholderMatchLabel: stakeholderMatchLabel(matchBy),
+      targetStakeholderName,
+      targetStakeholderLabel: existing
+        ? `Update ${targetStakeholderName}`
+        : `Create ${targetStakeholderName}`,
+      isNewStakeholder: !existing,
+    };
+    const group = `Stakeholder: ${fallbackContactName}`;
     rows.push(
       {
         id: `stakeholder.${contactKey}.name`,
@@ -1324,7 +1749,9 @@ function buildSalesforceMappingRows(bundle, account, fields) {
         contactKey,
         sourceName: contact.Name,
         sourceEmail: contact.Email,
+        sourcePhone: contactPhone,
         stakeholderField: "name",
+        ...stakeholderMeta,
       },
       {
         id: `stakeholder.${contactKey}.role`,
@@ -1338,7 +1765,9 @@ function buildSalesforceMappingRows(bundle, account, fields) {
         contactKey,
         sourceName: contact.Name,
         sourceEmail: contact.Email,
+        sourcePhone: contactPhone,
         stakeholderField: "role",
+        ...stakeholderMeta,
       },
       {
         id: `stakeholder.${contactKey}.email`,
@@ -1352,7 +1781,25 @@ function buildSalesforceMappingRows(bundle, account, fields) {
         contactKey,
         sourceName: contact.Name,
         sourceEmail: contact.Email,
+        sourcePhone: contactPhone,
         stakeholderField: "email",
+        ...stakeholderMeta,
+      },
+      {
+        id: `stakeholder.${contactKey}.phone`,
+        kind: "stakeholder",
+        group,
+        destinationLabel: "Stakeholder Phone",
+        destinationValue: existing?.phone ?? "",
+        sourceLabel: "Contact.Phone / Contact.MobilePhone",
+        sourceValue: contactPhone,
+        nextValue: contactPhone,
+        contactKey,
+        sourceName: contact.Name,
+        sourceEmail: contact.Email,
+        sourcePhone: contactPhone,
+        stakeholderField: "phone",
+        ...stakeholderMeta,
       },
       {
         id: `stakeholder.${contactKey}.influence`,
@@ -1370,7 +1817,9 @@ function buildSalesforceMappingRows(bundle, account, fields) {
         contactKey,
         sourceName: contact.Name,
         sourceEmail: contact.Email,
+        sourcePhone: contactPhone,
         stakeholderField: "influence",
+        ...stakeholderMeta,
       },
     );
   });
@@ -1410,8 +1859,10 @@ function buildSalesforceSyncPayload(rows) {
       return;
     }
     const existing = stakeholderMap.get(row.contactKey) ?? {
+      stakeholderId: row.stakeholderId,
       sourceName: row.sourceName,
       sourceEmail: row.sourceEmail,
+      sourcePhone: row.sourcePhone,
       fields: {},
     };
     existing.fields[row.stakeholderField] = row.dbValue;
@@ -1432,22 +1883,26 @@ function buildSalesforceHistoryRows(rows) {
   }));
 }
 
-async function getFreshAccessTokenForSalesforceLookup() {
+async function getFreshAccessTokenForSalesforce(currentSession, actionLabel) {
   const {
-    data: { session },
+    data: { session: storedSession },
   } = await supabase.auth.getSession();
+  const session = storedSession ?? currentSession;
   const expiresAtMs = session?.expires_at ? session.expires_at * 1000 : 0;
   const shouldRefresh =
     !session?.access_token || (expiresAtMs > 0 && expiresAtMs - Date.now() < 60_000);
 
   if (!shouldRefresh) return session.access_token;
 
+  const refreshToken = storedSession?.refresh_token ?? currentSession?.refresh_token;
   const {
     data: { session: refreshedSession },
     error,
-  } = await supabase.auth.refreshSession();
+  } = await supabase.auth.refreshSession(
+    refreshToken ? { refresh_token: refreshToken } : undefined,
+  );
   if (error || !refreshedSession?.access_token) {
-    throw new Error("Please sign in again before searching Salesforce.");
+    throw new Error(`Please sign in again before ${actionLabel}.`);
   }
   return refreshedSession.access_token;
 }
@@ -1527,6 +1982,32 @@ function sowSummary(fields) {
   if (fields.contractType) labels.push("Contract type");
   if (fields.contractDuration) labels.push("Duration");
   return labels.length ? labels.join(", ") : "No supported fields";
+}
+
+function SnapshotInfoIcon({ label, lines }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          aria-label={`${label} information`}
+        >
+          <Info className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end" className="max-w-xs whitespace-normal text-left">
+        <div className="space-y-1.5">
+          <p className="font-semibold">{label}</p>
+          {lines.map((line) => (
+            <p key={line} className="leading-relaxed">
+              {line}
+            </p>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 function AccountDetailPage() {
@@ -1683,94 +2164,117 @@ function AccountDetailPage() {
 
       <div className="px-4 md:px-8 max-w-7xl w-full mx-auto">
         {/* Snapshot */}
-        <section className="grid grid-cols-1 lg:grid-cols-4 gap-6 mt-8">
-          <div className="bg-card p-6 rounded-xl border shadow-sm lg:col-span-1 flex flex-col items-center text-center">
-            <div className="relative size-32 flex items-center justify-center mb-3">
-              <svg className="absolute inset-0 -rotate-90" viewBox="0 0 100 100">
-                <circle
-                  cx="50"
-                  cy="50"
-                  r="42"
-                  fill="none"
-                  stroke="oklch(0.929 0.013 255)"
-                  strokeWidth="10"
-                />
-                <circle
-                  cx="50"
-                  cy="50"
-                  r="42"
-                  fill="none"
-                  stroke="oklch(0.7 0.17 152)"
-                  strokeWidth="10"
-                  strokeDasharray={`${(account.health / 100) * 264} 264`}
-                  strokeLinecap="round"
-                />
-              </svg>
-              <div>
-                <div className="text-3xl font-bold">{account.health}</div>
-                <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
-                  Health
+        <TooltipProvider delayDuration={150}>
+          <section className="grid grid-cols-1 lg:grid-cols-4 gap-6 mt-8">
+            <div className="relative bg-card p-6 rounded-xl border shadow-sm lg:col-span-1 flex flex-col items-center text-center">
+              <div className="absolute right-4 top-4">
+                <SnapshotInfoIcon label="Health" lines={ACCOUNT_SNAPSHOT_CARD_INFO.health} />
+              </div>
+              <div className="relative size-32 flex items-center justify-center mb-3">
+                <svg className="absolute inset-0 -rotate-90" viewBox="0 0 100 100">
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r="42"
+                    fill="none"
+                    stroke="oklch(0.929 0.013 255)"
+                    strokeWidth="10"
+                  />
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r="42"
+                    fill="none"
+                    stroke="oklch(0.7 0.17 152)"
+                    strokeWidth="10"
+                    strokeDasharray={`${(account.health / 100) * 264} 264`}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div>
+                  <div className="text-3xl font-bold">{account.health}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
+                    Health
+                  </div>
                 </div>
               </div>
+              <span
+                className={`text-xs font-medium ${account.trend >= 0 ? "text-success" : "text-crit"} flex items-center gap-1`}
+              >
+                {account.trend >= 0 ? (
+                  <TrendingUp className="size-3" />
+                ) : (
+                  <TrendingDown className="size-3" />
+                )}
+                {account.trend >= 0 ? "+" : ""}
+                {account.trend}% this quarter
+              </span>
             </div>
-            <span
-              className={`text-xs font-medium ${account.trend >= 0 ? "text-success" : "text-crit"} flex items-center gap-1`}
-            >
-              {account.trend >= 0 ? (
-                <TrendingUp className="size-3" />
-              ) : (
-                <TrendingDown className="size-3" />
-              )}
-              {account.trend >= 0 ? "+" : ""}
-              {account.trend}% this quarter
-            </span>
-          </div>
 
-          <div className="bg-card p-6 rounded-xl border shadow-sm">
-            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider mb-1">
-              Contract Value
-            </p>
-            <span className="text-3xl font-bold">{formatCurrency(account.contractValue)}</span>
-            <p className="text-xs text-muted-foreground mt-2">
-              {account.contractRenewalDate
-                ? `Renews ${formatDisplayDate(account.contractRenewalDate)}`
-                : "Renewal date not set"}
-            </p>
-            <p className="text-[11px] text-muted-foreground mt-1">{account.contractType}</p>
-          </div>
+            <div className="bg-card p-6 rounded-xl border shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+                  Contract Value
+                </p>
+                <SnapshotInfoIcon
+                  label="Contract Value"
+                  lines={ACCOUNT_SNAPSHOT_CARD_INFO.contractValue}
+                />
+              </div>
+              <span className="text-3xl font-bold">{formatCurrency(account.contractValue)}</span>
+              <p className="text-xs text-muted-foreground mt-2">
+                {account.contractRenewalDate
+                  ? `Renews ${formatDisplayDate(account.contractRenewalDate)}`
+                  : "Renewal date not set"}
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-1">{account.contractType}</p>
+            </div>
 
-          <div className="bg-card p-6 rounded-xl border shadow-sm">
-            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider mb-1">
-              Retention Risk
-            </p>
-            <span
-              className={`text-3xl font-bold uppercase ${
-                account.retentionRisk === "Low"
-                  ? "text-success"
-                  : account.retentionRisk === "Medium"
-                    ? "text-warn"
-                    : "text-crit"
-              }`}
-            >
-              {account.retentionRisk}
-            </span>
-            <p className="text-xs text-muted-foreground mt-2">
-              CSAT {account.csat.score.toFixed(1)}/10
-            </p>
-          </div>
+            <div className="bg-card p-6 rounded-xl border shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+                  Retention Risk
+                </p>
+                <SnapshotInfoIcon
+                  label="Retention Risk"
+                  lines={ACCOUNT_SNAPSHOT_CARD_INFO.retentionRisk}
+                />
+              </div>
+              <span
+                className={`text-3xl font-bold uppercase ${
+                  account.retentionRisk === "Low"
+                    ? "text-success"
+                    : account.retentionRisk === "Medium"
+                      ? "text-warn"
+                      : "text-crit"
+                }`}
+              >
+                {account.retentionRisk}
+              </span>
+              <p className="text-xs text-muted-foreground mt-2">
+                CSAT {account.csat.score.toFixed(1)}/10
+              </p>
+            </div>
 
-          <div className="bg-card p-6 rounded-xl border shadow-sm">
-            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider mb-1">
-              Growth Upside
-            </p>
-            <span className="text-3xl font-bold text-accent">
-              {formatCurrency(account.growthPipelineValue)}
-            </span>
-            <p className="text-xs text-muted-foreground mt-2">
-              {account.whiteSpaceCount} white-space items
-            </p>
-          </div>
-        </section>
+            <div className="bg-card p-6 rounded-xl border shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+                  Growth Upside
+                </p>
+                <SnapshotInfoIcon
+                  label="Growth Upside"
+                  lines={ACCOUNT_SNAPSHOT_CARD_INFO.growthUpside}
+                />
+              </div>
+              <span className="text-3xl font-bold text-accent">
+                {formatCurrency(account.growthPipelineValue)}
+              </span>
+              <p className="text-xs text-muted-foreground mt-2">
+                {account.whiteSpaceCount} white-space items
+              </p>
+            </div>
+          </section>
+        </TooltipProvider>
 
         {/* Tabs */}
         <nav className="flex border-b mt-8 gap-6 overflow-x-auto">
@@ -1787,7 +2291,7 @@ function AccountDetailPage() {
 
         <div className="py-8 pb-16">
           {tab === "Overview" && <OverviewTab account={account} />}
-          {tab === "Score Marking Matrices" && <ScoreMatricsTab account={account} />}
+          {tab === "Score Marking Metrics" && <ScoreMetricsTab account={account} />}
           {tab === "Activity to Increase Score" && (
             <ActivityTab
               account={account}
@@ -3513,45 +4017,7 @@ function OverviewTab({ account }) {
       queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
     },
   });
-  const initialFields = useMemo(
-    () => ({
-      accountStatus: "Key Account - all accounts in our system are key accounts",
-      industry: account.industry,
-      business: account.businessInfo,
-      history: account.clientHistory,
-      stakeholdersInfo: formatStakeholdersInfo(account.stakeholders),
-      revenue: account.revenue,
-      mrrArr: account.isStartup && account.mrrArr ? account.mrrArr : "N/A - not a startup client",
-      tenure: account.engagementTenure,
-      team: String(account.teamSize),
-      competitors: account.competitors.join(", "),
-      flow: account.mainBusinessFlow,
-      contractRenewalDate: normalizeDateValue(account.contractRenewalDate),
-      contractDuration: account.contractDuration || account.contractScoring?.duration || "",
-      linkedinUrl: account.linkedinUrl ?? "",
-      websiteUrl: account.websiteUrl ?? "",
-      primary: account.primaryContact?.name ?? "",
-    }),
-    [
-      account.businessInfo,
-      account.clientHistory,
-      account.competitors,
-      account.engagementTenure,
-      account.industry,
-      account.isStartup,
-      account.stakeholders,
-      account.contractRenewalDate,
-      account.contractDuration,
-      account.contractScoring?.duration,
-      account.linkedinUrl,
-      account.mainBusinessFlow,
-      account.mrrArr,
-      account.revenue,
-      account.teamSize,
-      account.websiteUrl,
-      account.primaryContact?.name,
-    ],
-  );
+  const initialFields = useMemo(() => buildOverviewInitialFields(account), [account]);
   const [fields, setFields] = useState(initialFields);
   const [savedSnapshot, setSavedSnapshot] = useState(initialFields);
   const [showSaved, setShowSaved] = useState(false);
@@ -3573,7 +4039,7 @@ function OverviewTab({ account }) {
     const timer = setTimeout(() => setAutofilledFieldKeys([]), 4000);
     return () => clearTimeout(timer);
   }, [autofilledFieldKeys]);
-  const KYC_LABELS = KYC_FORM_FIELD_LABELS;
+  const KYC_LABELS = OVERVIEW_FIELD_LABELS;
   const dirtyFieldKeys = Object.keys(fields).filter((key) => fields[key] !== savedSnapshot[key]);
   const unsupportedDirtyFieldKeys = dirtyFieldKeys.filter((key) => !KYC_DB_FIELD_KEYS.has(key));
   const { mutate: saveKyc, isPending: savingKyc } = useMutation({
@@ -3588,26 +4054,10 @@ function OverviewTab({ account }) {
             .join(", ")}.`,
         );
       }
-      const teamNum = parseInt(fields.team);
-      await updateAccountKyc(account.id, {
-        industry: fields.industry,
-        business_info: fields.business,
-        client_history: fields.history,
-        revenue: fields.revenue,
-        mrr_arr: fields.mrrArr.startsWith("N/A") ? null : fields.mrrArr,
-        primary_contact_name: fields.primary,
-        engagement_tenure: fields.tenure,
-        ...(isNaN(teamNum) ? {} : { team_size: teamNum }),
-        competitors: fields.competitors
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        main_business_flow: fields.flow,
-        renewal_date: fields.contractRenewalDate || null,
-        contract_duration: fields.contractDuration || null,
-        linkedin_url: fields.linkedinUrl || null,
-        website_url: fields.websiteUrl || null,
-      });
+      const updatePayload = buildOverviewSavePayload(fields, dirtyFieldKeys);
+      if (Object.keys(updatePayload).length > 0) {
+        await updateAccountKyc(account.id, updatePayload);
+      }
       const diffs = Object.keys(fields)
         .filter((k) => fields[k] !== savedSnapshot[k])
         .map((k) => ({
@@ -3658,13 +4108,99 @@ function OverviewTab({ account }) {
     account.websiteSummaryUpdatedAt ?? null,
   );
   const [websiteSummaryError, setWebsiteSummaryError] = useState("");
+  const [stakeholderRows, setStakeholderRows] = useState(account.stakeholders ?? []);
+  const [stakeholderDialogOpen, setStakeholderDialogOpen] = useState(false);
+  const [editingStakeholder, setEditingStakeholder] = useState(null);
+  const [deletingStakeholder, setDeletingStakeholder] = useState(null);
+  const [stakeholderForm, setStakeholderForm] = useState(createStakeholderForm());
+  const [stakeholderError, setStakeholderError] = useState("");
+  const [stakeholderDeleteError, setStakeholderDeleteError] = useState("");
+  const [overviewSectionsOpen, setOverviewSectionsOpen] = useState(false);
+  const [visibleOverviewFieldIds, setVisibleOverviewFieldIds] = useState(
+    DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS,
+  );
+  const [overviewSectionDraftIds, setOverviewSectionDraftIds] = useState(
+    DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS,
+  );
+  const visibleOverviewFieldSet = useMemo(
+    () => new Set(visibleOverviewFieldIds),
+    [visibleOverviewFieldIds],
+  );
+  const visibleKycFields = useMemo(
+    () => OVERVIEW_KYC_FIELD_CONFIG.filter((field) => visibleOverviewFieldSet.has(field.id)),
+    [visibleOverviewFieldSet],
+  );
+  const visibleAccountDetailFields = useMemo(
+    () =>
+      OVERVIEW_ACCOUNT_DETAIL_FIELD_CONFIG.filter((field) =>
+        visibleOverviewFieldSet.has(field.id),
+      ),
+    [visibleOverviewFieldSet],
+  );
+  useEffect(() => {
+    const nextVisibleFieldIds = readOverviewVisibleFieldIds(account.id);
+    setVisibleOverviewFieldIds(nextVisibleFieldIds);
+    setOverviewSectionDraftIds(nextVisibleFieldIds);
+  }, [account.id]);
+  useEffect(() => {
+    const nextRows = account.stakeholders ?? [];
+    const nextInfo = formatStakeholdersInfo(nextRows);
+    setStakeholderRows(nextRows);
+    setFields((current) =>
+      current.stakeholdersInfo === nextInfo ? current : { ...current, stakeholdersInfo: nextInfo },
+    );
+    setSavedSnapshot((current) =>
+      current.stakeholdersInfo === nextInfo ? current : { ...current, stakeholdersInfo: nextInfo },
+    );
+  }, [account.stakeholders]);
+  function syncStakeholderDisplayRows(nextRows) {
+    const nextInfo = formatStakeholdersInfo(nextRows);
+    setStakeholderRows(nextRows);
+    setFields((current) =>
+      current.stakeholdersInfo === nextInfo ? current : { ...current, stakeholdersInfo: nextInfo },
+    );
+    setSavedSnapshot((current) =>
+      current.stakeholdersInfo === nextInfo ? current : { ...current, stakeholdersInfo: nextInfo },
+    );
+  }
+  function openCreateStakeholderDialog() {
+    setEditingStakeholder(null);
+    setStakeholderForm(createStakeholderForm());
+    setStakeholderError("");
+    setStakeholderDialogOpen(true);
+  }
+  function openEditStakeholderDialog(stakeholder) {
+    setEditingStakeholder(stakeholder);
+    setStakeholderForm(createStakeholderForm(stakeholder));
+    setStakeholderError("");
+    setStakeholderDialogOpen(true);
+  }
+  function closeStakeholderDialog() {
+    setStakeholderDialogOpen(false);
+    setEditingStakeholder(null);
+    setStakeholderForm(createStakeholderForm());
+    setStakeholderError("");
+  }
+  function openDeleteStakeholderDialog(stakeholder) {
+    setDeletingStakeholder(stakeholder);
+    setStakeholderDeleteError("");
+  }
+  function closeDeleteStakeholderDialog() {
+    setDeletingStakeholder(null);
+    setStakeholderDeleteError("");
+  }
   const salesforceMappingRows = useMemo(
-    () => buildSalesforceMappingRows(salesforceLookup.bundle, account, fields),
-    [salesforceLookup.bundle, account, fields],
+    () =>
+      buildSalesforceMappingRows(
+        salesforceLookup.bundle,
+        { ...account, stakeholders: stakeholderRows },
+        fields,
+      ),
+    [salesforceLookup.bundle, account, stakeholderRows, fields],
   );
   const { mutate: checkSalesforceAccount, isPending: checkingSalesforce } = useMutation({
     mutationFn: async () => {
-      const accessToken = await getFreshAccessTokenForSalesforceLookup();
+      const accessToken = await getFreshAccessTokenForSalesforce(session, "searching Salesforce");
       return lookupSalesforceAccountBundle({
         data: {
           accountName: account.name,
@@ -3701,7 +4237,15 @@ function OverviewTab({ account }) {
       if (selectedRowsForSync.length === 0) {
         throw new Error("Select at least one Salesforce field to sync.");
       }
-      await syncSalesforceMappedFields(account.id, buildSalesforceSyncPayload(selectedRowsForSync));
+      const accessToken = await getFreshAccessTokenForSalesforce(
+        session,
+        "syncing Salesforce fields",
+      );
+      await syncSalesforceMappedFields(
+        account.id,
+        buildSalesforceSyncPayload(selectedRowsForSync),
+        accessToken,
+      );
       await logAccountChanges(
         account.id,
         buildSalesforceHistoryRows(selectedRowsForSync),
@@ -3739,6 +4283,96 @@ function OverviewTab({ account }) {
     },
     onError: (error) => {
       setSalesforceSyncError(error.message ?? "Salesforce sync failed. Please try again.");
+    },
+  });
+  const { mutate: saveStakeholder, isPending: savingStakeholder } = useMutation({
+    mutationFn: async () => {
+      if (!editable) throw new Error("You do not have permission to edit stakeholders.");
+      const values = normalizeStakeholderForm(stakeholderForm);
+      if (!values.name) throw new Error("Stakeholder name is required.");
+      if (!values.role) throw new Error("Stakeholder role is required.");
+
+      if (editingStakeholder) {
+        if (!editingStakeholder.id) {
+          throw new Error("Stakeholder id is missing. Refresh the account and try again.");
+        }
+        const saved = await updateStakeholder(editingStakeholder.id, values);
+        await logAccountChanges(
+          account.id,
+          buildStakeholderHistoryChanges(editingStakeholder, saved),
+          profile?.name ?? "Unknown",
+        );
+        return { mode: "edit", saved };
+      }
+
+      const saved = await createStakeholder(account.id, values);
+      await logAccountChanges(
+        account.id,
+        [
+          {
+            field: "Stakeholder Created",
+            oldValue: "",
+            newValue: summarizeStakeholderForHistory(saved),
+          },
+        ],
+        profile?.name ?? "Unknown",
+      );
+      return { mode: "create", saved };
+    },
+    onMutate: () => {
+      setStakeholderError("");
+    },
+    onSuccess: ({ mode, saved }) => {
+      const nextRows =
+        mode === "edit"
+          ? stakeholderRows.map((stakeholder) =>
+              stakeholder.id === saved.id ? saved : stakeholder,
+            )
+          : [...stakeholderRows, saved];
+      syncStakeholderDisplayRows(nextRows);
+      closeStakeholderDialog();
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setStakeholderError(error.message ?? "Could not save stakeholder.");
+    },
+  });
+  const { mutate: removeStakeholder, isPending: deletingStakeholderRow } = useMutation({
+    mutationFn: async () => {
+      if (!editable) throw new Error("You do not have permission to delete stakeholders.");
+      if (!deletingStakeholder?.id) {
+        throw new Error("Stakeholder id is missing. Refresh the account and try again.");
+      }
+      await deleteStakeholder(deletingStakeholder.id);
+      await logAccountChanges(
+        account.id,
+        [
+          {
+            field: "Stakeholder Deleted",
+            oldValue: summarizeStakeholderForHistory(deletingStakeholder),
+            newValue: "",
+          },
+        ],
+        profile?.name ?? "Unknown",
+      );
+      return deletingStakeholder;
+    },
+    onMutate: () => {
+      setStakeholderDeleteError("");
+    },
+    onSuccess: (deletedStakeholder) => {
+      syncStakeholderDisplayRows(
+        stakeholderRows.filter((stakeholder) => stakeholder.id !== deletedStakeholder.id),
+      );
+      closeDeleteStakeholderDialog();
+      queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
+      router.invalidate();
+    },
+    onError: (error) => {
+      setStakeholderDeleteError(error.message ?? "Could not delete stakeholder.");
     },
   });
   const { mutate: generateLinkedinSummary, isPending: generatingLinkedinSummary } = useMutation({
@@ -3899,22 +4533,594 @@ function OverviewTab({ account }) {
             .join(", ")}. The selected value is already shown in the form.`,
     );
   }
+  function openOverviewSectionEditor() {
+    setOverviewSectionDraftIds(visibleOverviewFieldIds);
+    setOverviewSectionsOpen(true);
+  }
+  function toggleOverviewSectionField(fieldId, checked) {
+    if (!OVERVIEW_CONFIGURABLE_FIELD_IDS.includes(fieldId)) return;
+    setOverviewSectionDraftIds((current) =>
+      checked
+        ? Array.from(new Set([...current, fieldId]))
+        : current.filter((currentFieldId) => currentFieldId !== fieldId),
+    );
+  }
+  function resetOverviewSections() {
+    setOverviewSectionDraftIds(DEFAULT_VISIBLE_OVERVIEW_FIELD_IDS);
+  }
+  function applyOverviewSections() {
+    const nextFieldIds = normalizeOverviewVisibleFieldIds(overviewSectionDraftIds);
+    setVisibleOverviewFieldIds(nextFieldIds);
+    setOverviewSectionDraftIds(nextFieldIds);
+    writeOverviewVisibleFieldIds(account.id, nextFieldIds);
+    setOverviewSectionsOpen(false);
+  }
+  function getOverviewFieldIcon(icon) {
+    switch (icon) {
+      case "building":
+        return <Building2 className="size-4" />;
+      case "calendar":
+        return <Calendar className="size-4" />;
+      case "check":
+        return <CheckCircle2 className="size-4" />;
+      case "clock":
+        return <Clock className="size-4" />;
+      case "external":
+        return <ExternalLink className="size-4" />;
+      case "growth":
+        return <TrendingUp className="size-4" />;
+      case "history":
+        return <History className="size-4" />;
+      case "lightbulb":
+        return <Lightbulb className="size-4" />;
+      case "money":
+        return <DollarSign className="size-4" />;
+      case "refresh":
+        return <RefreshCw className="size-4" />;
+      case "swords":
+        return <Swords className="size-4" />;
+      case "trend":
+        return account.trend >= 0 ? (
+          <TrendingUp className="size-4" />
+        ) : (
+          <TrendingDown className="size-4" />
+        );
+      case "user":
+        return <User className="size-4" />;
+      case "users":
+        return <Users className="size-4" />;
+      case "warning":
+        return <AlertTriangle className="size-4" />;
+      case "workflow":
+        return <Workflow className="size-4" />;
+      default:
+        return <Circle className="size-4" />;
+    }
+  }
+  function getOverviewFieldValue(field) {
+    if (Object.prototype.hasOwnProperty.call(fields, field.id)) return fields[field.id];
+    switch (field.id) {
+      case "description":
+        return account.description;
+      case "primaryRole":
+        return account.primaryContact?.role;
+      case "region":
+        return account.region;
+      case "founded":
+        return account.founded;
+      case "employees":
+        return account.employees;
+      case "isStartup":
+        return account.isStartup;
+      case "accountName":
+        return account.name;
+      case "accountId":
+        return account.id;
+      case "shortCode":
+        return account.shortCode;
+      case "tier":
+        return account.tier;
+      case "health":
+        return account.health;
+      case "trend":
+        return account.trend;
+      case "operationalStatus":
+        return account.status;
+      case "contractValue":
+        return account.contractValue;
+      case "arr":
+        return account.arr;
+      case "contractType":
+        return account.contractType;
+      case "autoRenew":
+        return account.contractScoring?.autoRenew;
+      case "nonTerminator":
+        return account.contractScoring?.nonTerminator;
+      case "minOneYear":
+        return account.contractScoring?.minOneYear;
+      case "priceHike":
+        return account.contractScoring?.priceHike;
+      case "customerFeedback":
+        return account.contractScoring?.customerFeedback;
+      case "backupExists":
+        return account.resourceHealth?.backupExists;
+      case "criticalResources":
+        return account.resourceHealth?.criticalResources;
+      case "lastTouch":
+        return account.lastTouch;
+      case "retentionRisk":
+        return account.retentionRisk;
+      case "growthUpside":
+        return account.growthUpside;
+      case "whiteSpaceCount":
+        return account.whiteSpaceCount;
+      case "retentionHealthScore":
+        return account.retentionHealthScore;
+      case "calculatedRetentionRisk":
+        return account.calculatedRetentionRisk;
+      case "growthPotentialScore":
+        return account.growthPotentialScore;
+      case "growthPotentialLevel":
+        return account.growthPotentialLevel;
+      case "revenueAtRisk":
+        return account.revenueAtRisk;
+      case "growthPipelineValue":
+        return account.growthPipelineValue;
+      case "retentionGrowthQuadrant":
+        return account.retentionGrowthQuadrant;
+      case "retentionGrowthNextAction":
+        return account.retentionGrowthNextAction;
+      case "retentionGrowthCalculatedAt":
+        return account.retentionGrowthCalculatedAt;
+      case "cooperation":
+        return account.cooperation;
+      case "serviceConsumption":
+        return account.serviceConsumption;
+      case "meetingsPerMonth":
+        return account.meetingsPerMonth;
+      case "contractCompliance":
+        return account.contractCompliance;
+      case "newsKeywords":
+        return account.newsKeywords;
+      case "lastNewsSyncAt":
+        return account.lastNewsSyncAt;
+      default:
+        return fields[field.id];
+    }
+  }
+  function formatOverviewDateTime(value) {
+    if (!hasSyncValue(value)) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  }
+  function formatOverviewFieldValue(value, field) {
+    if (field.type === "boolean") return value ? "Yes" : "No";
+    if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "-";
+    if (!hasSyncValue(value)) return "-";
+    if (field.type === "money") return formatCurrency(Number(value) || 0);
+    if (field.type === "date") return formatDisplayDate(value);
+    if (field.type === "datetime") return formatOverviewDateTime(value);
+    if (field.type === "percent") {
+      const numericValue = Number(value);
+      return Number.isFinite(numericValue)
+        ? `${numericValue >= 0 ? "+" : ""}${numericValue}%`
+        : String(value);
+    }
+    if (field.type === "score") {
+      const numericValue = Number(value);
+      return Number.isFinite(numericValue) ? numericValue.toFixed(1) : String(value);
+    }
+    return String(value);
+  }
+  function isOverviewFieldEditable(fieldId) {
+    return OVERVIEW_EDITABLE_FIELD_IDS.has(fieldId);
+  }
+  function updateOverviewField(fieldId, value) {
+    setFields((current) => ({ ...current, [fieldId]: value }));
+  }
+  function renderKycConfigField(field, index) {
+    const fieldNumber = index + 1;
+    switch (field.id) {
+      case "accountStatus":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Account Status"
+            icon={<CheckCircle2 className="size-4" />}
+            editable={false}
+            value={fields.accountStatus}
+            highlighted={autofilledFieldKeys.includes("accountStatus")}
+          />
+        );
+      case "industry":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Industry Info"
+            icon={<Building2 className="size-4" />}
+            editable={editable}
+            value={fields.industry}
+            onChange={(v) => setFields((f) => ({ ...f, industry: v }))}
+            highlighted={autofilledFieldKeys.includes("industry")}
+          />
+        );
+      case "business":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Business Info"
+            icon={<Workflow className="size-4" />}
+            editable={editable}
+            value={fields.business}
+            onChange={(v) => setFields((f) => ({ ...f, business: v }))}
+            multiline
+            highlighted={autofilledFieldKeys.includes("business")}
+          />
+        );
+      case "history":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Client History"
+            icon={<Clock className="size-4" />}
+            editable={editable}
+            value={fields.history}
+            onChange={(v) => setFields((f) => ({ ...f, history: v }))}
+            multiline
+            highlighted={autofilledFieldKeys.includes("history")}
+          />
+        );
+      case "revenue":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Revenue Info"
+            icon={<DollarSign className="size-4" />}
+            editable={editable}
+            value={fields.revenue}
+            onChange={(v) => setFields((f) => ({ ...f, revenue: v }))}
+            highlighted={autofilledFieldKeys.includes("revenue")}
+          />
+        );
+      case "mrrArr":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="MRR / ARR (Startups)"
+            icon={<TrendingUp className="size-4" />}
+            editable={editable}
+            value={fields.mrrArr}
+            onChange={(v) => setFields((f) => ({ ...f, mrrArr: v }))}
+            highlighted={autofilledFieldKeys.includes("mrrArr")}
+          />
+        );
+      case "primary":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Person Info (Primary)"
+            icon={<User className="size-4" />}
+            editable={editable}
+            value={fields.primary}
+            onChange={(v) => setFields((f) => ({ ...f, primary: v }))}
+            highlighted={autofilledFieldKeys.includes("primary")}
+          />
+        );
+      case "tenure":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Engagement Tenure"
+            icon={<Calendar className="size-4" />}
+            editable={editable}
+            value={fields.tenure}
+            onChange={(v) => setFields((f) => ({ ...f, tenure: v }))}
+            highlighted={autofilledFieldKeys.includes("tenure")}
+          />
+        );
+      case "team":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Team Size"
+            icon={<Users className="size-4" />}
+            editable={editable}
+            value={fields.team}
+            onChange={(v) => setFields((f) => ({ ...f, team: v }))}
+            highlighted={autofilledFieldKeys.includes("team")}
+          />
+        );
+      case "competitors":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Competitors"
+            icon={<Swords className="size-4" />}
+            editable={editable}
+            value={fields.competitors}
+            onChange={(v) => setFields((f) => ({ ...f, competitors: v }))}
+            highlighted={autofilledFieldKeys.includes("competitors")}
+          />
+        );
+      case "flow":
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label="Main Business Flow"
+            icon={<Workflow className="size-4" />}
+            editable={editable}
+            wide
+            value={fields.flow}
+            onChange={(v) => setFields((f) => ({ ...f, flow: v }))}
+            multiline
+            highlighted={autofilledFieldKeys.includes("flow")}
+          />
+        );
+      default:
+        return (
+          <KycField
+            key={field.id}
+            n={fieldNumber}
+            label={field.label}
+            icon={getOverviewFieldIcon(field.icon)}
+            editable={editable && isOverviewFieldEditable(field.id)}
+            wide={field.wide}
+            value={getOverviewFieldValue(field)}
+            displayValue={formatOverviewFieldValue(getOverviewFieldValue(field), field)}
+            valueType={field.type}
+            options={field.options}
+            onChange={(value) => updateOverviewField(field.id, value)}
+          />
+        );
+    }
+  }
+  function renderAccountDetailField(field) {
+    if (OVERVIEW_FIELD_CONFIG_BY_ID[field.id]) {
+      const rawValue = getOverviewFieldValue(field);
+      return (
+        <OverviewDetailField
+          key={field.id}
+          label={field.label}
+          icon={getOverviewFieldIcon(field.icon)}
+          rawValue={rawValue}
+          value={formatOverviewFieldValue(rawValue, field)}
+          valueType={field.type}
+          options={field.options}
+          wide={field.wide}
+          editable={editable && isOverviewFieldEditable(field.id)}
+          onChange={(value) => updateOverviewField(field.id, value)}
+        />
+      );
+    }
+    switch (field.id) {
+      case "contractRenewalDate":
+        return (
+          <div key={field.id} className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <Calendar className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Contract Renewal Date
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Account field also referenced by Contract details.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <input
+                type="date"
+                value={fields.contractRenewalDate}
+                onChange={(event) =>
+                  setFields((current) => ({
+                    ...current,
+                    contractRenewalDate: event.target.value,
+                  }))
+                }
+                className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            ) : fields.contractRenewalDate ? (
+              <p className="text-xs font-semibold">
+                {formatDisplayDate(fields.contractRenewalDate)}
+              </p>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No renewal date saved.</p>
+            )}
+          </div>
+        );
+      case "contractDuration":
+        return (
+          <div key={field.id} className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <Clock className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Contract Duration
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Account field also referenced by Contract details.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <input
+                value={fields.contractDuration}
+                onChange={(event) =>
+                  setFields((current) => ({ ...current, contractDuration: event.target.value }))
+                }
+                placeholder="e.g. 24 months"
+                className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            ) : fields.contractDuration ? (
+              <p className="text-xs font-semibold">{fields.contractDuration}</p>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No contract duration saved.</p>
+            )}
+          </div>
+        );
+      case "linkedinUrl":
+        return (
+          <div key={field.id} className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <ExternalLink className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  LinkedIn URL
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Account object field synced from Salesforce.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={fields.linkedinUrl}
+                  onChange={(event) =>
+                    setFields((current) => ({ ...current, linkedinUrl: event.target.value }))
+                  }
+                  placeholder="https://www.linkedin.com/company/example"
+                  className="flex-1 min-w-0 bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                {fields.linkedinUrl && (
+                  <a
+                    href={externalUrl(fields.linkedinUrl)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="size-9 border rounded-md flex items-center justify-center text-muted-foreground hover:text-accent hover:bg-muted transition-colors shrink-0"
+                    aria-label="Open LinkedIn URL"
+                  >
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                )}
+              </div>
+            ) : fields.linkedinUrl ? (
+              <a
+                href={externalUrl(fields.linkedinUrl)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-semibold text-accent hover:underline break-all"
+              >
+                {fields.linkedinUrl}
+              </a>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No LinkedIn URL saved.</p>
+            )}
+          </div>
+        );
+      case "websiteUrl":
+        return (
+          <div key={field.id} className="border rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+                <ExternalLink className="size-3.5" />
+              </span>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Website URL
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Company website used as the source for website summary.
+                </p>
+              </div>
+            </div>
+            {editable ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={fields.websiteUrl}
+                  onChange={(event) =>
+                    setFields((current) => ({ ...current, websiteUrl: event.target.value }))
+                  }
+                  placeholder="https://www.example.com"
+                  className="flex-1 min-w-0 bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                {fields.websiteUrl && (
+                  <a
+                    href={externalUrl(fields.websiteUrl)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="size-9 border rounded-md flex items-center justify-center text-muted-foreground hover:text-accent hover:bg-muted transition-colors shrink-0"
+                    aria-label="Open Website URL"
+                  >
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                )}
+              </div>
+            ) : fields.websiteUrl ? (
+              <a
+                href={externalUrl(fields.websiteUrl)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-semibold text-accent hover:underline break-all"
+              >
+                {fields.websiteUrl}
+              </a>
+            ) : (
+              <p className="text-xs italic text-muted-foreground">No Website URL saved.</p>
+            )}
+          </div>
+        );
+      default:
+        return (
+          <OverviewDetailField
+            key={field.id}
+            label={field.label}
+            icon={getOverviewFieldIcon(field.icon)}
+            rawValue={getOverviewFieldValue(field)}
+            value={formatOverviewFieldValue(getOverviewFieldValue(field), field)}
+            valueType={field.type}
+            options={field.options}
+            wide={field.wide}
+            editable={editable && isOverviewFieldEditable(field.id)}
+            onChange={(value) => updateOverviewField(field.id, value)}
+          />
+        );
+    }
+  }
   return (
     <div className="space-y-6">
       {/* KYC Header */}
       <div className="bg-gradient-to-br from-primary/5 to-accent/5 border rounded-xl p-6 flex flex-col md:flex-row md:items-start md:justify-between gap-3">
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-accent mb-1">
-            Step 1 of 6
-          </p>
           <h2 className="text-xl font-bold">Know Your Client (KYC)</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            All 12 mandatory KYC fields for this key account. Every field is editable.
-          </p>
         </div>
-        <span className="px-3 py-1.5 rounded-md bg-success/10 text-success text-[11px] font-bold uppercase tracking-wider border border-success/20 w-fit">
-          Key Account
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={openOverviewSectionEditor}
+            className="inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-[11px] font-bold transition-colors hover:bg-muted"
+          >
+            <SlidersHorizontal className="size-3.5" />
+            Edit Sections
+          </button>
+          <span className="px-3 py-1.5 rounded-md bg-success/10 text-success text-[11px] font-bold uppercase tracking-wider border border-success/20 w-fit">
+            Key Account
+          </span>
+        </div>
       </div>
 
       {/* Project Charter Auto-fill upload */}
@@ -4087,295 +5293,26 @@ function OverviewTab({ account }) {
         )}
       </div>
 
-      {/* 12-field KYC grid */}
+      {/* Dynamic KYC grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <KycField
-          n={1}
-          label="Account Status"
-          icon={<CheckCircle2 className="size-4" />}
-          editable={false}
-          value={fields.accountStatus}
-          highlighted={autofilledFieldKeys.includes("accountStatus")}
-        />
-
-        <KycField
-          n={2}
-          label="Industry Info"
-          icon={<Building2 className="size-4" />}
-          editable={editable}
-          value={fields.industry}
-          onChange={(v) => setFields((f) => ({ ...f, industry: v }))}
-          highlighted={autofilledFieldKeys.includes("industry")}
-        />
-
-        <KycField
-          n={3}
-          label="Business Info"
-          icon={<Workflow className="size-4" />}
-          editable={editable}
-          value={fields.business}
-          onChange={(v) => setFields((f) => ({ ...f, business: v }))}
-          multiline
-          highlighted={autofilledFieldKeys.includes("business")}
-        />
-
-        <KycField
-          n={4}
-          label="Client History"
-          icon={<Clock className="size-4" />}
-          editable={editable}
-          value={fields.history}
-          onChange={(v) => setFields((f) => ({ ...f, history: v }))}
-          multiline
-          highlighted={autofilledFieldKeys.includes("history")}
-        />
-
-        <KycField
-          n={5}
-          label="Stakeholders Info"
-          icon={<Users className="size-4" />}
-          editable={false}
-          value={fields.stakeholdersInfo}
-          multiline
-          highlighted={autofilledFieldKeys.includes("stakeholdersInfo")}
-        />
-
-        <KycField
-          n={6}
-          label="Revenue Info"
-          icon={<DollarSign className="size-4" />}
-          editable={editable}
-          value={fields.revenue}
-          onChange={(v) => setFields((f) => ({ ...f, revenue: v }))}
-          highlighted={autofilledFieldKeys.includes("revenue")}
-        />
-
-        <KycField
-          n={7}
-          label="MRR / ARR (Startups)"
-          icon={<TrendingUp className="size-4" />}
-          editable={editable}
-          value={fields.mrrArr}
-          onChange={(v) => setFields((f) => ({ ...f, mrrArr: v }))}
-          highlighted={autofilledFieldKeys.includes("mrrArr")}
-        />
-
-        <KycField
-          n={8}
-          label="Person Info (Primary)"
-          icon={<User className="size-4" />}
-          editable={editable}
-          value={fields.primary}
-          onChange={(v) => setFields((f) => ({ ...f, primary: v }))}
-          highlighted={autofilledFieldKeys.includes("primary")}
-        />
-
-        <KycField
-          n={9}
-          label="Engagement Tenure"
-          icon={<Calendar className="size-4" />}
-          editable={editable}
-          value={fields.tenure}
-          onChange={(v) => setFields((f) => ({ ...f, tenure: v }))}
-          highlighted={autofilledFieldKeys.includes("tenure")}
-        />
-
-        <KycField
-          n={10}
-          label="Team Size"
-          icon={<Users className="size-4" />}
-          editable={editable}
-          value={fields.team}
-          onChange={(v) => setFields((f) => ({ ...f, team: v }))}
-          highlighted={autofilledFieldKeys.includes("team")}
-        />
-
-        <KycField
-          n={11}
-          label="Competitors"
-          icon={<Swords className="size-4" />}
-          editable={editable}
-          value={fields.competitors}
-          onChange={(v) => setFields((f) => ({ ...f, competitors: v }))}
-          highlighted={autofilledFieldKeys.includes("competitors")}
-        />
-
-        <KycField
-          n={12}
-          label="Main Business Flow"
-          icon={<Workflow className="size-4" />}
-          editable={editable}
-          wide
-          value={fields.flow}
-          onChange={(v) => setFields((f) => ({ ...f, flow: v }))}
-          multiline
-          highlighted={autofilledFieldKeys.includes("flow")}
-        />
+        {visibleKycFields.length > 0 ? (
+          visibleKycFields.map((field, index) => renderKycConfigField(field, index))
+        ) : (
+          <div className="md:col-span-2 lg:col-span-3 rounded-xl border border-dashed p-6 text-center text-xs text-muted-foreground">
+            No KYC fields selected.
+          </div>
+        )}
       </div>
 
       <Card title="Account Details">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="border rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
-                <Calendar className="size-3.5" />
-              </span>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Contract Renewal Date
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  Account field also referenced by Contract details.
-                </p>
-              </div>
+          {visibleAccountDetailFields.length > 0 ? (
+            visibleAccountDetailFields.map((field) => renderAccountDetailField(field))
+          ) : (
+            <div className="lg:col-span-2 rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">
+              No account detail fields selected.
             </div>
-            {editable ? (
-              <input
-                type="date"
-                value={fields.contractRenewalDate}
-                onChange={(event) =>
-                  setFields((current) => ({
-                    ...current,
-                    contractRenewalDate: event.target.value,
-                  }))
-                }
-                className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            ) : fields.contractRenewalDate ? (
-              <p className="text-xs font-semibold">
-                {formatDisplayDate(fields.contractRenewalDate)}
-              </p>
-            ) : (
-              <p className="text-xs italic text-muted-foreground">No renewal date saved.</p>
-            )}
-          </div>
-          <div className="border rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
-                <Clock className="size-3.5" />
-              </span>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Contract Duration
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  Account field also referenced by Contract details.
-                </p>
-              </div>
-            </div>
-            {editable ? (
-              <input
-                value={fields.contractDuration}
-                onChange={(event) =>
-                  setFields((current) => ({ ...current, contractDuration: event.target.value }))
-                }
-                placeholder="e.g. 24 months"
-                className="w-full bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            ) : fields.contractDuration ? (
-              <p className="text-xs font-semibold">{fields.contractDuration}</p>
-            ) : (
-              <p className="text-xs italic text-muted-foreground">No contract duration saved.</p>
-            )}
-          </div>
-          <div className="border rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
-                <ExternalLink className="size-3.5" />
-              </span>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  LinkedIn URL
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  Account object field synced from Salesforce.
-                </p>
-              </div>
-            </div>
-            {editable ? (
-              <div className="flex items-center gap-2">
-                <input
-                  value={fields.linkedinUrl}
-                  onChange={(event) =>
-                    setFields((current) => ({ ...current, linkedinUrl: event.target.value }))
-                  }
-                  placeholder="https://www.linkedin.com/company/example"
-                  className="flex-1 min-w-0 bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-                {fields.linkedinUrl && (
-                  <a
-                    href={externalUrl(fields.linkedinUrl)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="size-9 border rounded-md flex items-center justify-center text-muted-foreground hover:text-accent hover:bg-muted transition-colors shrink-0"
-                    aria-label="Open LinkedIn URL"
-                  >
-                    <ExternalLink className="size-3.5" />
-                  </a>
-                )}
-              </div>
-            ) : fields.linkedinUrl ? (
-              <a
-                href={externalUrl(fields.linkedinUrl)}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs font-semibold text-accent hover:underline break-all"
-              >
-                {fields.linkedinUrl}
-              </a>
-            ) : (
-              <p className="text-xs italic text-muted-foreground">No LinkedIn URL saved.</p>
-            )}
-          </div>
-          <div className="border rounded-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
-                <ExternalLink className="size-3.5" />
-              </span>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Website URL
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  Company website used as the source for website summary.
-                </p>
-              </div>
-            </div>
-            {editable ? (
-              <div className="flex items-center gap-2">
-                <input
-                  value={fields.websiteUrl}
-                  onChange={(event) =>
-                    setFields((current) => ({ ...current, websiteUrl: event.target.value }))
-                  }
-                  placeholder="https://www.example.com"
-                  className="flex-1 min-w-0 bg-background border rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-                {fields.websiteUrl && (
-                  <a
-                    href={externalUrl(fields.websiteUrl)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="size-9 border rounded-md flex items-center justify-center text-muted-foreground hover:text-accent hover:bg-muted transition-colors shrink-0"
-                    aria-label="Open Website URL"
-                  >
-                    <ExternalLink className="size-3.5" />
-                  </a>
-                )}
-              </div>
-            ) : fields.websiteUrl ? (
-              <a
-                href={externalUrl(fields.websiteUrl)}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs font-semibold text-accent hover:underline break-all"
-              >
-                {fields.websiteUrl}
-              </a>
-            ) : (
-              <p className="text-xs italic text-muted-foreground">No Website URL saved.</p>
-            )}
-          </div>
+          )}
         </div>
       </Card>
 
@@ -4544,55 +5481,171 @@ function OverviewTab({ account }) {
       )}
 
       {/* Full stakeholders detail */}
-      <Card title="Stakeholders - full detail">
+      <Card
+        title="Stakeholders - full detail"
+        action={
+          editable ? (
+            <button
+              type="button"
+              onClick={openCreateStakeholderDialog}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-bold text-white transition-opacity hover:opacity-90"
+            >
+              <Plus className="size-3.5" />
+              Create stakeholder
+            </button>
+          ) : null
+        }
+      >
         <div className="overflow-x-auto -mx-6 px-6">
-          <table className="w-full text-sm min-w-[520px]">
+          <table className="w-full text-sm min-w-[860px]">
             <thead>
               <tr className="text-left text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b">
                 <th className="pb-2">Name</th>
                 <th className="pb-2">Role</th>
+                <th className="pb-2">Email</th>
+                <th className="pb-2">Phone</th>
                 <th className="pb-2">Influence</th>
-                <th className="pb-2 text-right">Last contact</th>
+                <th className="pb-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y">
-              {account.stakeholders.map((s) => (
-                <tr key={s.name}>
-                  <td className="py-3 flex items-center gap-2">
-                    <div className="size-7 rounded-full bg-primary/5 border flex items-center justify-center font-bold text-[10px]">
-                      {s.name
-                        .split(" ")
-                        .map((p) => p[0])
-                        .join("")
-                        .slice(0, 2)}
-                    </div>
-                    <span className="font-semibold text-xs">{s.name}</span>
-                  </td>
-                  <td className="py-3 text-xs text-muted-foreground">{s.role}</td>
-                  <td className="py-3">
-                    <span
-                      className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                        s.influence === "Champion"
-                          ? "bg-success/10 text-success"
-                          : s.influence === "Decision Maker"
-                            ? "bg-accent/10 text-accent"
-                            : s.influence === "Blocker"
-                              ? "bg-crit/10 text-crit"
-                              : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      {s.influence}
-                    </span>
-                  </td>
-                  <td className="py-3 text-right text-[11px] text-muted-foreground">
-                    {s.lastContact ?? "-"}
+              {stakeholderRows.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-6 text-center text-xs text-muted-foreground">
+                    No stakeholders have been added for this account.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                stakeholderRows.map((s) => (
+                  <tr key={s.id ?? s.email ?? s.name}>
+                    <td className="py-3">
+                      <div className="flex items-center gap-2">
+                        <div className="size-7 rounded-full bg-primary/5 border flex items-center justify-center font-bold text-[10px]">
+                          {String(s.name ?? "")
+                            .split(" ")
+                            .map((p) => p[0])
+                            .join("")
+                            .slice(0, 2) || "?"}
+                        </div>
+                        <span className="font-semibold text-xs">{s.name}</span>
+                      </div>
+                    </td>
+                    <td className="py-3 text-xs text-muted-foreground">{s.role}</td>
+                    <td className="py-3 text-xs text-muted-foreground">
+                      {s.email ? (
+                        <a className="text-accent hover:underline" href={`mailto:${s.email}`}>
+                          {s.email}
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="py-3 text-xs text-muted-foreground">{s.phone ?? "-"}</td>
+                    <td className="py-3">
+                      <span
+                        className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                          s.influence === "Champion"
+                            ? "bg-success/10 text-success"
+                            : s.influence === "Decision Maker"
+                              ? "bg-accent/10 text-accent"
+                              : s.influence === "Blocker"
+                                ? "bg-crit/10 text-crit"
+                                : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {s.influence}
+                      </span>
+                    </td>
+                    <td className="py-3 text-right">
+                      {editable ? (
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            title={`Edit ${s.name}`}
+                            aria-label={`Edit ${s.name}`}
+                            onClick={() => openEditStakeholderDialog(s)}
+                            disabled={!s.id}
+                            className="inline-flex size-8 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Pencil className="size-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            title={`Delete ${s.name}`}
+                            aria-label={`Delete ${s.name}`}
+                            onClick={() => openDeleteStakeholderDialog(s)}
+                            disabled={!s.id}
+                            className="inline-flex size-8 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:border-crit/40 hover:bg-crit/10 hover:text-crit disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground">-</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
       </Card>
+      <StakeholderDialog
+        open={stakeholderDialogOpen}
+        mode={editingStakeholder ? "edit" : "create"}
+        form={stakeholderForm}
+        error={stakeholderError}
+        saving={savingStakeholder}
+        onChange={setStakeholderForm}
+        onClose={closeStakeholderDialog}
+        onSubmit={() => saveStakeholder()}
+      />
+      <AlertDialog
+        open={Boolean(deletingStakeholder)}
+        onOpenChange={(open) => !open && !deletingStakeholderRow && closeDeleteStakeholderDialog()}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete stakeholder?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deletingStakeholder
+                ? `${deletingStakeholder.name} will be removed from this account.`
+                : "This stakeholder will be removed from this account."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {stakeholderDeleteError ? (
+            <p className="rounded-md border border-crit/20 bg-crit/10 px-3 py-2 text-xs text-crit">
+              {stakeholderDeleteError}
+            </p>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingStakeholderRow}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                removeStakeholder();
+              }}
+              disabled={deletingStakeholderRow}
+              className="bg-crit text-white hover:bg-crit/90"
+            >
+              {deletingStakeholderRow ? (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              ) : null}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <OverviewSectionsDialog
+        open={overviewSectionsOpen}
+        fieldGroups={OVERVIEW_SECTION_FIELD_GROUPS}
+        selectedIds={overviewSectionDraftIds}
+        onToggle={toggleOverviewSectionField}
+        onReset={resetOverviewSections}
+        onClose={() => setOverviewSectionsOpen(false)}
+        onSave={applyOverviewSections}
+      />
       <CharterMappingDialog
         open={charterMappingOpen}
         fileName={charterFile?.name ?? ""}
@@ -4641,6 +5694,315 @@ function OverviewTab({ account }) {
         />
       )}
     </div>
+  );
+}
+function OverviewSectionsDialog({
+  open,
+  fieldGroups,
+  selectedIds,
+  onToggle,
+  onReset,
+  onClose,
+  onSave,
+}) {
+  const selectedCount = selectedIds.filter((fieldId) =>
+    OVERVIEW_CONFIGURABLE_FIELD_IDS.includes(fieldId),
+  ).length;
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <DialogContent className="max-h-[88vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
+        <DialogHeader className="shrink-0">
+          <DialogTitle>Edit Sections</DialogTitle>
+          <DialogDescription>
+            Choose visible fields for KYC and Account Details. {selectedCount} selected.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="grid gap-4 py-2">
+            {fieldGroups.map((group) => {
+              const groupSelectedCount = group.fields.filter((field) =>
+                selectedIds.includes(field.id),
+              ).length;
+              return (
+                <div key={group.id} className="rounded-lg border">
+                  <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-3">
+                    <p className="text-xs font-bold uppercase tracking-widest">{group.label}</p>
+                    <span className="text-[11px] font-mono text-muted-foreground">
+                      {groupSelectedCount}/{group.fields.length}
+                    </span>
+                  </div>
+                  <div className="grid divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+                    {group.fields.map((field) => (
+                      <label
+                        key={field.id}
+                        className="flex min-h-11 cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-muted/30"
+                      >
+                        <Checkbox
+                          checked={selectedIds.includes(field.id)}
+                          onCheckedChange={(checked) => onToggle(field.id, Boolean(checked))}
+                          aria-label={`Show ${field.label}`}
+                        />
+                        <span className="text-sm font-medium leading-snug">{field.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <DialogFooter className="shrink-0 gap-2 border-t pt-4 sm:justify-between">
+          <Button type="button" variant="outline" onClick={onReset}>
+            Reset
+          </Button>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={onSave} disabled={selectedCount === 0}>
+              Apply
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+function OverviewDetailField({
+  label,
+  icon,
+  rawValue,
+  value,
+  valueType,
+  options,
+  wide,
+  editable,
+  onChange,
+}) {
+  const [editing, setEditing] = useState(false);
+  const hasValue = valueType === "boolean" || hasSyncValue(rawValue);
+  function renderEditor() {
+    if (options?.length) {
+      return (
+        <select
+          autoFocus
+          value={rawValue ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={() => setEditing(false)}
+          className="w-full rounded-md border bg-background px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+        >
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    if (valueType === "boolean") {
+      return (
+        <select
+          autoFocus
+          value={String(Boolean(rawValue))}
+          onChange={(event) => onChange(event.target.value === "true")}
+          onBlur={() => setEditing(false)}
+          className="w-full rounded-md border bg-background px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+        >
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      );
+    }
+    if (wide) {
+      return (
+        <textarea
+          autoFocus
+          value={rawValue ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={() => setEditing(false)}
+          rows={3}
+          className="w-full rounded-md border bg-background px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+        />
+      );
+    }
+    const inputType =
+      valueType === "date"
+        ? "date"
+        : ["number", "money", "score", "percent"].includes(valueType)
+          ? "number"
+          : valueType === "url"
+            ? "url"
+            : "text";
+    return (
+      <input
+        autoFocus
+        type={inputType}
+        value={rawValue ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={() => setEditing(false)}
+        className="w-full rounded-md border bg-background px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+      />
+    );
+  }
+  return (
+    <div className={`border rounded-lg p-4 ${wide ? "lg:col-span-2" : ""}`}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="size-7 rounded-md bg-accent/10 text-accent flex items-center justify-center">
+          {icon}
+        </span>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+          {label}
+        </p>
+        {editable && onChange ? (
+          <button
+            type="button"
+            onClick={() => setEditing((current) => !current)}
+            className="ml-auto size-7 rounded-md text-muted-foreground hover:bg-muted hover:text-accent flex items-center justify-center transition-colors"
+            aria-label={editing ? `Done editing ${label}` : `Edit ${label}`}
+          >
+            {editing ? <CheckCircle2 className="size-3.5" /> : <Pencil className="size-3.5" />}
+          </button>
+        ) : null}
+      </div>
+      {editing && onChange ? (
+        renderEditor()
+      ) : valueType === "url" && hasValue ? (
+        <a
+          href={externalUrl(rawValue)}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs font-semibold text-accent hover:underline break-all"
+        >
+          {rawValue}
+        </a>
+      ) : (
+        <p
+          className={`text-xs font-semibold leading-relaxed whitespace-pre-wrap ${
+            hasValue ? "" : "italic text-muted-foreground"
+          }`}
+        >
+          {hasValue ? value : "-"}
+        </p>
+      )}
+    </div>
+  );
+}
+function StakeholderDialog({
+  open,
+  mode,
+  form,
+  error,
+  saving,
+  onChange,
+  onClose,
+  onSubmit,
+}) {
+  const isEdit = mode === "edit";
+  const updateField = (field, value) => {
+    onChange((current) => ({ ...current, [field]: value }));
+  };
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !saving && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!saving) onSubmit();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{isEdit ? "Edit stakeholder" : "Create stakeholder"}</DialogTitle>
+            <DialogDescription>
+              Store stakeholder contact details in the system. Salesforce sync can also update
+              these fields from Contact records.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 py-5">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label htmlFor="stakeholder-name">Name</Label>
+                <Input
+                  id="stakeholder-name"
+                  value={form.name}
+                  onChange={(event) => updateField("name", event.target.value)}
+                  placeholder="Contact name"
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="stakeholder-role">Role</Label>
+                <Input
+                  id="stakeholder-role"
+                  value={form.role}
+                  onChange={(event) => updateField("role", event.target.value)}
+                  placeholder="Decision maker, sponsor, evaluator..."
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label htmlFor="stakeholder-email">Email</Label>
+                <Input
+                  id="stakeholder-email"
+                  type="email"
+                  value={form.email}
+                  onChange={(event) => updateField("email", event.target.value)}
+                  placeholder="name@company.com"
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="stakeholder-phone">Phone</Label>
+                <Input
+                  id="stakeholder-phone"
+                  type="tel"
+                  value={form.phone}
+                  onChange={(event) => updateField("phone", event.target.value)}
+                  placeholder="+1 555 0100"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-2 sm:max-w-xs">
+              <Label htmlFor="stakeholder-influence">Influence</Label>
+              <select
+                id="stakeholder-influence"
+                value={form.influence}
+                onChange={(event) => updateField("influence", event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+              >
+                {STAKEHOLDER_INFLUENCE_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {error ? (
+              <p className="flex items-center gap-1.5 text-xs text-crit">
+                <AlertTriangle className="size-3.5" />
+                {error}
+              </p>
+            ) : null}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving || !form.name.trim() || !form.role.trim()}>
+              {saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+              {isEdit ? "Save changes" : "Create stakeholder"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 function CharterMappingDialog({
@@ -4892,6 +6254,12 @@ function SalesforceMappingModal({
                     <tr key={`header-${group}`}>
                       <td colSpan={5} className="px-5 py-2 bg-muted/40 border-y">
                         <p className="text-[11px] font-bold uppercase tracking-wider">{group}</p>
+                        {groupRows[0]?.kind === "stakeholder" && (
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            {groupRows[0].targetStakeholderLabel} -{" "}
+                            {groupRows[0].stakeholderMatchLabel}
+                          </p>
+                        )}
                       </td>
                     </tr>
                     {groupRows.map((row) => (
@@ -4967,11 +6335,79 @@ function KycField({
   wide,
   editable,
   value,
+  displayValue,
   onChange,
   multiline,
   highlighted,
+  valueType,
+  options,
 }) {
   const [editing, setEditing] = useState(false);
+  const displayText = displayValue ?? value;
+  const hasDisplayValue = valueType === "boolean" || hasSyncValue(displayText);
+  function renderEditor() {
+    if (options?.length) {
+      return (
+        <select
+          autoFocus
+          value={value ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={() => setEditing(false)}
+          className="w-full bg-background border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+        >
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    if (valueType === "boolean") {
+      return (
+        <select
+          autoFocus
+          value={String(Boolean(value))}
+          onChange={(event) => onChange(event.target.value === "true")}
+          onBlur={() => setEditing(false)}
+          className="w-full bg-background border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+        >
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      );
+    }
+    if (multiline) {
+      return (
+        <textarea
+          autoFocus
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => setEditing(false)}
+          rows={3}
+          className="w-full bg-background border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+        />
+      );
+    }
+    const inputType =
+      valueType === "date"
+        ? "date"
+        : ["number", "money", "score", "percent"].includes(valueType)
+          ? "number"
+          : valueType === "url"
+            ? "url"
+            : "text";
+    return (
+      <input
+        autoFocus
+        type={inputType}
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={() => setEditing(false)}
+        className="w-full bg-background border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+      />
+    );
+  }
   return (
     <div
       className={`bg-card border rounded-xl p-4 hover:border-accent/40 transition-colors group ${
@@ -4999,28 +6435,15 @@ function KycField({
       <div className="text-xs">
         {value !== undefined ? (
           editing && onChange ? (
-            multiline ? (
-              <textarea
-                autoFocus
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                onBlur={() => setEditing(false)}
-                rows={3}
-                className="w-full bg-background border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            ) : (
-              <input
-                autoFocus
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                onBlur={() => setEditing(false)}
-                className="w-full bg-background border rounded-md px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-            )
+            renderEditor()
           ) : (
             <p className="leading-relaxed whitespace-pre-wrap">
-              {value || (
-                <span className="italic text-muted-foreground">- empty - click edit to add</span>
+              {hasDisplayValue ? (
+                displayText
+              ) : (
+                <span className="italic text-muted-foreground">
+                  {editable && onChange ? "- empty - click edit to add" : "-"}
+                </span>
               )}
             </p>
           )
@@ -5031,8 +6454,8 @@ function KycField({
     </div>
   );
 }
-/* ============================== TAB 2: Score Marking Matrices ============================== */
-function ScoreMatricsTab({ account }) {
+/* ============================== TAB 2: Score Marking Metrics ============================== */
+function ScoreMetricsTab({ account }) {
   const [expanded, setExpanded] = useState(null);
   const open = (title, hint, block, area) => setExpanded({ title, hint, block, area });
   const areaScores = [
@@ -7552,7 +8975,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     return {
       message:
         scoreRows.length > 1
-          ? `Marked ${scoreRows.length} related Score Marking Matrics items checked.`
+          ? `Marked ${scoreRows.length} related Score Marking Metrics items checked.`
           : "Activity marked done.",
     };
   }
@@ -7804,7 +9227,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           <div>
             <h3 className="text-sm font-bold">Activities Across Health Areas</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              Unchecked Score Marking Matrics items, meeting actions, and accepted drafts live in
+              Unchecked Score Marking Metrics items, meeting actions, and accepted drafts live in
               one review queue.
             </p>
           </div>
@@ -9388,7 +10811,7 @@ function getRejectedHistorySourceLabel(sourceType) {
   if (sourceType === "opportunity") return "Opportunity";
   if (sourceType === "meeting" || sourceType === "fireflies_meeting") return "Meeting Insight";
   if (sourceType === "rag") return "Activity Rule";
-  if (sourceType === "score_metric") return "Score Marking Matrics";
+  if (sourceType === "score_metric") return "Score Marking Metrics";
   return sourceType ? sourceType.replace(/_/g, " ") : "Suggestion";
 }
 
@@ -9992,7 +11415,7 @@ async function completeScoreMetricRows({
   });
 
   if (!rowsByArea.size) {
-    throw new Error("This activity is not linked to a Score Marking Matrics criterion.");
+    throw new Error("This activity is not linked to a Score Marking Metrics criterion.");
   }
 
   for (const [areaKey, refs] of rowsByArea.entries()) {
@@ -10841,10 +12264,13 @@ function formatHistoryTime(iso) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 /* ============================== Shared atoms ============================== */
-function Card({ title, children }) {
+function Card({ title, action, children }) {
   return (
     <div className="bg-card border rounded-xl p-6">
-      <h3 className="text-sm font-bold mb-4">{title}</h3>
+      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <h3 className="text-sm font-bold">{title}</h3>
+        {action}
+      </div>
       <div className="space-y-3 text-sm">{children}</div>
     </div>
   );

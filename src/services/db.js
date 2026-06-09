@@ -1425,21 +1425,40 @@ export async function createAccount(data) {
 }
 
 // --- update account KYC fields -----------------------------------------------
+const CONTRACT_DETAIL_UPDATE_COLUMNS = new Set([
+  "auto_renew",
+  "non_terminator",
+  "min_one_year",
+  "price_hike",
+  "backup_exists",
+  "critical_resources",
+  "customer_feedback",
+]);
 export async function updateAccountKyc(accountId, updates) {
-  const { error } = await supabase.from("accounts").update(updates).eq("id", accountId);
-  if (error) throw error;
+  const accountUpdates = Object.fromEntries(
+    Object.entries(updates).filter(([key]) => !CONTRACT_DETAIL_UPDATE_COLUMNS.has(key)),
+  );
+  if (Object.keys(accountUpdates).length > 0) {
+    const { error } = await supabase.from("accounts").update(accountUpdates).eq("id", accountId);
+    if (error) throw error;
+  }
 
   const contractUpdates = { account_id: accountId };
-  if (Object.prototype.hasOwnProperty.call(updates, "contract_duration")) {
-    contractUpdates.duration = updates.contract_duration;
+  if (Object.prototype.hasOwnProperty.call(updates, "contract_type")) {
+    contractUpdates.type = updates.contract_type;
   }
+  if (Object.prototype.hasOwnProperty.call(updates, "contract_duration")) contractUpdates.duration = updates.contract_duration;
   if (
     Object.prototype.hasOwnProperty.call(updates, "renewal_date") ||
     Object.prototype.hasOwnProperty.call(updates, "contract_renewal_date")
   ) {
     contractUpdates.renewal_date = updates.renewal_date ?? updates.contract_renewal_date;
   }
+  CONTRACT_DETAIL_UPDATE_COLUMNS.forEach((column) => {
+    if (Object.prototype.hasOwnProperty.call(updates, column)) contractUpdates[column] = updates[column];
+  });
   if (Object.keys(contractUpdates).length > 1) {
+    contractUpdates.updated_at = new Date().toISOString();
     const { error: contractError } = await supabase
       .from("contract_details")
       .upsert(contractUpdates, { onConflict: "account_id" });
@@ -1467,18 +1486,21 @@ export async function applySowFields(accountId, fields) {
     },
   });
 }
-export async function syncSalesforceMappedFields(accountId, payload) {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session?.access_token)
-    throw new Error("Please sign in again before syncing Salesforce fields.");
+export async function syncSalesforceMappedFields(accountId, payload, accessTokenOverride) {
+  let accessToken = accessTokenOverride;
+  if (!accessToken) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    accessToken = session?.access_token;
+  }
+  if (!accessToken) throw new Error("Please sign in again before syncing Salesforce fields.");
 
   return syncSalesforceMappedFieldsServer({
     data: {
       accountId,
       payload,
-      accessToken: session.access_token,
+      accessToken,
     },
   });
 }
@@ -1512,6 +1534,92 @@ export async function generateAccountWebsiteSummary(accountId) {
       accessToken: session.access_token,
     },
   });
+}
+
+const STAKEHOLDER_INFLUENCE_VALUES = new Set([
+  "Champion",
+  "Decision Maker",
+  "Influencer",
+  "Blocker",
+]);
+
+function normalizeStakeholderText(value) {
+  const text = String(value ?? "").trim();
+  return text.length > 0 ? text : null;
+}
+
+function normalizeStakeholderInfluence(value) {
+  return STAKEHOLDER_INFLUENCE_VALUES.has(value) ? value : "Influencer";
+}
+
+function normalizeStakeholderPayload(values = {}) {
+  return {
+    name: normalizeStakeholderText(values.name),
+    role: normalizeStakeholderText(values.role),
+    influence: normalizeStakeholderInfluence(values.influence),
+    email: normalizeStakeholderText(values.email),
+    phone: normalizeStakeholderText(values.phone),
+    last_contact: normalizeStakeholderText(values.lastContact ?? values.last_contact),
+  };
+}
+
+function mapStakeholderRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role,
+    influence: row.influence,
+    email: row.email ?? undefined,
+    phone: row.phone ?? undefined,
+    lastContact: row.last_contact ?? undefined,
+  };
+}
+
+export async function createStakeholder(accountId, values) {
+  const id = normalizeStakeholderText(accountId);
+  if (!id) throw new Error("Account id is required.");
+
+  const payload = normalizeStakeholderPayload(values);
+  if (!payload.name) throw new Error("Stakeholder name is required.");
+  if (!payload.role) throw new Error("Stakeholder role is required.");
+
+  const { data, error } = await supabase
+    .from("stakeholders")
+    .insert({
+      account_id: id,
+      ...payload,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapStakeholderRow(data);
+}
+
+export async function updateStakeholder(stakeholderId, values) {
+  const id = normalizeStakeholderText(stakeholderId);
+  if (!id) throw new Error("Stakeholder id is required.");
+
+  const payload = normalizeStakeholderPayload(values);
+  if (!payload.name) throw new Error("Stakeholder name is required.");
+  if (!payload.role) throw new Error("Stakeholder role is required.");
+
+  const { data, error } = await supabase
+    .from("stakeholders")
+    .update(payload)
+    .eq("id", id)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapStakeholderRow(data);
+}
+
+export async function deleteStakeholder(stakeholderId) {
+  const id = normalizeStakeholderText(stakeholderId);
+  if (!id) throw new Error("Stakeholder id is required.");
+
+  const { error } = await supabase.from("stakeholders").delete().eq("id", id);
+  if (error) throw error;
+  return id;
 }
 export async function fetchAccount(id) {
   const [
@@ -1560,13 +1668,7 @@ export async function fetchAccount(id) {
   const flat = mapFlatAccount(acc);
   return {
     ...flat,
-    stakeholders: (stakeholders ?? []).map((s) => ({
-      name: s.name,
-      role: s.role,
-      influence: s.influence,
-      email: s.email ?? undefined,
-      lastContact: s.last_contact ?? undefined,
-    })),
+    stakeholders: (stakeholders ?? []).map(mapStakeholderRow),
     relationshipHealth: block("relationship"),
     projectHealth: block("project"),
     whiteSpace: block("white_space"),
