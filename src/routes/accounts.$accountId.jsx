@@ -110,6 +110,7 @@ import {
   ExternalLink,
   History,
   RefreshCw,
+  Search,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -10522,6 +10523,7 @@ function EscalationsTab({ list }) {
 
 /* ============================== TAB 7: Client History ============================== */
 function ClientHistoryTab({ accountId, accountName }) {
+  const [historySearch, setHistorySearch] = useState("");
   const { data: history = [], isLoading } = useQuery({
     queryKey: ["account-history", accountId],
     queryFn: () => fetchAccountHistory(accountId),
@@ -10532,6 +10534,24 @@ function ClientHistoryTab({ accountId, accountName }) {
   );
   const latestEntry = history[0] ?? null;
   const latestEditor = latestEntry?.editedBy ?? "-";
+  const normalizedHistorySearch = historySearch.trim().toLowerCase();
+  const filteredHistory = useMemo(() => {
+    if (!normalizedHistorySearch) return history;
+    return history.filter((entry) => {
+      const searchableText = [
+        entry.fieldName,
+        entry.editedBy,
+        toHistoryValue(entry.oldValue),
+        toHistoryValue(entry.newValue),
+        formatHistoryTime(entry.editedAt),
+        formatHistoryDate(entry.editedAt),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return searchableText.includes(normalizedHistorySearch);
+    });
+  }, [history, normalizedHistorySearch]);
 
   if (isLoading) {
     return (
@@ -10584,15 +10604,33 @@ function ClientHistoryTab({ accountId, accountName }) {
               Field-level updates for {accountName} - newest first.
             </p>
           </div>
-          <span className="w-fit rounded-md border bg-muted/40 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-            {history.length} audit entries
-          </span>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <div className="relative sm:w-72">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="search"
+                value={historySearch}
+                onChange={(event) => setHistorySearch(event.target.value)}
+                placeholder="Search change history"
+                className="h-9 pl-9 text-xs"
+              />
+            </div>
+            <span className="w-fit rounded-md border bg-muted/40 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+              {normalizedHistorySearch
+                ? `${filteredHistory.length} of ${history.length} audit entries`
+                : `${history.length} audit entries`}
+            </span>
+          </div>
         </div>
 
         <div className="max-h-[42rem] divide-y overflow-y-auto overscroll-contain">
-          {history.map((entry) => (
-            <HistoryChangeItem key={entry.id} entry={entry} />
-          ))}
+          {filteredHistory.length > 0 ? (
+            filteredHistory.map((entry) => <HistoryChangeItem key={entry.id} entry={entry} />)
+          ) : (
+            <div className="px-4 py-10 text-center text-xs text-muted-foreground">
+              No matching changes found.
+            </div>
+          )}
         </div>
       </div>
     </div>
