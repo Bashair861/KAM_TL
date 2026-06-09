@@ -7,13 +7,209 @@ import { generateWebsiteSummaryServer } from "@/services/website-summary";
 import { applySowFieldsServer } from "@/services/sow-upload";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import { markNotificationsReadServer } from "@/services/notification-read";
+import { repairAccountConstraintUpdates } from "@/services/account-constraint-repairs";
 import {
   createAccountAssignmentNotifications,
   createActionItemNotifications,
   ensureContractRenewalNotifications,
   isNotificationRole,
 } from "@/services/notifications";
+import {
+  normalizeDate as validateDate,
+  normalizeEmail as validateEmail,
+  normalizeEnum as validateEnum,
+  normalizeId as validateId,
+  normalizeMoney as validateMoney,
+  normalizeNumber as validateNumber,
+  normalizePhone as validatePhone,
+  normalizeStringList as validateStringList,
+  normalizeText as validateText,
+  normalizeUrl as validateUrl,
+} from "@/services/validation";
 // ─── mappers ─────────────────────────────────────────────────────────────────
+const ACCOUNT_TIER_VALUES = new Set(["Enterprise", "Growth", "Strategic"]);
+const ACCOUNT_STATUS_VALUES = new Set(["healthy", "at-risk", "critical"]);
+const CONTRACT_TYPE_VALUES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
+const RETENTION_RISK_VALUES = new Set(["Low", "Medium", "High"]);
+const GROWTH_LEVEL_VALUES = new Set(["Low", "Medium", "High"]);
+const RAG_VALUES = new Set(["R", "A", "G"]);
+const ESCALATION_PRIORITY_VALUES = new Set(["P1", "P2", "P3"]);
+const OPPORTUNITY_CONFIDENCE_VALUES = new Set(["High", "Medium", "Low"]);
+const SHORT_CODE_RE = /^[A-Z0-9]{2,4}$/;
+
+function normalizeBooleanInput(value) {
+  if (typeof value === "boolean") return value;
+  return ["true", "1", "yes", "y"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function normalizeOptionalBusinessText(value, field, maxLength = 1200) {
+  return validateText(value, { field, maxLength, multiline: true });
+}
+
+function normalizeRequiredBusinessText(value, field, maxLength = 255) {
+  return validateText(value, { field, required: true, maxLength, meaningful: true });
+}
+
+function normalizeShortCode(value) {
+  const shortCode = validateText(value, {
+    field: "Short code",
+    required: true,
+    minLength: 2,
+    maxLength: 4,
+    meaningful: true,
+  }).toUpperCase();
+  if (!SHORT_CODE_RE.test(shortCode)) {
+    throw new Error("Short code must be 2 to 4 letters or numbers.");
+  }
+  return shortCode;
+}
+
+function normalizeIsoDateTime(value, field) {
+  const text = validateText(value, { field, maxLength: 40 });
+  if (!text) return null;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) throw new Error(`${field} must be a valid date/time.`);
+  return date.toISOString();
+}
+
+function normalizeAccountCreateInput(data = {}) {
+  return {
+    id: validateId(data.id, "Account ID"),
+    name: normalizeRequiredBusinessText(data.name, "Account name"),
+    shortCode: normalizeShortCode(data.shortCode),
+    industry: normalizeRequiredBusinessText(data.industry, "Industry", 160),
+    tier: validateEnum(data.tier, ACCOUNT_TIER_VALUES, "Tier"),
+    contractType: validateEnum(data.contractType, CONTRACT_TYPE_VALUES, "Contract type"),
+    contractValue: validateMoney(data.contractValue, "Contract value", { required: true }),
+    arr: validateMoney(data.arr, "ARR", { required: true }),
+    renewalDays: validateNumber(data.renewalDays, {
+      field: "Renewal days",
+      min: 0,
+      max: 10000,
+      integer: true,
+      defaultValue: null,
+    }),
+    contractRenewalDate: validateDate(data.contractRenewalDate, "Contract renewal date", {
+      required: true,
+    }),
+    contractDuration: validateText(data.contractDuration, {
+      field: "Contract duration",
+      maxLength: 80,
+      meaningful: Boolean(data.contractDuration),
+    }),
+    region: normalizeRequiredBusinessText(data.region, "Region", 120),
+    primaryContactName: validateText(data.primaryContactName, {
+      field: "Primary contact name",
+      maxLength: 160,
+      meaningful: Boolean(data.primaryContactName),
+    }),
+    linkedinUrl: validateUrl(data.linkedinUrl, "LinkedIn URL"),
+    linkedinSummary: normalizeOptionalBusinessText(data.linkedinSummary, "LinkedIn summary", 6000),
+    linkedinSummaryUpdatedAt: data.linkedinSummaryUpdatedAt
+      ? normalizeIsoDateTime(data.linkedinSummaryUpdatedAt, "LinkedIn summary updated at")
+      : null,
+    websiteUrl: validateUrl(data.websiteUrl, "Website URL"),
+    websiteSummary: normalizeOptionalBusinessText(data.websiteSummary, "Website summary", 6000),
+    websiteSummaryUpdatedAt: data.websiteSummaryUpdatedAt
+      ? normalizeIsoDateTime(data.websiteSummaryUpdatedAt, "Website summary updated at")
+      : null,
+    assignedKamId: data.assignedKamId ? validateId(data.assignedKamId, "Assigned KAM") : null,
+  };
+}
+
+function normalizeAccountUpdateValue(column, value) {
+  switch (column) {
+    case "name":
+      return normalizeRequiredBusinessText(value, "Account name");
+    case "short_code":
+      return normalizeShortCode(value);
+    case "industry":
+      return normalizeRequiredBusinessText(value, "Industry", 160);
+    case "tier":
+      return validateEnum(value, ACCOUNT_TIER_VALUES, "Tier");
+    case "status":
+      return validateEnum(value, ACCOUNT_STATUS_VALUES, "Operational status");
+    case "contract_type":
+      return validateEnum(value, CONTRACT_TYPE_VALUES, "Contract type");
+    case "retention_risk":
+    case "calculated_retention_risk":
+      return validateEnum(value, RETENTION_RISK_VALUES, "Retention risk");
+    case "growth_potential_level":
+      return validateEnum(value, GROWTH_LEVEL_VALUES, "Growth potential level");
+    case "health":
+    case "retention_health_score":
+    case "growth_potential_score":
+    case "cooperation":
+    case "service_consumption":
+    case "contract_compliance":
+      return validateNumber(value, { field: column.replace(/_/g, " "), min: 0, max: 100 });
+    case "trend":
+      return validateNumber(value, { field: "Trend", min: -100, max: 100 });
+    case "contract_value":
+      return validateMoney(value, "Contract value", { required: true });
+    case "arr":
+      return validateMoney(value, "ARR", { required: true });
+    case "growth_upside":
+    case "revenue_at_risk":
+    case "growth_pipeline_value":
+      return validateMoney(value, column.replace(/_/g, " "));
+    case "white_space_count":
+    case "meetings_per_month":
+    case "team_size":
+      return validateNumber(value, {
+        field: column.replace(/_/g, " "),
+        min: 0,
+        max: 100000,
+        integer: true,
+        defaultValue: 0,
+      });
+    case "founded":
+      return validateNumber(value, {
+        field: "Founded",
+        min: 1800,
+        max: new Date().getFullYear() + 1,
+        integer: true,
+      });
+    case "renewal_date":
+    case "contract_renewal_date":
+      return validateDate(value, "Contract renewal date");
+    case "retention_growth_calculated_at":
+    case "last_news_sync_at":
+      return normalizeIsoDateTime(value, column.replace(/_/g, " "));
+    case "linkedin_url":
+      return validateUrl(value, "LinkedIn URL");
+    case "website_url":
+      return validateUrl(value, "Website URL");
+    case "is_startup":
+      return normalizeBooleanInput(value);
+    case "competitors":
+    case "news_keywords":
+      return validateStringList(value, { field: column.replace(/_/g, " "), maxItems: 30 });
+    case "description":
+    case "business_info":
+    case "client_history":
+    case "retention_growth_next_action":
+      return normalizeOptionalBusinessText(value, column.replace(/_/g, " "), 3000);
+    case "linkedin_summary":
+    case "website_summary":
+      return normalizeOptionalBusinessText(value, column.replace(/_/g, " "), 6000);
+    case "revenue":
+    case "mrr_arr":
+    case "primary_contact_name":
+    case "primary_contact_role":
+    case "employees":
+    case "region":
+    case "engagement_tenure":
+    case "main_business_flow":
+    case "contract_duration":
+    case "last_touch":
+    case "retention_growth_quadrant":
+      return normalizeOptionalBusinessText(value, column.replace(/_/g, " "), 500);
+    default:
+      return value;
+  }
+}
+
 function mapFlatAccount(r) {
   return {
     id: r.id,
@@ -644,12 +840,19 @@ export async function updateDashboardTaskComplete(taskId, complete, healthMetric
 }
 
 export async function createAccountActionItemTask(input) {
-  const accountId = input.accountId;
-  const title = String(input.title ?? "").trim();
-  if (!accountId) throw new Error("Account is required before creating an action item.");
-  if (!title) throw new Error("Action item title is required.");
+  const accountId = validateId(input.accountId, "Account ID");
+  const title = validateText(input.title, {
+    field: "Action item title",
+    required: true,
+    maxLength: 240,
+    meaningful: true,
+  });
 
-  const description = buildActionItemTaskDescription(input);
+  const description = validateText(buildActionItemTaskDescription(input), {
+    field: "Action item description",
+    maxLength: 2000,
+    multiline: true,
+  });
   const { data: existingRows, error: existingError } = await supabase
     .from("tasks")
     .select("*")
@@ -1060,69 +1263,169 @@ export async function deleteAccount(accountId) {
 }
 // --- update account KAM assignment -------------------------------------------
 export async function updateAccountKam(accountId, kamId) {
+  const id = validateId(accountId, "Account ID");
+  const assignedKamId = kamId ? validateId(kamId, "Assigned KAM") : null;
   const { data: current, error: currentError } = await supabase
     .from("accounts")
     .select("assigned_kam_id")
-    .eq("id", accountId)
+    .eq("id", id)
     .maybeSingle();
   if (currentError) throw currentError;
 
+  const update = await repairAccountConstraintUpdates(supabase, id, { assigned_kam_id: assignedKamId });
   const { error } = await supabase
     .from("accounts")
-    .update({ assigned_kam_id: kamId })
-    .eq("id", accountId);
+    .update(update)
+    .eq("id", id);
   if (error) throw error;
 
-  if (kamId && current?.assigned_kam_id !== kamId) {
-    await createAccountAssignmentNotifications(supabase, { accountId, kamId }).catch(() => null);
+  if (assignedKamId && current?.assigned_kam_id !== assignedKamId) {
+    await createAccountAssignmentNotifications(supabase, { accountId: id, kamId: assignedKamId }).catch(() => null);
   }
 }
+
+function normalizeKpiField(field = {}, sectionName, index) {
+  return {
+    ...field,
+    id: validateText(field.id, {
+      field: `${sectionName} criterion ID`,
+      required: true,
+      maxLength: 120,
+      meaningful: true,
+    }),
+    label: validateText(field.label, {
+      field: `${sectionName} criterion ${index + 1}`,
+      required: true,
+      maxLength: 240,
+      meaningful: true,
+    }),
+    weight: validateNumber(field.weight, {
+      field: `${sectionName} criterion weight`,
+      required: true,
+      min: 0,
+      max: 100,
+    }),
+    checked: normalizeBooleanInput(field.checked),
+  };
+}
+
+function normalizeKpiSections(kpiData) {
+  if (!Array.isArray(kpiData)) throw new Error("Score Marking Metrics sections are invalid.");
+  if (kpiData.length === 0) throw new Error("At least one Score Marking Metrics section is required.");
+  if (kpiData.length > 20) throw new Error("Score Marking Metrics supports up to 20 sections.");
+
+  return kpiData.map((section, sectionIndex) => {
+    const name = validateText(section.name, {
+      field: `Score Marking Metrics section ${sectionIndex + 1}`,
+      required: true,
+      maxLength: 160,
+      meaningful: true,
+    });
+    const fields = Array.isArray(section.fields) ? section.fields : [];
+    if (fields.length === 0) throw new Error(`${name} must have at least one criterion.`);
+    if (fields.length > 50) throw new Error(`${name} supports up to 50 criteria.`);
+
+    const normalizedFields = fields.map((field, fieldIndex) =>
+      normalizeKpiField(field, name, fieldIndex),
+    );
+    const totalWeight = normalizedFields.reduce((sum, field) => sum + Number(field.weight ?? 0), 0);
+    if (Math.round(totalWeight * 100) / 100 !== 100) {
+      throw new Error(`${name} weights must add up to 100%.`);
+    }
+
+    return {
+      ...section,
+      id: validateText(section.id, {
+        field: `${name} section ID`,
+        required: true,
+        maxLength: 120,
+        meaningful: true,
+      }),
+      name,
+      fields: normalizedFields,
+    };
+  });
+}
+
+function normalizeMetricUpdate(mu = {}) {
+  return {
+    id: validateId(mu.id, "Health metric ID"),
+    label: validateText(mu.label, {
+      field: "Health metric label",
+      required: true,
+      maxLength: 160,
+      meaningful: true,
+    }),
+    value: validateNumber(mu.value, {
+      field: "Health metric value",
+      required: true,
+      min: 0,
+      max: 10,
+    }),
+  };
+}
+
 // --- update health block (score + metrics + kpi checkbox state) --------------
-export async function updateHealthBlock(accountId, area, score, metricUpdates, kpiData) {
+export async function updateHealthBlock(accountId, area, score, metricUpdates = [], kpiData = []) {
+  const id = validateId(accountId, "Account ID");
+  const normalizedArea = validateEnum(area, new Set(HEALTH_AREAS), "Health area");
+  const normalizedScore = validateNumber(score, {
+    field: "Health score",
+    required: true,
+    min: 0,
+    max: 10,
+  });
+  const normalizedMetricUpdates = (metricUpdates ?? []).map(normalizeMetricUpdate);
+  const normalizedKpiData = normalizeKpiSections(kpiData);
+
   // Use maybeSingle so missing rows don't throw
   const { data: hs } = await supabase
     .from("health_scores")
     .select("id")
-    .eq("account_id", accountId)
-    .eq("area", area)
+    .eq("account_id", id)
+    .eq("area", normalizedArea)
     .maybeSingle();
 
   if (hs) {
     // Row exists - update score + kpi_data
     const { error } = await supabase
       .from("health_scores")
-      .update({ score, kpi_data: kpiData })
+      .update({ score: normalizedScore, kpi_data: normalizedKpiData })
       .eq("id", hs.id);
     if (error) throw error;
   } else {
     // No row yet (new account) - insert one
     const { error } = await supabase
       .from("health_scores")
-      .insert({ account_id: accountId, area, score, kpi_data: kpiData });
+      .insert({ account_id: id, area: normalizedArea, score: normalizedScore, kpi_data: normalizedKpiData });
     if (error) throw error;
   }
 
   // Update existing metric rows (only present for accounts seeded with metrics)
-  if (metricUpdates.length > 0) {
-    await Promise.all(
-      metricUpdates.map((mu) =>
+  if (normalizedMetricUpdates.length > 0) {
+    const metricResults = await Promise.all(
+      normalizedMetricUpdates.map((mu) =>
         supabase
           .from("health_metrics")
           .update({ label: mu.label, value: mu.value })
           .eq("id", mu.id),
       ),
     );
+    const metricError = metricResults.find((result) => result.error)?.error;
+    if (metricError) throw metricError;
   }
 
   // Recompute accounts.health as the average of all area scores (×10 to stay on 0-100 scale)
   const { data: allAreaScores } = await supabase
     .from("health_scores")
     .select("score")
-    .eq("account_id", accountId);
+    .eq("account_id", id);
   if (allAreaScores && allAreaScores.length > 0) {
     const avg = allAreaScores.reduce((acc, s) => acc + (s.score ?? 0), 0) / allAreaScores.length;
     const newHealth = parseFloat((avg * 10).toFixed(1));
-    await supabase.from("accounts").update({ health: newHealth }).eq("id", accountId);
+    const healthUpdate = await repairAccountConstraintUpdates(supabase, id, { health: newHealth });
+    const { error: accountHealthError } = await supabase.from("accounts").update(healthUpdate).eq("id", id);
+    if (accountHealthError) throw accountHealthError;
   }
 }
 // --- KPI section templates used when creating new accounts -------------------
@@ -1352,50 +1655,51 @@ const HEALTH_AREAS = [
 
 // --- create new account -------------------------------------------------------
 export async function createAccount(data) {
+  const input = normalizeAccountCreateInput(data);
   const { error } = await supabase.from("accounts").insert([
     {
-      id: data.id,
-      name: data.name,
-      short_code: data.shortCode,
-      industry: data.industry,
-      tier: data.tier,
+      id: input.id,
+      name: input.name,
+      short_code: input.shortCode,
+      industry: input.industry,
+      tier: input.tier,
       health: 50,
       trend: 0,
-      contract_value: data.contractValue,
-      arr: data.arr,
-      renewal_days: data.renewalDays || null,
-      renewal_date: data.contractRenewalDate || null,
-      contract_duration: data.contractDuration || null,
-      contract_type: data.contractType,
+      contract_value: input.contractValue,
+      arr: input.arr,
+      renewal_days: input.renewalDays,
+      renewal_date: input.contractRenewalDate,
+      contract_duration: input.contractDuration,
+      contract_type: input.contractType,
       last_touch: "Just now",
       status: "healthy",
       retention_risk: "Low",
       growth_upside: 0,
       white_space_count: 0,
       is_startup: false,
-      region: data.region || null,
-      primary_contact_name: data.primaryContactName || null,
-      linkedin_url: data.linkedinUrl || null,
-      linkedin_summary: data.linkedinSummary || null,
-      ...(data.linkedinSummaryUpdatedAt
-        ? { linkedin_summary_updated_at: data.linkedinSummaryUpdatedAt }
+      region: input.region,
+      primary_contact_name: input.primaryContactName,
+      linkedin_url: input.linkedinUrl,
+      linkedin_summary: input.linkedinSummary,
+      ...(input.linkedinSummaryUpdatedAt
+        ? { linkedin_summary_updated_at: input.linkedinSummaryUpdatedAt }
         : {}),
-      ...(data.websiteUrl ? { website_url: data.websiteUrl } : {}),
-      ...(data.websiteSummary ? { website_summary: data.websiteSummary } : {}),
-      ...(data.websiteSummaryUpdatedAt
-        ? { website_summary_updated_at: data.websiteSummaryUpdatedAt }
+      ...(input.websiteUrl ? { website_url: input.websiteUrl } : {}),
+      ...(input.websiteSummary ? { website_summary: input.websiteSummary } : {}),
+      ...(input.websiteSummaryUpdatedAt
+        ? { website_summary_updated_at: input.websiteSummaryUpdatedAt }
         : {}),
-      assigned_kam_id: data.assignedKamId || null,
+      assigned_kam_id: input.assignedKamId,
     },
   ]);
   if (error) throw error;
 
   const { error: contractError } = await supabase.from("contract_details").upsert(
     {
-      account_id: data.id,
-      type: data.contractType,
-      duration: data.contractDuration || null,
-      renewal_date: data.contractRenewalDate || null,
+      account_id: input.id,
+      type: input.contractType,
+      duration: input.contractDuration,
+      renewal_date: input.contractRenewalDate,
     },
     { onConflict: "account_id" },
   );
@@ -1404,7 +1708,7 @@ export async function createAccount(data) {
   // Pre-populate health_scores for all 8 areas so KPI sections show immediately
   const { error: hsError } = await supabase.from("health_scores").insert(
     HEALTH_AREAS.map((area) => ({
-      account_id: data.id,
+      account_id: input.id,
       area,
       score: 0,
       kpi_data: buildNewAccountKpiData(area),
@@ -1412,14 +1716,14 @@ export async function createAccount(data) {
   );
   if (hsError) throw hsError;
 
-  if (data.assignedKamId) {
+  if (input.assignedKamId) {
     await createAccountAssignmentNotifications(supabase, {
-      accountId: data.id,
-      kamId: data.assignedKamId,
+      accountId: input.id,
+      kamId: input.assignedKamId,
     }).catch(() => null);
   }
 
-  if (data.contractRenewalDate) {
+  if (input.contractRenewalDate) {
     await ensureContractRenewalNotifications(supabase).catch(() => null);
   }
 }
@@ -1434,28 +1738,67 @@ const CONTRACT_DETAIL_UPDATE_COLUMNS = new Set([
   "critical_resources",
   "customer_feedback",
 ]);
+
+function normalizeContractDetailUpdateValue(column, value) {
+  switch (column) {
+    case "auto_renew":
+    case "non_terminator":
+    case "min_one_year":
+    case "backup_exists":
+      return normalizeBooleanInput(value);
+    case "critical_resources":
+      return validateNumber(value, {
+        field: "Critical resources",
+        min: 0,
+        max: 100000,
+        integer: true,
+        defaultValue: 0,
+      });
+    case "price_hike":
+      return validateText(value, { field: "Price hike", maxLength: 120 });
+    case "customer_feedback":
+      return normalizeOptionalBusinessText(value, "Customer feedback", 3000);
+    default:
+      return value;
+  }
+}
+
+function normalizeKycUpdatePayload(updates = {}) {
+  return Object.fromEntries(
+    Object.entries(updates).map(([column, value]) => [
+      column,
+      CONTRACT_DETAIL_UPDATE_COLUMNS.has(column)
+        ? normalizeContractDetailUpdateValue(column, value)
+        : normalizeAccountUpdateValue(column, value),
+    ]),
+  );
+}
+
 export async function updateAccountKyc(accountId, updates) {
+  const id = validateId(accountId, "Account ID");
+  const normalizedUpdates = normalizeKycUpdatePayload(updates);
   const accountUpdates = Object.fromEntries(
-    Object.entries(updates).filter(([key]) => !CONTRACT_DETAIL_UPDATE_COLUMNS.has(key)),
+    Object.entries(normalizedUpdates).filter(([key]) => !CONTRACT_DETAIL_UPDATE_COLUMNS.has(key)),
   );
   if (Object.keys(accountUpdates).length > 0) {
-    const { error } = await supabase.from("accounts").update(accountUpdates).eq("id", accountId);
+    const repairedAccountUpdates = await repairAccountConstraintUpdates(supabase, id, accountUpdates);
+    const { error } = await supabase.from("accounts").update(repairedAccountUpdates).eq("id", id);
     if (error) throw error;
   }
 
-  const contractUpdates = { account_id: accountId };
-  if (Object.prototype.hasOwnProperty.call(updates, "contract_type")) {
-    contractUpdates.type = updates.contract_type;
+  const contractUpdates = { account_id: id };
+  if (Object.prototype.hasOwnProperty.call(normalizedUpdates, "contract_type")) {
+    contractUpdates.type = normalizedUpdates.contract_type;
   }
-  if (Object.prototype.hasOwnProperty.call(updates, "contract_duration")) contractUpdates.duration = updates.contract_duration;
+  if (Object.prototype.hasOwnProperty.call(normalizedUpdates, "contract_duration")) contractUpdates.duration = normalizedUpdates.contract_duration;
   if (
-    Object.prototype.hasOwnProperty.call(updates, "renewal_date") ||
-    Object.prototype.hasOwnProperty.call(updates, "contract_renewal_date")
+    Object.prototype.hasOwnProperty.call(normalizedUpdates, "renewal_date") ||
+    Object.prototype.hasOwnProperty.call(normalizedUpdates, "contract_renewal_date")
   ) {
-    contractUpdates.renewal_date = updates.renewal_date ?? updates.contract_renewal_date;
+    contractUpdates.renewal_date = normalizedUpdates.renewal_date ?? normalizedUpdates.contract_renewal_date;
   }
   CONTRACT_DETAIL_UPDATE_COLUMNS.forEach((column) => {
-    if (Object.prototype.hasOwnProperty.call(updates, column)) contractUpdates[column] = updates[column];
+    if (Object.prototype.hasOwnProperty.call(normalizedUpdates, column)) contractUpdates[column] = normalizedUpdates[column];
   });
   if (Object.keys(contractUpdates).length > 1) {
     contractUpdates.updated_at = new Date().toISOString();
@@ -1466,8 +1809,8 @@ export async function updateAccountKyc(accountId, updates) {
   }
 
   if (
-    Object.prototype.hasOwnProperty.call(updates, "renewal_date") ||
-    Object.prototype.hasOwnProperty.call(updates, "contract_renewal_date")
+    Object.prototype.hasOwnProperty.call(normalizedUpdates, "renewal_date") ||
+    Object.prototype.hasOwnProperty.call(normalizedUpdates, "contract_renewal_date")
   ) {
     await ensureContractRenewalNotifications(supabase).catch(() => null);
   }
@@ -1552,15 +1895,60 @@ function normalizeStakeholderInfluence(value) {
   return STAKEHOLDER_INFLUENCE_VALUES.has(value) ? value : "Influencer";
 }
 
-function normalizeStakeholderPayload(values = {}) {
-  return {
-    name: normalizeStakeholderText(values.name),
-    role: normalizeStakeholderText(values.role),
-    influence: normalizeStakeholderInfluence(values.influence),
-    email: normalizeStakeholderText(values.email),
-    phone: normalizeStakeholderText(values.phone),
-    last_contact: normalizeStakeholderText(values.lastContact ?? values.last_contact),
-  };
+function normalizeStakeholderName(value, required) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  const name = validateText(text, {
+    field: "Stakeholder name",
+    required,
+    maxLength: 160,
+    meaningful: Boolean(text) || required,
+  });
+  if (name && !/^\p{L}+(?: \p{L}+)*$/u.test(name)) {
+    throw new Error("Stakeholder name can contain letters and spaces only.");
+  }
+  return name;
+}
+
+function hasOwnField(object, key) {
+  return Object.prototype.hasOwnProperty.call(object ?? {}, key);
+}
+
+function hasAnyOwnField(object, keys) {
+  return keys.some((key) => hasOwnField(object, key));
+}
+
+function normalizeStakeholderPayload(values = {}, options = {}) {
+  const { requireCoreFields = false } = options;
+  const payload = {};
+
+  if (requireCoreFields || hasOwnField(values, "name")) {
+    payload.name = normalizeStakeholderName(values.name, requireCoreFields);
+  }
+  if (requireCoreFields || hasOwnField(values, "role")) {
+    payload.role = validateText(values.role, {
+      field: "Stakeholder role",
+      required: requireCoreFields,
+      maxLength: 160,
+      meaningful: Boolean(values.role) || requireCoreFields,
+    });
+  }
+  if (requireCoreFields || hasOwnField(values, "influence")) {
+    payload.influence = normalizeStakeholderInfluence(values.influence);
+  }
+  if (hasOwnField(values, "email")) {
+    payload.email = validateEmail(values.email, "Stakeholder email");
+  }
+  if (hasOwnField(values, "phone")) {
+    payload.phone = validatePhone(values.phone, "Stakeholder phone");
+  }
+  if (hasAnyOwnField(values, ["lastContact", "last_contact"])) {
+    payload.last_contact = validateDate(
+      values.lastContact ?? values.last_contact,
+      "Last contact date",
+    );
+  }
+
+  return payload;
 }
 
 function mapStakeholderRow(row) {
@@ -1579,7 +1967,7 @@ export async function createStakeholder(accountId, values) {
   const id = normalizeStakeholderText(accountId);
   if (!id) throw new Error("Account id is required.");
 
-  const payload = normalizeStakeholderPayload(values);
+  const payload = normalizeStakeholderPayload(values, { requireCoreFields: true });
   if (!payload.name) throw new Error("Stakeholder name is required.");
   if (!payload.role) throw new Error("Stakeholder role is required.");
 
@@ -1600,8 +1988,17 @@ export async function updateStakeholder(stakeholderId, values) {
   if (!id) throw new Error("Stakeholder id is required.");
 
   const payload = normalizeStakeholderPayload(values);
-  if (!payload.name) throw new Error("Stakeholder name is required.");
-  if (!payload.role) throw new Error("Stakeholder role is required.");
+  if (hasOwnField(values, "name") && !payload.name) {
+    throw new Error("Stakeholder name is required.");
+  }
+  if (hasOwnField(values, "role") && !payload.role) {
+    throw new Error("Stakeholder role is required.");
+  }
+  if (Object.keys(payload).length === 0) {
+    const { data, error } = await supabase.from("stakeholders").select("*").eq("id", id).single();
+    if (error) throw error;
+    return mapStakeholderRow(data);
+  }
 
   const { data, error } = await supabase
     .from("stakeholders")
@@ -1780,16 +2177,41 @@ export async function upsertOpportunitiesFromMeetingAgent({
 }) {
   if (!opportunities?.length) return [];
 
-  const rows = opportunities.map((opportunity) => ({
-    id: opportunity.id,
-    account_id: accountId,
-    title: opportunity.title,
-    source: opportunity.source,
-    signal_date: opportunity.signalDate,
-    potential: opportunity.potential ?? null,
-    confidence: opportunity.confidence ?? "Medium",
-    next_step: opportunity.nextStep,
-  }));
+  const id = validateId(accountId, "Account ID");
+  const rows = opportunities
+    .map((opportunity) => {
+      try {
+        return {
+          id: validateText(opportunity.id, {
+            field: "Opportunity ID",
+            required: true,
+            maxLength: 160,
+            meaningful: true,
+          }),
+          account_id: id,
+          title: validateText(opportunity.title, {
+            field: "Opportunity title",
+            required: true,
+            maxLength: 240,
+            meaningful: true,
+          }),
+          source: normalizeOptionalBusinessText(opportunity.source, "Opportunity source", 240),
+          signal_date: validateDate(opportunity.signalDate, "Opportunity signal date"),
+          potential: validateMoney(opportunity.potential, "Opportunity potential"),
+          confidence: validateEnum(
+            opportunity.confidence ?? "Medium",
+            OPPORTUNITY_CONFIDENCE_VALUES,
+            "Opportunity confidence",
+          ),
+          next_step: normalizeOptionalBusinessText(opportunity.nextStep, "Opportunity next step", 1200),
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  if (!rows.length) return [];
 
   const { data, error } = await supabase
     .from("opportunities")
@@ -1807,7 +2229,7 @@ export async function upsertOpportunitiesFromMeetingAgent({
     nextStep: o.next_step ?? "",
   }));
   await logAccountChanges(
-    accountId,
+    id,
     savedOpportunities.map((opportunity) => ({
       field: "Opportunity saved",
       oldValue: null,
@@ -1890,9 +2312,10 @@ export async function refreshAccountRetentionGrowthScoring(accountId, editedBy =
 
   const model = buildRetentionGrowthTabModel({ account, opportunities, escalations });
   const update = buildAccountRetentionGrowthUpdate({ model, opportunities, escalations });
+  const repairedUpdate = await repairAccountConstraintUpdates(supabase, accountId, update);
   const { data, error } = await supabase
     .from("accounts")
-    .update(update)
+    .update(repairedUpdate)
     .eq("id", accountId)
     .select("*")
     .single();
@@ -1998,39 +2421,37 @@ export async function fetchContracts(opts) {
   });
 }
 
-const CONTRACT_TYPE_VALUES = new Set(["Staff Augmented", "Time Based", "Retainer", "Project"]);
-
 function normalizeContractText(value) {
-  return String(value ?? "").trim();
+  return validateText(value, {
+    field: "Contract field",
+    maxLength: 500,
+    multiline: true,
+    emptyAsNull: false,
+  });
 }
 
 function normalizeContractDate(value) {
-  const text = normalizeContractText(value);
-  return text ? text.slice(0, 10) : null;
+  return validateDate(value ? String(value).slice(0, 10) : value, "Contract renewal date");
 }
 
 function normalizeContractMoney(value) {
-  const amount = Number(String(value ?? "").replace(/[$,\s]/g, ""));
-  if (!Number.isFinite(amount) || amount < 0) throw new Error("Contract value must be a valid number.");
-  return Math.round(amount);
+  return Math.round(validateMoney(String(value ?? "").replace(/[$,\s]/g, ""), "Contract value", { required: true }));
 }
 
 function normalizeContractScore(value) {
   if (value === "" || value === null || value === undefined) return null;
-  const score = Number(value);
-  if (!Number.isFinite(score) || score < 0 || score > 10) {
-    throw new Error("Process compliance must be between 0 and 10.");
-  }
+  const score = validateNumber(value, { field: "Process compliance", min: 0, max: 10 });
   return Number(score.toFixed(1));
 }
 
 function normalizeContractInteger(value) {
-  if (value === "" || value === null || value === undefined) return 0;
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) {
-    throw new Error("Critical resources must be a valid number.");
-  }
-  return Math.round(number);
+  return validateNumber(value, {
+    field: "Critical resources",
+    min: 0,
+    max: 100000,
+    integer: true,
+    defaultValue: 0,
+  });
 }
 
 function mapContractDetail(row) {
@@ -2209,7 +2630,12 @@ export async function updateContractDetail(accountId, values, options = {}) {
   const updates = normalizeContractDetailUpdates(values);
   const changes = buildContractHistoryChanges(current, updates);
 
-  const { error: accountError } = await supabase.from("accounts").update(updates.accountUpdates).eq("id", id);
+  const repairedAccountUpdates = await repairAccountConstraintUpdates(
+    supabase,
+    id,
+    updates.accountUpdates,
+  );
+  const { error: accountError } = await supabase.from("accounts").update(repairedAccountUpdates).eq("id", id);
   if (accountError) throw accountError;
 
   const { error: contractError } = await supabase
@@ -2716,21 +3142,80 @@ export async function fetchActivityRuleActivities(accountId) {
   return (rows ?? []).map((row) => mapActivityRuleActivity(row, evidenceByActivity.get(row.id)));
 }
 
+function normalizeActivityRuleInput(input = {}) {
+  const parameter = validateText(input.parameter, {
+    field: "Activity health area",
+    required: true,
+    maxLength: 120,
+    meaningful: true,
+  });
+  return {
+    ...input,
+    accountId: validateId(input.accountId, "Account ID"),
+    ruleId: validateText(input.ruleId, {
+      field: "Activity rule",
+      required: true,
+      maxLength: 80,
+      meaningful: true,
+    }),
+    parameter,
+    impactedMetric: validateText(input.impactedMetric ?? parameter, {
+      field: "Impacted metric",
+      required: true,
+      maxLength: 160,
+      meaningful: true,
+    }),
+    title: validateText(input.title, {
+      field: "Activity title",
+      required: true,
+      maxLength: 240,
+      meaningful: true,
+    }),
+    nextStep: validateText(input.nextStep, {
+      field: "Activity next step",
+      required: true,
+      maxLength: 1200,
+      meaningful: true,
+      multiline: true,
+    }),
+    owner: validateText(input.owner, {
+      field: "Activity owner",
+      maxLength: 160,
+      meaningful: Boolean(input.owner),
+    }),
+    dueDate: validateDate(input.dueDate, "Activity due date"),
+    rag: validateEnum(input.rag ?? "A", RAG_VALUES, "RAG status"),
+    weakSignal: normalizeOptionalBusinessText(input.weakSignal, "Weak signal", 1200),
+    currentValue: normalizeOptionalBusinessText(input.currentValue, "Current value", 500),
+    targetValue: normalizeOptionalBusinessText(input.targetValue, "Target value", 500),
+    expectedLift: normalizeOptionalBusinessText(input.expectedLift, "Expected lift", 120),
+    successCriteria: normalizeOptionalBusinessText(input.successCriteria, "Success criteria", 1200),
+    sourceType: validateText(input.sourceType, { field: "Activity source", maxLength: 80 }),
+    sourceRef: validateText(input.sourceRef, { field: "Activity source reference", maxLength: 240 }),
+    evidenceRequired: validateStringList(input.evidenceRequired ?? [], {
+      field: "Evidence requirement",
+      maxItems: 20,
+      maxLength: 180,
+    }),
+  };
+}
+
 export async function createActivityRuleActivity(input) {
+  const payload = normalizeActivityRuleInput(input);
   const now = new Date().toISOString();
 
-  if (input.sourceType !== "manual") {
+  if (payload.sourceType !== "manual") {
     const [{ data: existingRows, error: existingError }, { data: legacyRows, error: legacyError }] =
       await Promise.all([
         supabase
           .from("activity_rule_activities")
           .select("id,title,next_step,parameter")
-          .eq("account_id", input.accountId)
+          .eq("account_id", payload.accountId)
           .limit(200),
         supabase
           .from("activities")
           .select("id,title,area")
-          .eq("account_id", input.accountId)
+          .eq("account_id", payload.accountId)
           .limit(200),
       ]);
 
@@ -2746,7 +3231,7 @@ export async function createActivityRuleActivity(input) {
 
     if (
       [...(existingRows ?? []), ...legacyActivityRows].some((row) =>
-        isDuplicateRuleActivityInput(input, row),
+        isDuplicateRuleActivityInput(payload, row),
       )
     ) {
       throw new Error("This activity already exists.");
@@ -2756,39 +3241,39 @@ export async function createActivityRuleActivity(input) {
   const { data, error } = await supabase
     .from("activity_rule_activities")
     .insert({
-      account_id: input.accountId,
-      rule_id: input.ruleId,
-      parameter: input.parameter,
-      impacted_metric: input.impactedMetric,
-      title: input.title,
-      next_step: input.nextStep,
-      owner: input.owner,
-      due_date: input.dueDate || null,
-      rag: input.rag ?? "A",
+      account_id: payload.accountId,
+      rule_id: payload.ruleId,
+      parameter: payload.parameter,
+      impacted_metric: payload.impactedMetric,
+      title: payload.title,
+      next_step: payload.nextStep,
+      owner: payload.owner,
+      due_date: payload.dueDate || null,
+      rag: payload.rag,
       status: "Planned",
-      activity_score_pct: input.owner && input.dueDate ? 20 : 10,
-      weak_signal: input.weakSignal,
-      current_value: input.currentValue,
-      target_value: input.targetValue,
-      expected_lift: input.expectedLift,
-      success_criteria: input.successCriteria,
-      evidence_required: input.evidenceRequired ?? [],
-      trigger_logic: input.triggerLogic ?? {},
-      evidence_lift_policy: input.evidenceLiftPolicy ?? [],
-      activity_score_logic: input.activityScoreLogic ?? [],
-      approval_sla: input.approvalSla ?? {},
-      review_cadence: input.reviewCadence ?? {},
-      source_type: input.sourceType,
-      source_ref: input.sourceRef,
+      activity_score_pct: payload.owner && payload.dueDate ? 20 : 10,
+      weak_signal: payload.weakSignal,
+      current_value: payload.currentValue,
+      target_value: payload.targetValue,
+      expected_lift: payload.expectedLift,
+      success_criteria: payload.successCriteria,
+      evidence_required: payload.evidenceRequired,
+      trigger_logic: payload.triggerLogic ?? {},
+      evidence_lift_policy: payload.evidenceLiftPolicy ?? [],
+      activity_score_logic: payload.activityScoreLogic ?? [],
+      approval_sla: payload.approvalSla ?? {},
+      review_cadence: payload.reviewCadence ?? {},
+      source_type: payload.sourceType,
+      source_ref: payload.sourceRef,
       accepted_at: now,
-      planned_at: input.owner && input.dueDate ? now : null,
+      planned_at: payload.owner && payload.dueDate ? now : null,
       updated_at: now,
     })
     .select("*")
     .single();
   if (error) throw error;
   await createActionItemNotifications(supabase, {
-    accountId: input.accountId,
+    accountId: payload.accountId,
     actionItemId: data.id,
     title: data.title,
   }).catch(() => null);
@@ -2883,33 +3368,38 @@ export async function createActivityRuleActivitiesFromMeetingActions({
 }
 
 export async function rejectActivityRuleSuggestion(input) {
+  const payload = normalizeActivityRuleInput({
+    ...input,
+    nextStep: input.reason ?? input.nextStep ?? "Rejected by reviewer.",
+    owner: input.reviewer ?? input.owner,
+  });
   const now = new Date().toISOString();
   const { data, error } = await supabase
     .from("activity_rule_activities")
     .insert({
-      account_id: input.accountId,
-      rule_id: input.ruleId,
-      parameter: input.parameter,
-      impacted_metric: input.impactedMetric,
-      title: input.title,
-      next_step: input.reason,
-      owner: input.reviewer,
-      rag: input.rag ?? "A",
+      account_id: payload.accountId,
+      rule_id: payload.ruleId,
+      parameter: payload.parameter,
+      impacted_metric: payload.impactedMetric,
+      title: payload.title,
+      next_step: payload.nextStep,
+      owner: payload.owner,
+      rag: payload.rag,
       status: "Rejected",
       activity_score_pct: 0,
-      weak_signal: input.weakSignal,
-      current_value: input.currentValue,
-      target_value: input.targetValue,
-      expected_lift: input.expectedLift,
-      success_criteria: input.successCriteria,
-      evidence_required: input.evidenceRequired ?? [],
-      trigger_logic: input.triggerLogic ?? {},
-      evidence_lift_policy: input.evidenceLiftPolicy ?? [],
-      activity_score_logic: input.activityScoreLogic ?? [],
-      approval_sla: input.approvalSla ?? {},
-      review_cadence: input.reviewCadence ?? {},
-      source_type: input.sourceType,
-      source_ref: input.sourceRef,
+      weak_signal: payload.weakSignal,
+      current_value: payload.currentValue,
+      target_value: payload.targetValue,
+      expected_lift: payload.expectedLift,
+      success_criteria: payload.successCriteria,
+      evidence_required: payload.evidenceRequired,
+      trigger_logic: payload.triggerLogic ?? {},
+      evidence_lift_policy: payload.evidenceLiftPolicy ?? [],
+      activity_score_logic: payload.activityScoreLogic ?? [],
+      approval_sla: payload.approvalSla ?? {},
+      review_cadence: payload.reviewCadence ?? {},
+      source_type: payload.sourceType,
+      source_ref: payload.sourceRef,
       updated_at: now,
     })
     .select("*")
@@ -3269,24 +3759,41 @@ export async function fetchEducationLog(accountId) {
 }
 
 export async function saveEducationSession(session) {
+  const payload = {
+    accountId: validateId(session.accountId, "Account ID"),
+    date: validateDate(session.date, "Education date", { required: true }),
+    topic: validateText(session.topic, {
+      field: "Education topic",
+      required: true,
+      maxLength: 240,
+      meaningful: true,
+    }),
+    approach: normalizeOptionalBusinessText(session.approach, "Education approach", 1200),
+    outcome: normalizeOptionalBusinessText(session.outcome, "Education outcome", 1200),
+    editedBy: validateText(session.editedBy, {
+      field: "Edited by",
+      maxLength: 160,
+      meaningful: Boolean(session.editedBy),
+    }),
+  };
   const { error } = await supabase.from("education_log").insert({
-    account_id: session.accountId,
-    date: session.date,
-    topic: session.topic,
-    approach: session.approach ?? null,
-    outcome: session.outcome ?? null,
+    account_id: payload.accountId,
+    date: payload.date,
+    topic: payload.topic,
+    approach: payload.approach,
+    outcome: payload.outcome,
   });
   if (error) throw error;
   await logAccountChanges(
-    session.accountId,
+    payload.accountId,
     [
       {
         field: "Education record added",
         oldValue: null,
-        newValue: summarizeEducationHistory(session),
+        newValue: summarizeEducationHistory(payload),
       },
     ],
-    session.editedBy ?? "Unknown",
+    payload.editedBy ?? "Unknown",
   );
 }
 
@@ -3328,24 +3835,41 @@ export async function toggleEscalationActionItem(id, done, opts = {}) {
 
 // ─── create escalation (manual / runtime) ────────────────────────────────────
 export async function createEscalation(escalation) {
+  const payload = {
+    accountId: validateId(escalation.accountId, "Account ID"),
+    title: validateText(escalation.title, {
+      field: "Escalation title",
+      required: true,
+      maxLength: 240,
+      meaningful: true,
+    }),
+    priority: validateEnum(escalation.priority ?? "P2", ESCALATION_PRIORITY_VALUES, "Priority"),
+    description: normalizeOptionalBusinessText(escalation.description, "Escalation description", 3000),
+    rca: normalizeOptionalBusinessText(escalation.rca, "RCA", 3000),
+    actionItems: validateStringList(escalation.actionItems ?? [], {
+      field: "Escalation action item",
+      maxItems: 50,
+      maxLength: 240,
+    }),
+  };
   const id = `ESC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-  const slaHours = escalation.priority === "P1" ? 48 : escalation.priority === "P2" ? 72 : 120;
+  const slaHours = payload.priority === "P1" ? 48 : payload.priority === "P2" ? 72 : 120;
 
   const { error: escalErr } = await supabase.from("escalations").insert({
     id,
-    account_id: escalation.accountId,
-    title: escalation.title,
-    priority: escalation.priority,
-    description: escalation.description || null,
-    rca: escalation.rca || null,
+    account_id: payload.accountId,
+    title: payload.title,
+    priority: payload.priority,
+    description: payload.description,
+    rca: payload.rca,
     sla_remaining_hours: slaHours,
     opened_at: new Date().toISOString(),
   });
   if (escalErr) throw escalErr;
 
-  if (escalation.actionItems?.length) {
+  if (payload.actionItems.length) {
     const { error: aiErr } = await supabase.from("escalation_action_items").insert(
-      escalation.actionItems.map((label) => ({
+      payload.actionItems.map((label) => ({
         escalation_id: id,
         label,
         done: false,

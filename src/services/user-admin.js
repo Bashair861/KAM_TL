@@ -1,4 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
+import {
+  normalizeEmail,
+  normalizeId,
+  normalizeText,
+  normalizeUrl,
+} from "@/services/validation";
 
 const VALID_ROLES = new Set(["CEO", "Head of KAM", "KAM"]);
 
@@ -24,22 +30,24 @@ function readEnv(name) {
 
 function validateCreateUserInput(input) {
   if (!input || typeof input !== "object") throw new Error("Invalid user payload.");
-  const name = String(input.name ?? "").trim();
-  const email = String(input.email ?? "").trim().toLowerCase();
+  const name = normalizeText(input.name, {
+    field: "User name",
+    required: true,
+    maxLength: 160,
+    meaningful: true,
+  });
+  const email = normalizeEmail(input.email, "User email", { required: true });
   const role = normalizeRole(String(input.role ?? "KAM"));
   const accessToken = String(input.accessToken ?? "");
-  const redirectTo = String(input.redirectTo ?? "");
-  if (!name) throw new Error("User name is required.");
-  if (!email || !email.includes("@")) throw new Error("Valid email is required.");
+  const redirectTo = normalizeUrl(input.redirectTo, "Redirect URL", { allowLocalhost: true }) ?? "";
   if (!accessToken) throw new Error("You must be signed in to create users.");
   return { name, email, role, accessToken, redirectTo };
 }
 
 function validateDeleteUserInput(input) {
   if (!input || typeof input !== "object") throw new Error("Invalid user payload.");
-  const userId = String(input.userId ?? "").trim();
+  const userId = normalizeId(input.userId, "User id");
   const accessToken = String(input.accessToken ?? "");
-  if (!userId) throw new Error("User id is required.");
   if (!accessToken) throw new Error("You must be signed in to delete users.");
   return { userId, accessToken };
 }

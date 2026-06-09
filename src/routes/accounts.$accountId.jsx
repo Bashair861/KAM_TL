@@ -505,11 +505,12 @@ function normalizeOverviewNumber(value, fallback = null) {
   const text = String(value ?? "").trim().replace(/[$,]/g, "");
   if (!text) return fallback;
   const number = Number(text);
-  return Number.isFinite(number) ? number : fallback;
+  return Number.isFinite(number) ? number : text;
 }
 function normalizeOverviewInteger(value, fallback = null) {
   const number = normalizeOverviewNumber(value, fallback);
-  return number === null || number === undefined ? fallback : Math.trunc(number);
+  if (number === null || number === undefined) return fallback;
+  return Number.isInteger(number) ? number : String(value ?? "").trim();
 }
 function normalizeOverviewBoolean(value) {
   if (typeof value === "boolean") return value;
@@ -1171,29 +1172,32 @@ const STAKEHOLDER_INFLUENCE_OPTIONS = [
   "Influencer",
   "Blocker",
 ];
+function normalizeStakeholderNameInput(value) {
+  return String(value ?? "")
+    .replace(/[^\p{L} ]/gu, "")
+    .replace(/ {2,}/g, " ");
+}
 function createStakeholderForm(stakeholder = {}) {
   const influence = STAKEHOLDER_INFLUENCE_OPTIONS.includes(stakeholder.influence)
     ? stakeholder.influence
     : "Influencer";
   return {
-    name: stakeholder.name ?? "",
+    name: normalizeStakeholderNameInput(stakeholder.name),
     role: stakeholder.role ?? "",
     influence,
     email: stakeholder.email ?? "",
     phone: stakeholder.phone ?? "",
-    lastContact: normalizeDateValue(stakeholder.lastContact),
   };
 }
 function normalizeStakeholderForm(form) {
   return {
-    name: String(form.name ?? "").trim(),
+    name: normalizeStakeholderNameInput(form.name).trim(),
     role: String(form.role ?? "").trim(),
     influence: STAKEHOLDER_INFLUENCE_OPTIONS.includes(form.influence)
       ? form.influence
       : "Influencer",
     email: String(form.email ?? "").trim(),
     phone: String(form.phone ?? "").trim(),
-    lastContact: normalizeDateValue(form.lastContact),
   };
 }
 function summarizeStakeholderForHistory(stakeholder) {
@@ -5927,8 +5931,11 @@ function StakeholderDialog({
                 <Input
                   id="stakeholder-name"
                   value={form.name}
-                  onChange={(event) => updateField("name", event.target.value)}
+                  onChange={(event) =>
+                    updateField("name", normalizeStakeholderNameInput(event.target.value))
+                  }
                   placeholder="Contact name"
+                  title="Use letters and spaces only."
                   required
                 />
               </div>
