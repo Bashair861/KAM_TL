@@ -272,7 +272,7 @@ PHASE 3 — Write Operations (partial — in progress)
       - Fixed field doubling bug: each field initialised from its own DB column only
       - Dirty state tracking: savedSnapshot + isDirty comparison
       - Fixed save bar: fixed bottom positioning, auto-hides 3 seconds after save
-  ✓ KPI Editor (Score Marking Matrices tab) persists to Supabase
+  ✓ KPI Editor (Score Marking Metrics tab) persists to Supabase
       - updateHealthBlock() updates health_scores.score + kpi_data + health_metrics
       - kpi_data (jsonb) stores full section/field state including checkbox states
       - On re-open: loads from kpiData if present (restores exact saved state)

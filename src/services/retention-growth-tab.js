@@ -787,8 +787,8 @@ function buildRetentionSignals(account, escalations) {
         "Align a recovery story that addresses delivery sentiment and sponsor confidence",
       evidence: [
         buildEvidence({
-          source: "Score Marking Matrics",
-          sourceType: "Score Marking Matrics",
+          source: "Score Marking Metrics",
+          sourceType: "Score Marking Metrics",
           date: "Current score snapshot",
           excerpt: `CSAT is ${account.csat?.score ?? "n/a"}/10 and risk score is ${account.riskScoring?.score ?? "n/a"}/10.`,
           reason:
@@ -810,8 +810,8 @@ function buildRetentionSignals(account, escalations) {
         "Prepare a value and differentiation brief before competitive pressure grows",
       evidence: [
         buildEvidence({
-          source: "Score Marking Matrics",
-          sourceType: "Score Marking Matrics",
+          source: "Score Marking Metrics",
+          sourceType: "Score Marking Metrics",
           date: "Current score snapshot",
           excerpt: `${competitorMetric.label} is at ${competitorMetric.value}/10${competitorMetric.hint ? ` (${competitorMetric.hint})` : ""}.`,
           reason:

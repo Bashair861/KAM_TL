@@ -575,7 +575,7 @@ Tab 1: Overview (KYC)
     CharterMappingDialog, then Apply Selected updates local KYC state.
   - Charter DB-backed values persist only after the user clicks Save KYC.
 
-Tab 2: Score Marking Matrices
+Tab 2: Score Marking Metrics
   - Shows 8 health blocks (relationship, project, white_space, contract,
     csat, risk, resource, financial)
   - Each expandable via KPI Editor Modal

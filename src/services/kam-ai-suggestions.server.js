@@ -48,7 +48,7 @@ const SUGGESTION_SCHEMA = {
 };
 
 const SYSTEM_PROMPT = [
-  "You are a KAM strategy advisor. Generate new strategic recommendations for this account. Do not copy Score Marking Matrics items. Do not copy existing activities. Use Score Marking Matrics only to understand how score is calculated. Return only new actionable activities that a KAM can perform to improve the score.",
+  "You are a KAM strategy advisor. Generate new strategic recommendations for this account. Do not copy Score Marking Metrics items. Do not copy existing activities. Use Score Marking Metrics only to understand how score is calculated. Return only new actionable activities that a KAM can perform to improve the score.",
   "You are an AI Agent for a Key Account Management system.",
   "Your job is to generate account-specific activities that can increase account score.",
   "Use the supplied account, score, task, opportunity, risk, activity, meeting, and rule context.",
@@ -231,7 +231,7 @@ function compactMetrics(block) {
   };
 }
 
-function buildScoreMatricsContext(account, model) {
+function buildScoreMetricsContext(account, model) {
   return {
     overallHealth: account.health,
     trend: account.trend,
@@ -290,7 +290,7 @@ function buildAgentPayload({
         lastContact: stakeholder.lastContact,
       })),
     },
-    scoreMarkingMatrics: buildScoreMatricsContext(account, model),
+    scoreMarkingMetrics: buildScoreMetricsContext(account, model),
     scoreHistory: scoreHistory.slice(0, MAX_CONTEXT_ITEMS).map((row) => ({
       parameter: row.parameter,
       metric: row.metric,

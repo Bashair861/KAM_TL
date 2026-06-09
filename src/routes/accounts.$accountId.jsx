@@ -93,6 +93,12 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { askAccountAi } from "@/services/ai";
 import {
   ArrowLeft,
@@ -124,6 +130,7 @@ import {
   History,
   RefreshCw,
   SlidersHorizontal,
+  Info,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
@@ -150,7 +157,7 @@ export const Route = createFileRoute("/accounts/$accountId")({
 });
 const TABS = [
   "Overview",
-  "Score Marking Matrices",
+  "Score Marking Metrics",
   "Activity to Increase Score",
   "Opportunities",
   "Retention VS Growth",
@@ -262,6 +269,20 @@ const KYC_EXTRACTABLE_FIELD_KEYS = KYC_CHARTER_FIELD_KEYS;
 const ACCOUNT_TIER_OPTIONS = ["Enterprise", "Growth", "Strategic"];
 const ACCOUNT_STATUS_OPTIONS = ["healthy", "at-risk", "critical"];
 const CONTRACT_TYPE_OPTIONS = ["Staff Augmented", "Time Based", "Retainer", "Project"];
+const ACCOUNT_SNAPSHOT_CARD_INFO = {
+  health: [
+    "Calculated when health areas are saved by averaging all health scores exist in Score Marking Metrics.",
+  ],
+  contractValue: [
+    "This is the stored commercial contract value for the account. It can be updated from Account Details or Salesforce sync.",
+  ],
+  retentionRisk: [
+    "Refreshed by the Retention/Growth scoring flow as Low, Medium, or High using retention health, renewal timing, risk, relationship, CSAT, financial health, escalations, and risk signals.",
+  ],
+  growthUpside: [
+    "Calculated by the Retention/Growth flow as the highest known value from recommended offer potential, applicable whitespace service potential, or stored growth upside.",
+  ],
+};
 const OVERVIEW_SECTION_STORAGE_VERSION = "v1";
 const OVERVIEW_KYC_FIELD_CONFIG = [
   { id: "accountStatus", label: KYC_FORM_FIELDS.accountStatus.label, icon: "check", defaultVisible: true },
@@ -1962,6 +1983,32 @@ function sowSummary(fields) {
   return labels.length ? labels.join(", ") : "No supported fields";
 }
 
+function SnapshotInfoIcon({ label, lines }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          aria-label={`${label} information`}
+        >
+          <Info className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end" className="max-w-xs whitespace-normal text-left">
+        <div className="space-y-1.5">
+          <p className="font-semibold">{label}</p>
+          {lines.map((line) => (
+            <p key={line} className="leading-relaxed">
+              {line}
+            </p>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function AccountDetailPage() {
   const { account } = Route.useLoaderData();
   const { profile, session } = useAuth();
@@ -2114,94 +2161,117 @@ function AccountDetailPage() {
 
       <div className="px-4 md:px-8 max-w-7xl w-full mx-auto">
         {/* Snapshot */}
-        <section className="grid grid-cols-1 lg:grid-cols-4 gap-6 mt-8">
-          <div className="bg-card p-6 rounded-xl border shadow-sm lg:col-span-1 flex flex-col items-center text-center">
-            <div className="relative size-32 flex items-center justify-center mb-3">
-              <svg className="absolute inset-0 -rotate-90" viewBox="0 0 100 100">
-                <circle
-                  cx="50"
-                  cy="50"
-                  r="42"
-                  fill="none"
-                  stroke="oklch(0.929 0.013 255)"
-                  strokeWidth="10"
-                />
-                <circle
-                  cx="50"
-                  cy="50"
-                  r="42"
-                  fill="none"
-                  stroke="oklch(0.7 0.17 152)"
-                  strokeWidth="10"
-                  strokeDasharray={`${(account.health / 100) * 264} 264`}
-                  strokeLinecap="round"
-                />
-              </svg>
-              <div>
-                <div className="text-3xl font-bold">{account.health}</div>
-                <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
-                  Health
+        <TooltipProvider delayDuration={150}>
+          <section className="grid grid-cols-1 lg:grid-cols-4 gap-6 mt-8">
+            <div className="relative bg-card p-6 rounded-xl border shadow-sm lg:col-span-1 flex flex-col items-center text-center">
+              <div className="absolute right-4 top-4">
+                <SnapshotInfoIcon label="Health" lines={ACCOUNT_SNAPSHOT_CARD_INFO.health} />
+              </div>
+              <div className="relative size-32 flex items-center justify-center mb-3">
+                <svg className="absolute inset-0 -rotate-90" viewBox="0 0 100 100">
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r="42"
+                    fill="none"
+                    stroke="oklch(0.929 0.013 255)"
+                    strokeWidth="10"
+                  />
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r="42"
+                    fill="none"
+                    stroke="oklch(0.7 0.17 152)"
+                    strokeWidth="10"
+                    strokeDasharray={`${(account.health / 100) * 264} 264`}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div>
+                  <div className="text-3xl font-bold">{account.health}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
+                    Health
+                  </div>
                 </div>
               </div>
+              <span
+                className={`text-xs font-medium ${account.trend >= 0 ? "text-success" : "text-crit"} flex items-center gap-1`}
+              >
+                {account.trend >= 0 ? (
+                  <TrendingUp className="size-3" />
+                ) : (
+                  <TrendingDown className="size-3" />
+                )}
+                {account.trend >= 0 ? "+" : ""}
+                {account.trend}% this quarter
+              </span>
             </div>
-            <span
-              className={`text-xs font-medium ${account.trend >= 0 ? "text-success" : "text-crit"} flex items-center gap-1`}
-            >
-              {account.trend >= 0 ? (
-                <TrendingUp className="size-3" />
-              ) : (
-                <TrendingDown className="size-3" />
-              )}
-              {account.trend >= 0 ? "+" : ""}
-              {account.trend}% this quarter
-            </span>
-          </div>
 
-          <div className="bg-card p-6 rounded-xl border shadow-sm">
-            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider mb-1">
-              Contract Value
-            </p>
-            <span className="text-3xl font-bold">{formatCurrency(account.contractValue)}</span>
-            <p className="text-xs text-muted-foreground mt-2">
-              {account.contractRenewalDate
-                ? `Renews ${formatDisplayDate(account.contractRenewalDate)}`
-                : "Renewal date not set"}
-            </p>
-            <p className="text-[11px] text-muted-foreground mt-1">{account.contractType}</p>
-          </div>
+            <div className="bg-card p-6 rounded-xl border shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+                  Contract Value
+                </p>
+                <SnapshotInfoIcon
+                  label="Contract Value"
+                  lines={ACCOUNT_SNAPSHOT_CARD_INFO.contractValue}
+                />
+              </div>
+              <span className="text-3xl font-bold">{formatCurrency(account.contractValue)}</span>
+              <p className="text-xs text-muted-foreground mt-2">
+                {account.contractRenewalDate
+                  ? `Renews ${formatDisplayDate(account.contractRenewalDate)}`
+                  : "Renewal date not set"}
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-1">{account.contractType}</p>
+            </div>
 
-          <div className="bg-card p-6 rounded-xl border shadow-sm">
-            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider mb-1">
-              Retention Risk
-            </p>
-            <span
-              className={`text-3xl font-bold uppercase ${
-                account.retentionRisk === "Low"
-                  ? "text-success"
-                  : account.retentionRisk === "Medium"
-                    ? "text-warn"
-                    : "text-crit"
-              }`}
-            >
-              {account.retentionRisk}
-            </span>
-            <p className="text-xs text-muted-foreground mt-2">
-              CSAT {account.csat.score.toFixed(1)}/10
-            </p>
-          </div>
+            <div className="bg-card p-6 rounded-xl border shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+                  Retention Risk
+                </p>
+                <SnapshotInfoIcon
+                  label="Retention Risk"
+                  lines={ACCOUNT_SNAPSHOT_CARD_INFO.retentionRisk}
+                />
+              </div>
+              <span
+                className={`text-3xl font-bold uppercase ${
+                  account.retentionRisk === "Low"
+                    ? "text-success"
+                    : account.retentionRisk === "Medium"
+                      ? "text-warn"
+                      : "text-crit"
+                }`}
+              >
+                {account.retentionRisk}
+              </span>
+              <p className="text-xs text-muted-foreground mt-2">
+                CSAT {account.csat.score.toFixed(1)}/10
+              </p>
+            </div>
 
-          <div className="bg-card p-6 rounded-xl border shadow-sm">
-            <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider mb-1">
-              Growth Upside
-            </p>
-            <span className="text-3xl font-bold text-accent">
-              {formatCurrency(account.growthPipelineValue)}
-            </span>
-            <p className="text-xs text-muted-foreground mt-2">
-              {account.whiteSpaceCount} white-space items
-            </p>
-          </div>
-        </section>
+            <div className="bg-card p-6 rounded-xl border shadow-sm">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <p className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
+                  Growth Upside
+                </p>
+                <SnapshotInfoIcon
+                  label="Growth Upside"
+                  lines={ACCOUNT_SNAPSHOT_CARD_INFO.growthUpside}
+                />
+              </div>
+              <span className="text-3xl font-bold text-accent">
+                {formatCurrency(account.growthPipelineValue)}
+              </span>
+              <p className="text-xs text-muted-foreground mt-2">
+                {account.whiteSpaceCount} white-space items
+              </p>
+            </div>
+          </section>
+        </TooltipProvider>
 
         {/* Tabs */}
         <nav className="flex border-b mt-8 gap-6 overflow-x-auto">
@@ -2218,7 +2288,7 @@ function AccountDetailPage() {
 
         <div className="py-8 pb-16">
           {tab === "Overview" && <OverviewTab account={account} />}
-          {tab === "Score Marking Matrices" && <ScoreMatricsTab account={account} />}
+          {tab === "Score Marking Metrics" && <ScoreMetricsTab account={account} />}
           {tab === "Activity to Increase Score" && (
             <ActivityTab
               account={account}
@@ -6381,8 +6451,8 @@ function KycField({
     </div>
   );
 }
-/* ============================== TAB 2: Score Marking Matrices ============================== */
-function ScoreMatricsTab({ account }) {
+/* ============================== TAB 2: Score Marking Metrics ============================== */
+function ScoreMetricsTab({ account }) {
   const [expanded, setExpanded] = useState(null);
   const open = (title, hint, block, area) => setExpanded({ title, hint, block, area });
   const areaScores = [
@@ -8902,7 +8972,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
     return {
       message:
         scoreRows.length > 1
-          ? `Marked ${scoreRows.length} related Score Marking Matrics items checked.`
+          ? `Marked ${scoreRows.length} related Score Marking Metrics items checked.`
           : "Activity marked done.",
     };
   }
@@ -9154,7 +9224,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
           <div>
             <h3 className="text-sm font-bold">Activities Across Health Areas</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              Unchecked Score Marking Matrics items, meeting actions, and accepted drafts live in
+              Unchecked Score Marking Metrics items, meeting actions, and accepted drafts live in
               one review queue.
             </p>
           </div>
@@ -10738,7 +10808,7 @@ function getRejectedHistorySourceLabel(sourceType) {
   if (sourceType === "opportunity") return "Opportunity";
   if (sourceType === "meeting" || sourceType === "fireflies_meeting") return "Meeting Insight";
   if (sourceType === "rag") return "Activity Rule";
-  if (sourceType === "score_metric") return "Score Marking Matrics";
+  if (sourceType === "score_metric") return "Score Marking Metrics";
   return sourceType ? sourceType.replace(/_/g, " ") : "Suggestion";
 }
 
@@ -11342,7 +11412,7 @@ async function completeScoreMetricRows({
   });
 
   if (!rowsByArea.size) {
-    throw new Error("This activity is not linked to a Score Marking Matrics criterion.");
+    throw new Error("This activity is not linked to a Score Marking Metrics criterion.");
   }
 
   for (const [areaKey, refs] of rowsByArea.entries()) {

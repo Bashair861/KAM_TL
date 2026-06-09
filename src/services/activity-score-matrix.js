@@ -235,7 +235,7 @@ function buildScoreRuleSignal({
   optimizationTitle,
   optimizationReason,
   optimizationNextStep,
-  sourceType = "Score Marking Matrics",
+  sourceType = "Score Marking Metrics",
   compoundSignals = [],
   urgencyOverride = null,
 }) {
