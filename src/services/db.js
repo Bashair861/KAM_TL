@@ -36,6 +36,7 @@ const RAG_VALUES = new Set(["R", "A", "G"]);
 const ESCALATION_PRIORITY_VALUES = new Set(["P1", "P2", "P3"]);
 const OPPORTUNITY_CONFIDENCE_VALUES = new Set(["High", "Medium", "Low"]);
 const SHORT_CODE_RE = /^[A-Z0-9]{2,4}$/;
+const DAY_MS = 1000 * 60 * 60 * 24;
 
 function normalizeBooleanInput(value) {
   if (typeof value === "boolean") return value;
@@ -210,7 +211,34 @@ function normalizeAccountUpdateValue(column, value) {
   }
 }
 
+function getCalendarDate(value) {
+  if (!value) return null;
+  const dateText = String(value).slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
+  if (match) {
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function getRenewalDays(row, renewalDate) {
+  const storedDays = Number(row.renewal_days);
+  if (Number.isFinite(storedDays)) return Math.round(storedDays);
+
+  const renewal = getCalendarDate(renewalDate);
+  if (!renewal) return null;
+
+  const today = new Date();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.round((renewal.getTime() - todayStart.getTime()) / DAY_MS);
+}
+
 function mapFlatAccount(r) {
+  const contractRenewalDate = r.renewal_date ?? r.contract_renewal_date ?? null;
+
   return {
     id: r.id,
     name: r.name,
@@ -221,7 +249,8 @@ function mapFlatAccount(r) {
     trend: r.trend,
     contractValue: r.contract_value,
     arr: r.arr,
-    contractRenewalDate: r.renewal_date ?? r.contract_renewal_date ?? null,
+    contractRenewalDate,
+    renewalDays: getRenewalDays(r, contractRenewalDate),
     contractDuration: r.contract_duration ?? "",
     contractType: r.contract_type,
     lastTouch: r.last_touch,
