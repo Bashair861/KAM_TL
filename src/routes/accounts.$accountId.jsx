@@ -131,11 +131,12 @@ import {
   RefreshCw,
   SlidersHorizontal,
   Info,
+  Search,
 } from "lucide-react";
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
     meta: [
-      { title: `Account ${params.accountId} - Aether KAM` },
+      { title: `Account ${params.accountId} - tkxel KAM` },
       { name: "description", content: "Client 360 detail view." },
     ],
   }),
@@ -2014,20 +2015,22 @@ function AccountDetailPage() {
   const { profile, session } = useAuth();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const role = profile?.role ?? "KAM";
+  const userId = profile?.id;
   const sowInputRef = useRef(null);
   const [tab, setTab] = useState("Overview");
   const [sowMessage, setSowMessage] = useState("");
   const [sowError, setSowError] = useState("");
   const [askAiOpen, setAskAiOpen] = useState(false);
   const { data: accountEscalations = [] } = useQuery({
-    queryKey: ["escalations", account.id],
-    queryFn: () => fetchEscalations(account.id),
+    queryKey: ["escalations", account.id, role, userId],
+    queryFn: () => fetchEscalations(account.id, { role, userId }),
+    enabled: Boolean(userId),
   });
   const { data: accountOpportunities = [] } = useQuery({
     queryKey: ["opportunities", account.id],
     queryFn: () => fetchOpportunities(account.id),
   });
-  const role = profile?.role ?? "KAM";
   const perms = getRolePermissions(role);
   const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
   const { mutate: uploadSow, isPending: uploadingSow } = useMutation({
@@ -11818,6 +11821,18 @@ function EducateTab({ account }) {
   );
 }
 /* ============================== TAB 6: Escalation ============================== */
+function formatEscalationDate(val) {
+  if (!val) return "Unknown";
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return d.toLocaleString("en-US", {
+      month: "short", day: "numeric", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch { return val; }
+}
+
 function EscalationsTab({ list }) {
   if (!list.length) {
     return (
@@ -11843,15 +11858,14 @@ function EscalationsTab({ list }) {
                 </span>
                 <h3 className="text-sm font-bold">{e.title}</h3>
               </div>
-              <p className="text-xs text-muted-foreground mt-1">Opened {e.openedAt} - 48h SLA</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Opened {formatEscalationDate(e.openedAt)}
+              </p>
             </div>
             <div className="flex flex-col items-end gap-1">
               <div className="bg-primary text-primary-foreground px-3 py-1.5 rounded text-[11px] font-mono flex items-center gap-1">
                 <Clock className="size-3" /> {e.slaRemainingHours.toFixed(1)}h left
               </div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                Last synced with Jira - 3m ago
-              </p>
             </div>
           </div>
           <p className="text-sm mb-4">{e.description}</p>
@@ -11945,6 +11959,7 @@ function EscalationsTab({ list }) {
 
 /* ============================== TAB 7: Client History ============================== */
 function ClientHistoryTab({ accountId, accountName }) {
+  const [historySearch, setHistorySearch] = useState("");
   const { data: history = [], isLoading } = useQuery({
     queryKey: ["account-history", accountId],
     queryFn: () => fetchAccountHistory(accountId),
@@ -11955,6 +11970,24 @@ function ClientHistoryTab({ accountId, accountName }) {
   );
   const latestEntry = history[0] ?? null;
   const latestEditor = latestEntry?.editedBy ?? "-";
+  const normalizedHistorySearch = historySearch.trim().toLowerCase();
+  const filteredHistory = useMemo(() => {
+    if (!normalizedHistorySearch) return history;
+    return history.filter((entry) => {
+      const searchableText = [
+        entry.fieldName,
+        entry.editedBy,
+        toHistoryValue(entry.oldValue),
+        toHistoryValue(entry.newValue),
+        formatHistoryTime(entry.editedAt),
+        formatHistoryDate(entry.editedAt),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return searchableText.includes(normalizedHistorySearch);
+    });
+  }, [history, normalizedHistorySearch]);
 
   if (isLoading) {
     return (
@@ -12007,15 +12040,33 @@ function ClientHistoryTab({ accountId, accountName }) {
               Field-level updates for {accountName} - newest first.
             </p>
           </div>
-          <span className="w-fit rounded-md border bg-muted/40 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-            {history.length} audit entries
-          </span>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <div className="relative sm:w-72">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="search"
+                value={historySearch}
+                onChange={(event) => setHistorySearch(event.target.value)}
+                placeholder="Search change history"
+                className="h-9 pl-9 text-xs"
+              />
+            </div>
+            <span className="w-fit rounded-md border bg-muted/40 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+              {normalizedHistorySearch
+                ? `${filteredHistory.length} of ${history.length} audit entries`
+                : `${history.length} audit entries`}
+            </span>
+          </div>
         </div>
 
-        <div className="divide-y">
-          {history.map((entry) => (
-            <HistoryChangeItem key={entry.id} entry={entry} />
-          ))}
+        <div className="max-h-[42rem] divide-y overflow-y-auto overscroll-contain">
+          {filteredHistory.length > 0 ? (
+            filteredHistory.map((entry) => <HistoryChangeItem key={entry.id} entry={entry} />)
+          ) : (
+            <div className="px-4 py-10 text-center text-xs text-muted-foreground">
+              No matching changes found.
+            </div>
+          )}
         </div>
       </div>
     </div>

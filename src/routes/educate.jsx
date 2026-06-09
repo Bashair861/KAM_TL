@@ -16,7 +16,7 @@ import {
 export const Route = createFileRoute("/educate")({
   head: () => ({
     meta: [
-      { title: "Education — Aether KAM" },
+      { title: "Education — tkxel KAM" },
       { name: "description", content: "Service-based education articles and session tracking." },
     ],
   }),

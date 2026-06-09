@@ -394,13 +394,7 @@ function areaLabel(area) {
 }
 function actionLabelFromKpi(label) {
   const clean = String(label ?? "").trim();
-  if (!clean) return "Complete KPI follow-up";
-  if (
-    /^(complete|send|schedule|share|review|prepare|confirm|resolve|submit|update)\b/i.test(clean)
-  ) {
-    return clean;
-  }
-  return `Complete: ${clean}`;
+  return clean || "KPI follow-up";
 }
 function priorityRank(priority) {
   if (priority === "P1") return 0;
@@ -1731,9 +1725,18 @@ export async function fetchAccount(id) {
   };
 }
 // --- fetch escalations --------------------------------------------------------
-export async function fetchEscalations(accountId) {
+export async function fetchEscalations(accountId, opts = {}) {
+  let visibleAccountIds = Array.isArray(opts.accountIds) ? opts.accountIds : null;
+  if (!visibleAccountIds && opts?.role === "KAM" && opts.userId) {
+    const assignedAccounts = await fetchAccounts({ role: opts.role, userId: opts.userId });
+    visibleAccountIds = assignedAccounts.map((account) => account.id);
+  }
+  if (accountId && visibleAccountIds && !visibleAccountIds.includes(accountId)) return [];
+  if (!accountId && visibleAccountIds && visibleAccountIds.length === 0) return [];
+
   let q = supabase.from("escalations").select("*, escalation_action_items(*)");
   if (accountId) q = q.eq("account_id", accountId);
+  if (!accountId && visibleAccountIds) q = q.in("account_id", visibleAccountIds);
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map((e) => ({
@@ -1749,7 +1752,7 @@ export async function fetchEscalations(accountId) {
     realisticCheck: e.realistic_check ?? undefined,
     clientFeedback: e.client_feedback ?? undefined,
     stakeholders: e.stakeholders ?? [],
-    actionItems: (e.escalation_action_items ?? []).map((a) => ({ label: a.label, done: a.done })),
+    actionItems: (e.escalation_action_items ?? []).map((a) => ({ id: a.id, label: a.label, done: a.done })),
   }));
 }
 // --- fetch opportunities ------------------------------------------------------
@@ -3285,4 +3288,71 @@ export async function saveEducationSession(session) {
     ],
     session.editedBy ?? "Unknown",
   );
+}
+
+// ─── toggle escalation action item done state ─────────────────────────────────
+export async function toggleEscalationActionItem(id, done, opts = {}) {
+  const { data: current, error: currentError } = await supabase
+    .from("escalation_action_items")
+    .select("id, label, done, escalation_id, escalations(account_id, title)")
+    .eq("id", id)
+    .maybeSingle();
+  if (currentError) throw currentError;
+
+  const { error } = await supabase
+    .from("escalation_action_items")
+    .update({ done })
+    .eq("id", id);
+  if (error) throw error;
+
+  if (!current || Boolean(current.done) === Boolean(done)) return;
+
+  const escalation = Array.isArray(current.escalations)
+    ? current.escalations[0]
+    : current.escalations;
+  const accountId = escalation?.account_id;
+  if (!accountId) return;
+
+  await logAccountChanges(
+    accountId,
+    [
+      {
+        field: `Escalation action item: ${escalation?.title ?? current.escalation_id} - ${current.label}`,
+        oldValue: current.done ? "Completed" : "Open",
+        newValue: done ? "Completed" : "Open",
+      },
+    ],
+    opts.editedBy ?? "Unknown",
+  );
+}
+
+// ─── create escalation (manual / runtime) ────────────────────────────────────
+export async function createEscalation(escalation) {
+  const id = `ESC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const slaHours = escalation.priority === "P1" ? 48 : escalation.priority === "P2" ? 72 : 120;
+
+  const { error: escalErr } = await supabase.from("escalations").insert({
+    id,
+    account_id: escalation.accountId,
+    title: escalation.title,
+    priority: escalation.priority,
+    description: escalation.description || null,
+    rca: escalation.rca || null,
+    sla_remaining_hours: slaHours,
+    opened_at: new Date().toISOString(),
+  });
+  if (escalErr) throw escalErr;
+
+  if (escalation.actionItems?.length) {
+    const { error: aiErr } = await supabase.from("escalation_action_items").insert(
+      escalation.actionItems.map((label) => ({
+        escalation_id: id,
+        label,
+        done: false,
+      })),
+    );
+    if (aiErr) throw aiErr;
+  }
+
+  return { id };
 }

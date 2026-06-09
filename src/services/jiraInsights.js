@@ -31,7 +31,15 @@ function slaHours(priority) {
   return 120;
 }
 
-async function fetchSingleJiraIssue(issueKey) {
+function normalizeJiraBaseUrl(baseUrl) {
+  try {
+    return new URL(String(baseUrl ?? "").trim()).origin;
+  } catch {
+    throw new Error("JIRA_BASE_URL must be a valid Jira site URL, for example https://your-domain.atlassian.net.");
+  }
+}
+
+function jiraAuth() {
   const baseUrl = readEnv("JIRA_BASE_URL");
   const email = readEnv("JIRA_EMAIL");
   const token = readEnv("JIRA_API_TOKEN");
@@ -42,15 +50,182 @@ async function fetchSingleJiraIssue(issueKey) {
       ? Buffer.from(`${email}:${token}`).toString("base64")
       : btoa(`${email}:${token}`);
 
-  const res = await fetch(
-    `${baseUrl}/rest/api/3/issue/${issueKey}?fields=summary,description,priority,status,created,subtasks`,
-    { headers: { Authorization: `Basic ${credentials}`, Accept: "application/json" } },
-  );
+  return {
+    baseUrl: normalizeJiraBaseUrl(baseUrl),
+    headers: { Authorization: `Basic ${credentials}`, Accept: "application/json" },
+  };
+}
+
+async function jiraRequest(path, options = {}) {
+  const { baseUrl, headers } = jiraAuth();
+  const res = await fetch(`${baseUrl}${path}`, {
+    ...options,
+    headers: { ...headers, ...(options.headers ?? {}) },
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Jira error ${res.status}: ${body}`);
   }
-  return res.json();
+
+  const body = await res.text();
+  try {
+    return JSON.parse(body);
+  } catch {
+    const preview = body.trim().slice(0, 80);
+    throw new Error(
+      `Jira returned a non-JSON response. Check JIRA_BASE_URL in .env.local; it should be the Jira site root like ${baseUrl}. Response started with: ${preview}`,
+    );
+  }
+}
+
+function normalizeSpaceName(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function normalizeSpaceToken(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/gi, "")
+    .toLowerCase();
+}
+
+function uniqueSpaceAliases(values) {
+  return [
+    ...new Set(
+      values
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function normalizeIssueKey(issueKey) {
+  const normalized = String(issueKey ?? "").trim().toUpperCase();
+  if (!normalized) return "";
+  if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(normalized)) {
+    throw new Error("Enter a valid Jira issue key.");
+  }
+  return normalized;
+}
+
+async function fetchJiraSpaceSearchResults(query = "") {
+  const spaces = [];
+  let startAt = 0;
+  const maxResults = 50;
+
+  for (let page = 0; page < 20; page += 1) {
+    const params = new URLSearchParams({
+      startAt: String(startAt),
+      maxResults: String(maxResults),
+    });
+    if (query) params.set("query", query);
+
+    // Jira calls Spaces "projects" in the REST API.
+    const json = await jiraRequest(`/rest/api/3/project/search?${params.toString()}`);
+    const values = json.values ?? [];
+    spaces.push(...values);
+
+    if (json.isLast || values.length === 0) break;
+    startAt += values.length;
+    if (typeof json.total === "number" && startAt >= json.total) break;
+  }
+
+  return spaces;
+}
+
+function scoreJiraSpaceMatch(space, aliases) {
+  const spaceName = normalizeSpaceName(space?.name);
+  const spaceNameToken = normalizeSpaceToken(space?.name);
+  const spaceKeyToken = normalizeSpaceToken(space?.key);
+
+  let bestScore = 0;
+  for (const alias of aliases) {
+    const aliasName = normalizeSpaceName(alias);
+    const aliasToken = normalizeSpaceToken(alias);
+    if (!aliasName || !aliasToken) continue;
+
+    if (spaceName === aliasName || spaceKeyToken === aliasToken) {
+      bestScore = Math.max(bestScore, 100);
+      continue;
+    }
+
+    if (spaceNameToken === aliasToken) {
+      bestScore = Math.max(bestScore, 90);
+      continue;
+    }
+
+    if (aliasName.length >= 3 && spaceName.includes(aliasName)) {
+      bestScore = Math.max(bestScore, 60);
+      continue;
+    }
+
+    if (aliasToken.length >= 3 && spaceNameToken.includes(aliasToken)) {
+      bestScore = Math.max(bestScore, 50);
+    }
+  }
+
+  return bestScore;
+}
+
+async function findJiraSpaceByAccountName(accountName, aliases = []) {
+  const name = String(accountName ?? "").trim();
+  if (!name) throw new Error("Select an account before importing.");
+
+  const spaceAliases = uniqueSpaceAliases([name, ...aliases]);
+  const candidateMap = new Map();
+
+  for (const alias of spaceAliases) {
+    const spaces = await fetchJiraSpaceSearchResults(alias);
+    for (const space of spaces) {
+      candidateMap.set(space.id ?? space.key ?? space.name, space);
+    }
+  }
+
+  let candidates = [...candidateMap.values()];
+  let scored = candidates
+    .map((space) => ({ space, score: scoreJiraSpaceMatch(space, spaceAliases) }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score);
+  if (scored.length > 0) return scored[0].space;
+
+  const allSpaces = await fetchJiraSpaceSearchResults();
+  if (candidateMap.size === 0 && allSpaces.length === 0) {
+    throw new Error(
+      "The configured Jira API user cannot see any Jira spaces. Check JIRA_EMAIL and JIRA_API_TOKEN in .env.local, and make sure that Jira user has access to this space.",
+    );
+  }
+
+  candidates = allSpaces.filter((space) => !candidateMap.has(space.id ?? space.key ?? space.name));
+  scored = candidates
+    .map((space) => ({ space, score: scoreJiraSpaceMatch(space, spaceAliases) }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  return scored[0]?.space ?? null;
+}
+
+async function fetchJiraIssueForSpace(issueKey, space) {
+  const key = normalizeIssueKey(issueKey);
+  const spaceKey = String(space?.key ?? "").replace(/"/g, '\\"');
+  const jql = key
+    ? `project = "${spaceKey}" AND key = "${key}" ORDER BY created DESC`
+    : `project = "${spaceKey}" AND statusCategory != Done ORDER BY created DESC`;
+
+  const json = await jiraRequest("/rest/api/3/search/jql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jql,
+      fields: ["summary", "description", "priority", "status", "created", "subtasks", "project"],
+      maxResults: 1,
+    }),
+  });
+
+  return (json.issues ?? [])[0] ?? null;
 }
 
 function detectAccount(issueData, accounts) {
@@ -210,23 +385,107 @@ function buildInsights(issueKey, title, description, accountName) {
   return { keywords, educationSuggestions, actionItems };
 }
 
+// ── OpenAI-powered insights (education suggestions + action items) ────────────
+
+async function generateAIInsights(keywords, title, description, issueKey, accountName) {
+  const apiKey = readEnv("OPENAI_API_KEY");
+  if (!apiKey) return null;
+
+  const prompt = `You are a KAM (Key Account Manager) assistant. Analyze this client escalation and return both education suggestions AND action items.
+
+Issue: ${issueKey} — ${title}
+Account: ${accountName}
+Detected keywords: ${keywords.join(", ")}
+Description: ${description.slice(0, 600)}
+
+Return ONLY a valid JSON object — no markdown, no code fences:
+{
+  "educationSuggestions": [
+    {
+      "title": "Short education topic title",
+      "description": "One sentence explaining why this is relevant to the ticket",
+      "context": "Use before the ${accountName} escalation/RCA conversation.",
+      "matchedKeywords": ["up to 3 keywords from the detected list"]
+    }
+  ],
+  "actionItems": [
+    "Specific KAM action item string referencing ${accountName} and ${issueKey} where relevant"
+  ]
+}
+
+Requirements:
+- educationSuggestions: 4–6 items, each grounded in the ticket content
+- actionItems: 8–12 specific, actionable steps the KAM should take to resolve this escalation`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.4-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.6,
+    }),
+  });
+
+  if (!res.ok) return null;
+  const json = await res.json();
+  const text = json.choices?.[0]?.message?.content ?? "";
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+  } catch {}
+  return null;
+}
+
 // ── Server function ────────────────────────────────────────────────────────────
 
 export const analyzeJiraIssue = createServerFn({ method: "POST" })
   .inputValidator((data) => data)
   .handler(async ({ data }) => {
-    const { issueKey, accountName, accounts } = data;
+    const { issueKey, accountId, accountName, accounts } = data;
+    const selectedAccount =
+      (accounts ?? []).find((account) => account.id === accountId) ??
+      (accounts ?? []).find((account) => normalizeSpaceName(account.name) === normalizeSpaceName(accountName));
+    const selectedAccountName = selectedAccount?.name ?? accountName;
 
-    const raw = await fetchSingleJiraIssue(issueKey);
+    if (!selectedAccountName) throw new Error("Select an account before importing.");
+
+    const jiraSpace = await findJiraSpaceByAccountName(selectedAccountName, [
+      selectedAccount?.shortCode,
+    ]);
+    if (!jiraSpace) {
+      throw new Error(`Space with selected account name "${selectedAccountName}" was not found in Jira.`);
+    }
+
+    const normalizedIssueKey = normalizeIssueKey(issueKey);
+    const raw = await fetchJiraIssueForSpace(normalizedIssueKey, jiraSpace);
+    if (!raw) {
+      const issueText = normalizedIssueKey ? ` ${normalizedIssueKey}` : "";
+      throw new Error(`No Jira escalation${issueText} was found in space "${jiraSpace.name}".`);
+    }
+
+    const resolvedIssueKey = raw.key ?? normalizedIssueKey;
     const priority = mapPriority(raw.fields?.priority);
     const statusName = raw.fields?.status?.name ?? "Unknown";
-    const title = raw.fields?.summary ?? issueKey;
+    const title = raw.fields?.summary ?? resolvedIssueKey;
     const description = extractText(raw.fields?.description);
 
-    const detectedAccount = detectAccount(raw, accounts);
-    const resolvedAccountName = accountName || detectedAccount?.name || "the client";
+    const detectedAccount = selectedAccount ?? detectAccount(raw, accounts);
+    const resolvedAccountName = selectedAccountName || detectedAccount?.name || "the client";
 
-    const insights = buildInsights(issueKey, title, description, resolvedAccountName);
+    const insights = buildInsights(resolvedIssueKey, title, description, resolvedAccountName);
+
+    // Use AI for both education suggestions and action items; fall back to rule-based
+    const aiInsights = await generateAIInsights(
+      insights.keywords,
+      title,
+      description,
+      resolvedIssueKey,
+      resolvedAccountName,
+    );
 
     return {
       issue: {
@@ -246,8 +505,18 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
       detectedAccount: detectedAccount
         ? { id: detectedAccount.id, name: detectedAccount.name }
         : null,
+      jiraSpace: {
+        id: jiraSpace.id,
+        key: jiraSpace.key,
+        name: jiraSpace.name,
+      },
+      jiraProject: {
+        id: jiraSpace.id,
+        key: jiraSpace.key,
+        name: jiraSpace.name,
+      },
       keywords: insights.keywords,
-      educationSuggestions: insights.educationSuggestions,
-      suggestedActionItems: insights.actionItems,
+      educationSuggestions: aiInsights?.educationSuggestions ?? insights.educationSuggestions,
+      suggestedActionItems: aiInsights?.actionItems ?? insights.actionItems,
     };
   });

@@ -10,7 +10,6 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
-  Settings,
   Shield,
   UserCog,
   Users,
@@ -40,6 +39,7 @@ const items = [
     to: "/escalations",
     label: "Escalations",
     icon: AlertTriangle,
+    search: { tab: "open" },
     badgeKey: NOTIFICATION_BADGE_KEYS.escalations,
   },
   { to: "/contracts", label: "Contracts", icon: FileText },
@@ -151,13 +151,12 @@ export function AppSidebar() {
       <div className="p-6 flex items-start justify-between">
         <div className="flex items-center gap-2">
           <div className="size-7 rounded-md bg-accent flex items-center justify-center text-white font-bold text-sm">
-            A
+            t
           </div>
           <div>
-            <div className="text-xs font-bold uppercase tracking-widest text-slate-400">
-              Aether KAM
+            <div className="text-xs font-bold tracking-tight text-slate-400">
+              tkxel KAM
             </div>
-            <div className="text-[10px] text-slate-500 font-mono">v2.4.0</div>
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -251,6 +250,7 @@ export function AppSidebar() {
             <Link
               key={item.to}
               to={item.to}
+              search={item.search}
               onClick={() => handleSidebarItemClick(item)}
               className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                 active ? "bg-white/10 text-white" : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -298,9 +298,6 @@ export function AppSidebar() {
       </nav>
 
       <div className="p-4 border-t border-white/10 space-y-2">
-        <button className="w-full flex items-center gap-3 px-3 py-2 text-xs text-slate-400 hover:text-white transition-colors rounded-lg hover:bg-white/5">
-          <Settings className="size-4" /> Settings
-        </button>
         <div className="flex items-center gap-3 px-3 py-1">
           <div className="size-8 rounded-full bg-accent/20 border border-accent/40 flex items-center justify-center text-[10px] text-white font-semibold shrink-0">
             {profile?.initials ?? "?"}
@@ -343,10 +340,10 @@ export function AppSidebar() {
         </button>
         <div className="flex items-center gap-2">
           <div className="size-6 rounded-md bg-accent flex items-center justify-center text-white font-bold text-xs">
-            A
+            t
           </div>
-          <span className="text-xs font-bold uppercase tracking-widest text-slate-300">
-            Aether KAM
+          <span className="text-xs font-bold tracking-tight text-slate-300">
+            tkxel KAM
           </span>
         </div>
         <div className="size-9" />

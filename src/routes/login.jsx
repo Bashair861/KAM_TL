@@ -6,8 +6,8 @@ import { requestPasswordReset, signIn } from "@/services/auth";
 export const Route = createFileRoute("/login")({
   head: () => ({
     meta: [
-      { title: "Sign In - Aether KAM" },
-      { name: "description", content: "Sign in to your Aether KAM workspace." },
+      { title: "Sign In - tkxel KAM" },
+      { name: "description", content: "Sign in to your tkxel KAM workspace." },
     ],
   }),
   component: LoginPage,
@@ -81,9 +81,9 @@ function LoginPage() {
 
       <header className="relative z-10 px-8 py-6 flex items-center gap-2.5">
         <span className="size-7 rounded-md bg-accent flex items-center justify-center text-white font-bold text-sm select-none">
-          A
+          t
         </span>
-        <span className="font-bold text-base tracking-tight">Aether KAM</span>
+        <span className="font-bold text-base tracking-tight">tkxel KAM</span>
         <span className="ml-1 text-[10px] uppercase tracking-widest font-bold text-muted-foreground border border-muted px-1.5 py-0.5 rounded">
           Portal
         </span>
@@ -120,7 +120,7 @@ function LoginPage() {
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@aether.io"
+                placeholder="you@tkxel.com"
                 className="w-full h-10 px-3 rounded-md border bg-background text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-accent transition-shadow"
               />
             </div>
@@ -172,7 +172,7 @@ function LoginPage() {
                   <div>
                     <p className="font-semibold text-foreground">Reset link sent</p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      If an account exists for that email, a password reset link is on the way.
+                      A password reset link has been sent to this email.
                     </p>
                   </div>
                 </div>
@@ -244,7 +244,7 @@ function LoginPage() {
 
       <footer className="relative z-10 px-8 py-4 text-center">
         <p className="text-[11px] text-muted-foreground">
-          Copyright 2026 Aether KAM - Internal use only - All rights reserved
+          Copyright 2026 tkxel KAM - Internal use only - All rights reserved
         </p>
       </footer>
     </div>

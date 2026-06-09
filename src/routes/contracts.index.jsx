@@ -9,7 +9,7 @@ import { AlertTriangle, FileText } from "lucide-react";
 export const Route = createFileRoute("/contracts/")({
   head: () => ({
     meta: [
-      { title: "Contracts - Aether KAM" },
+      { title: "Contracts - tkxel KAM" },
       { name: "description", content: "Contract portfolio, renewals, type, and value scoring." },
     ],
   }),

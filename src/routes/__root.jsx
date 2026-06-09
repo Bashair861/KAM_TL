@@ -72,15 +72,15 @@ export const Route = createRootRouteWithContext()({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Aether KAM — Key Account Management Portal" },
+      { title: "tkxel KAM — Key Account Management Portal" },
       {
         name: "description",
         content:
           "Enterprise Key Account Management portal: client 360, scoring, white-space, contracts, retention, growth, escalations.",
       },
-      { name: "author", content: "Aether KAM" },
-      { property: "og:title", content: "Aether KAM — Key Account Management Portal" },
-      { name: "twitter:title", content: "Aether KAM — Key Account Management Portal" },
+      { name: "author", content: "tkxel KAM" },
+      { property: "og:title", content: "tkxel KAM — Key Account Management Portal" },
+      { name: "twitter:title", content: "tkxel KAM — Key Account Management Portal" },
       { name: "description", content: "This software is use for learning purposes only." },
       { property: "og:description", content: "This software is use for learning purposes only." },
       { name: "twitter:description", content: "This software is use for learning purposes only." },

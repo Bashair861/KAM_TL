@@ -25,7 +25,7 @@ import { useAuth } from "@/context/AuthContext";
 export const Route = createFileRoute("/users")({
   head: () => ({
     meta: [
-      { title: "All Users - Aether KAM" },
+      { title: "All Users - tkxel KAM" },
       { name: "description", content: "Manage user access, roles, and active status." },
     ],
   }),

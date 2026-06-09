@@ -7,8 +7,8 @@ import { useAuth } from "@/context/AuthContext";
 export const Route = createFileRoute("/set-password")({
   head: () => ({
     meta: [
-      { title: "Set New Password - Aether KAM" },
-      { name: "description", content: "Set or reset your password for Aether KAM." },
+      { title: "Set New Password - tkxel KAM" },
+      { name: "description", content: "Set or reset your password for tkxel KAM." },
     ],
   }),
   component: SetPasswordPage,
@@ -60,9 +60,9 @@ function SetPasswordPage() {
       />
       <header className="relative z-10 px-8 py-6 flex items-center gap-2.5">
         <span className="size-7 rounded-md bg-accent flex items-center justify-center text-white font-bold text-sm select-none">
-          A
+          t
         </span>
-        <span className="font-bold text-base tracking-tight">Aether KAM</span>
+        <span className="font-bold text-base tracking-tight">tkxel KAM</span>
         <span className="ml-1 text-[10px] uppercase tracking-widest font-bold text-muted-foreground border border-muted px-1.5 py-0.5 rounded">
           Portal
         </span>
@@ -73,7 +73,7 @@ function SetPasswordPage() {
           <div className="mb-8 text-center">
             <h1 className="text-2xl font-bold tracking-tight">Set a new password</h1>
             <p className="text-sm text-muted-foreground mt-2">
-              Create a password for your Aether KAM account.
+              Create a password for your tkxel KAM account.
             </p>
           </div>
 

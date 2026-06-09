@@ -9,7 +9,6 @@ import {
   FileText,
   Loader2,
   Lock,
-  Save,
   ShieldCheck,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +25,7 @@ import { formatRenewalDate } from "@/lib/utils";
 export const Route = createFileRoute("/contract-detail/$accountId")({
   head: () => ({
     meta: [
-      { title: "Contract Detail - Aether KAM" },
+      { title: "Contract Detail - tkxel KAM" },
       { name: "description", content: "Contract detail, portfolio clauses, and audit history." },
     ],
   }),
@@ -236,12 +235,7 @@ function ContractDetailPage() {
               onClick={() => saveMutation.mutate()}
               disabled={!canEdit || !isDirty || saveMutation.isPending}
             >
-              {saveMutation.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Save className="size-4" />
-              )}
-              Save
+              {saveMutation.isPending ? "Saving..." : "Save"}
             </Button>
           </div>
         </div>
