@@ -40,6 +40,11 @@ const QUADRANT_LAYOUT = [
   "Maintain & Nurture",
 ];
 
+function formatRenewalDays(value) {
+  const days = Number(value);
+  return Number.isFinite(days) ? `${Math.round(days)}d renewal` : "Renewal not provided";
+}
+
 function StrategyPage() {
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
@@ -172,7 +177,7 @@ function StrategyPage() {
                     value: account.revenueAtRisk
                       ? formatCurrency(account.revenueAtRisk)
                       : formatCurrency(account.arr),
-                    detail: `${account.renewalDays}d renewal | ${
+                    detail: `${formatRenewalDays(account.renewalDays)} | ${
                       account.calculatedRetentionRisk ?? account.retentionRisk ?? "Low"
                     } risk`,
                     tone: "warn",
@@ -228,7 +233,7 @@ function StrategyPage() {
                     items={urgentAccounts.map((account) => ({
                       id: account.id,
                       name: account.name,
-                      detail: `${account.renewalDays}d renewal | ${formatCurrency(account.arr)} ARR`,
+                      detail: `${formatRenewalDays(account.renewalDays)} | ${formatCurrency(account.arr)} ARR`,
                       tag: account.calculatedRetentionRisk ?? account.retentionRisk ?? "Low",
                     }))}
                     empty="No retain lane accounts."
@@ -373,7 +378,7 @@ function AccountMiniLink({ account }) {
       <div className="min-w-0">
         <p className="text-xs font-semibold truncate">{account.name}</p>
         <p className="text-[11px] text-muted-foreground truncate">
-          {formatCurrency(account.arr)} ARR | {account.renewalDays}d renewal
+          {formatCurrency(account.arr)} ARR | {formatRenewalDays(account.renewalDays)}
         </p>
       </div>
       <ArrowUpRight className="size-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />

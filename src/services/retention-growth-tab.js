@@ -1549,11 +1549,52 @@ function getGrowthPipelineValue(account, applicableGrowth, recommendedOffers) {
   return Math.max(offerValue, whitespaceValue, account.growthUpside ?? 0);
 }
 
+function pluralize(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function getGrowthPipelineHint(account, applicableGrowth, recommendedOffers, growthPipeline) {
+  const offerValue = recommendedOffers.reduce(
+    (total, offer) => total + (offer.potentialValue ?? 0),
+    0,
+  );
+  const whitespaceValue = applicableGrowth.reduce(
+    (total, item) => total + (item.potentialValue ?? 0),
+    0,
+  );
+  const accountUpside = getKnownPotential(account.growthUpside) ?? 0;
+
+  if (growthPipeline > 0 && offerValue >= whitespaceValue && offerValue >= accountUpside) {
+    return `From ${pluralize(recommendedOffers.length, "recommended offer")}`;
+  }
+  if (growthPipeline > 0 && whitespaceValue >= accountUpside) {
+    return `From ${pluralize(applicableGrowth.length, "open whitespace service")}`;
+  }
+  if (accountUpside > 0) return `Account upside ${formatCurrency(accountUpside)}`;
+  return `${pluralize(applicableGrowth.length, "open whitespace service")}`;
+}
+
+function getMatrixAxisPosition(score, threshold) {
+  const value = clamp(score);
+  const lowMin = 18;
+  const lowMax = 48;
+  const highMin = 52;
+  const highMax = 82;
+
+  if (value < threshold) {
+    return Math.round(lowMin + (value / threshold) * (lowMax - lowMin));
+  }
+
+  return Math.round(
+    highMin + ((value - threshold) / (100 - threshold)) * (highMax - highMin),
+  );
+}
+
 function buildMatrixPosition(retentionScore, growthScore) {
   const retentionRiskHigh = retentionScore < RETENTION_HEALTH_THRESHOLD;
   const growthHigh = growthScore >= GROWTH_POTENTIAL_THRESHOLD;
-  const x = Math.round(clamp(18 + retentionScore * 0.64, 18, 82));
-  const y = Math.round(clamp(86 - growthScore * 0.68, 18, 82));
+  const x = getMatrixAxisPosition(retentionScore, RETENTION_HEALTH_THRESHOLD);
+  const y = 100 - getMatrixAxisPosition(growthScore, GROWTH_POTENTIAL_THRESHOLD);
 
   if (!retentionRiskHigh && growthHigh) {
     return {
@@ -1695,6 +1736,12 @@ function buildDashboardSummary({
   });
   const revenueAtRisk = getRevenueAtRisk(account, retentionSignals, riskLevel);
   const growthPipeline = getGrowthPipelineValue(account, applicableGrowth, recommendedOffers);
+  const growthPipelineHint = getGrowthPipelineHint(
+    account,
+    applicableGrowth,
+    recommendedOffers,
+    growthPipeline,
+  );
   const matrix = buildMatrixPosition(retentionScore, growthScore);
   const growthLevel = getGrowthLevel(growthScore);
   const scoringWeights = buildScoringWeights();
@@ -1746,7 +1793,7 @@ function buildDashboardSummary({
       {
         label: "Growth Pipeline",
         value: formatCurrency(growthPipeline),
-        hint: `${applicableGrowth.length} whitespace services`,
+        hint: growthPipelineHint,
       },
       {
         label: "Retention Health",
