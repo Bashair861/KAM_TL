@@ -10589,7 +10589,7 @@ function ClientHistoryTab({ accountId, accountName }) {
           </span>
         </div>
 
-        <div className="divide-y">
+        <div className="max-h-[42rem] divide-y overflow-y-auto overscroll-contain">
           {history.map((entry) => (
             <HistoryChangeItem key={entry.id} entry={entry} />
           ))}
