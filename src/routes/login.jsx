@@ -172,7 +172,7 @@ function LoginPage() {
                   <div>
                     <p className="font-semibold text-foreground">Reset link sent</p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      If an account exists for that email, a password reset link is on the way.
+                      A password reset link has been sent to this email.
                     </p>
                   </div>
                 </div>
