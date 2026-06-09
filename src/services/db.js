@@ -1623,9 +1623,18 @@ export async function fetchAccount(id) {
   };
 }
 // --- fetch escalations --------------------------------------------------------
-export async function fetchEscalations(accountId) {
+export async function fetchEscalations(accountId, opts = {}) {
+  let visibleAccountIds = Array.isArray(opts.accountIds) ? opts.accountIds : null;
+  if (!visibleAccountIds && opts?.role === "KAM" && opts.userId) {
+    const assignedAccounts = await fetchAccounts({ role: opts.role, userId: opts.userId });
+    visibleAccountIds = assignedAccounts.map((account) => account.id);
+  }
+  if (accountId && visibleAccountIds && !visibleAccountIds.includes(accountId)) return [];
+  if (!accountId && visibleAccountIds && visibleAccountIds.length === 0) return [];
+
   let q = supabase.from("escalations").select("*, escalation_action_items(*)");
   if (accountId) q = q.eq("account_id", accountId);
+  if (!accountId && visibleAccountIds) q = q.in("account_id", visibleAccountIds);
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map((e) => ({
@@ -3180,12 +3189,39 @@ export async function saveEducationSession(session) {
 }
 
 // ─── toggle escalation action item done state ─────────────────────────────────
-export async function toggleEscalationActionItem(id, done) {
+export async function toggleEscalationActionItem(id, done, opts = {}) {
+  const { data: current, error: currentError } = await supabase
+    .from("escalation_action_items")
+    .select("id, label, done, escalation_id, escalations(account_id, title)")
+    .eq("id", id)
+    .maybeSingle();
+  if (currentError) throw currentError;
+
   const { error } = await supabase
     .from("escalation_action_items")
     .update({ done })
     .eq("id", id);
   if (error) throw error;
+
+  if (!current || Boolean(current.done) === Boolean(done)) return;
+
+  const escalation = Array.isArray(current.escalations)
+    ? current.escalations[0]
+    : current.escalations;
+  const accountId = escalation?.account_id;
+  if (!accountId) return;
+
+  await logAccountChanges(
+    accountId,
+    [
+      {
+        field: `Escalation action item: ${escalation?.title ?? current.escalation_id} - ${current.label}`,
+        oldValue: current.done ? "Completed" : "Open",
+        newValue: done ? "Completed" : "Open",
+      },
+    ],
+    opts.editedBy ?? "Unknown",
+  );
 }
 
 // ─── create escalation (manual / runtime) ────────────────────────────────────

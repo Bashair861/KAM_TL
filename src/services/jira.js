@@ -23,6 +23,14 @@ function slaHours(priority) {
   return 120;
 }
 
+function normalizeJiraBaseUrl(baseUrl) {
+  try {
+    return new URL(String(baseUrl ?? "").trim()).origin;
+  } catch {
+    throw new Error("JIRA_BASE_URL must be a valid Jira site URL, for example https://your-domain.atlassian.net.");
+  }
+}
+
 function randomId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
@@ -75,7 +83,7 @@ export const fetchJiraIssues = createServerFn({ method: "GET" }).handler(async (
       ? Buffer.from(`${email}:${token}`).toString("base64")
       : btoa(`${email}:${token}`);
 
-  const url = `${baseUrl}/rest/api/3/search/jql`;
+  const url = `${normalizeJiraBaseUrl(baseUrl)}/rest/api/3/search/jql`;
 
   const res = await fetch(url, {
     method: "POST",
@@ -96,7 +104,15 @@ export const fetchJiraIssues = createServerFn({ method: "GET" }).handler(async (
     throw new Error(`Jira API error ${res.status}: ${body}`);
   }
 
-  const json = await res.json();
+  const body = await res.text();
+  let json;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    throw new Error(
+      `Jira returned a non-JSON response. Check JIRA_BASE_URL in .env.local; it should be the Jira site root like ${normalizeJiraBaseUrl(baseUrl)}.`,
+    );
+  }
   return (json.issues ?? []).map((issue) => {
     const priority = mapPriority(issue.fields?.priority);
     return {

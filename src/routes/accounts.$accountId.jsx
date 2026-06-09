@@ -1534,20 +1534,22 @@ function AccountDetailPage() {
   const { profile, session } = useAuth();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const role = profile?.role ?? "KAM";
+  const userId = profile?.id;
   const sowInputRef = useRef(null);
   const [tab, setTab] = useState("Overview");
   const [sowMessage, setSowMessage] = useState("");
   const [sowError, setSowError] = useState("");
   const [askAiOpen, setAskAiOpen] = useState(false);
   const { data: accountEscalations = [] } = useQuery({
-    queryKey: ["escalations", account.id],
-    queryFn: () => fetchEscalations(account.id),
+    queryKey: ["escalations", account.id, role, userId],
+    queryFn: () => fetchEscalations(account.id, { role, userId }),
+    enabled: Boolean(userId),
   });
   const { data: accountOpportunities = [] } = useQuery({
     queryKey: ["opportunities", account.id],
     queryFn: () => fetchOpportunities(account.id),
   });
-  const role = profile?.role ?? "KAM";
   const perms = getRolePermissions(role);
   const editable = perms.write && (perms.scope === "all" || account.id !== undefined);
   const { mutate: uploadSow, isPending: uploadingSow } = useMutation({

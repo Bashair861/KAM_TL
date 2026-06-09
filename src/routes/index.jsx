@@ -89,8 +89,9 @@ function DashboardPage() {
     enabled: Boolean(userId),
   });
   const { data: escalations = [] } = useQuery({
-    queryKey: ["escalations"],
-    queryFn: () => fetchEscalations(),
+    queryKey: ["escalations", userId, role],
+    queryFn: () => fetchEscalations(null, { role, userId }),
+    enabled: Boolean(userId),
   });
   const {
     data: actionItems = [],

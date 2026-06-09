@@ -39,6 +39,7 @@ const items = [
     to: "/escalations",
     label: "Escalations",
     icon: AlertTriangle,
+    search: { tab: "open" },
     badgeKey: NOTIFICATION_BADGE_KEYS.escalations,
   },
   { to: "/contracts", label: "Contracts", icon: FileText },
@@ -249,6 +250,7 @@ export function AppSidebar() {
             <Link
               key={item.to}
               to={item.to}
+              search={item.search}
               onClick={() => handleSidebarItemClick(item)}
               className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                 active ? "bg-white/10 text-white" : "text-slate-400 hover:text-white hover:bg-white/5"

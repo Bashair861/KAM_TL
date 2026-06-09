@@ -31,14 +31,19 @@ function EscalationsPage() {
   const { tab: initialTab } = Route.useSearch();
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
+  const userId = profile?.id;
   const canWrite = Boolean(profile && getRolePermissions(role).write);
   const queryClient = useQueryClient();
 
   const [activeTab, setActiveTab] = useState(initialTab ?? "import");
 
+  useEffect(() => {
+    setActiveTab(initialTab ?? "import");
+  }, [initialTab]);
+
   // Jira import state
   const [selectedAccountId, setSelectedAccountId] = useState("");
-  const [issueKey, setIssueKey] = useState("SCRUM-1");
+  const [issueKey, setIssueKey] = useState("");
   const [result, setResult] = useState(null);
   const [savedOk, setSavedOk] = useState(false);
   const [checkedItems, setCheckedItems] = useState([]);
@@ -58,35 +63,42 @@ function EscalationsPage() {
   const [createError, setCreateError] = useState("");
 
   const { data: accounts = [] } = useQuery({
-    queryKey: ["accounts", role, profile?.id],
-    queryFn: () => fetchAccounts({ role, userId: profile?.id }),
-    enabled: Boolean(profile),
+    queryKey: ["accounts", role, userId],
+    queryFn: () => fetchAccounts({ role, userId }),
+    enabled: Boolean(userId),
   });
 
   const { data: allEscalations = [] } = useQuery({
-    queryKey: ["escalations"],
-    queryFn: () => fetchEscalations(),
+    queryKey: ["escalations", role, userId],
+    queryFn: () => fetchEscalations(null, { role, userId }),
+    enabled: Boolean(userId),
   });
 
   useEffect(() => {
-    if (!accounts.length) { setSelectedAccountId(""); return; }
-    if (!selectedAccountId || !accounts.some((a) => a.id === selectedAccountId)) {
-      setSelectedAccountId(accounts[0].id);
+    if (!accounts.length) {
+      if (selectedAccountId) setSelectedAccountId("");
+      return;
+    }
+    if (selectedAccountId && !accounts.some((a) => a.id === selectedAccountId)) {
+      setSelectedAccountId("");
     }
   }, [accounts, selectedAccountId]);
 
-  const selectedAccount = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
+  const selectedAccount = accounts.find((a) => a.id === selectedAccountId) ?? null;
 
   // Jira analyze mutation
   const analyzeMutation = useMutation({
-    mutationFn: () =>
-      analyzeJiraIssue({
+    mutationFn: () => {
+      if (!selectedAccount) throw new Error("Select an account before importing.");
+      return analyzeJiraIssue({
         data: {
           issueKey: issueKey.trim().toUpperCase(),
-          accountName: selectedAccount?.name ?? accounts[0]?.name ?? "",
+          accountId: selectedAccount.id,
+          accountName: selectedAccount.name,
           accounts: accounts.map((a) => ({ id: a.id, name: a.name, shortCode: a.shortCode })),
         },
-      }),
+      });
+    },
     onSuccess: (data) => {
       setResult(data);
       setSavedOk(false);
@@ -102,7 +114,7 @@ function EscalationsPage() {
   const saveMutation = useMutation({
     mutationFn: () => {
       if (!canWrite) throw new Error("You have read-only access.");
-      const accountId = selectedAccountId || result?.detectedAccount?.id || accounts[0]?.id;
+      const accountId = result?.detectedAccount?.id || selectedAccountId;
       if (!accountId) throw new Error("Select an account before saving.");
       const allItems = [
         ...checkedItems.map((label) => ({ label, done: false })),
@@ -167,12 +179,12 @@ function EscalationsPage() {
     : p === "P2" ? "bg-warn/10 text-warn"
     : "bg-muted text-muted-foreground";
 
-  // Open escalations grouped
   const openCols = [
     { title: "Triage (< 24h)", items: allEscalations.filter((_, i) => i % 3 === 0) },
-    { title: "In Progress",    items: allEscalations.filter((_, i) => i % 3 === 1) },
-    { title: "Awaiting Client",items: allEscalations.filter((_, i) => i % 3 === 2) },
+    { title: "In Progress", items: allEscalations.filter((_, i) => i % 3 === 1) },
+    { title: "Awaiting Client", items: allEscalations.filter((_, i) => i % 3 === 2) },
   ];
+  const matchedJiraSpace = result?.jiraSpace ?? result?.jiraProject;
 
   return (
     <div className="flex flex-col min-h-screen bg-background">
@@ -220,22 +232,31 @@ function EscalationsPage() {
               <>
                 <select
                   value={selectedAccountId}
-                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedAccountId(e.target.value);
+                    setResult(null);
+                    setSavedOk(false);
+                  }}
                   disabled={!accounts.length}
                   className="text-xs border rounded-md px-3 py-2 bg-background min-w-[160px]"
                 >
+                  <option value="" disabled>Select account</option>
                   {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
                 <input
                   value={issueKey}
-                  onChange={(e) => setIssueKey(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && analyzeMutation.mutate()}
-                  placeholder="SCRUM-1"
-                  className="text-xs border rounded-md px-3 py-2 bg-background w-28 font-mono"
+                  onChange={(e) => {
+                    setIssueKey(e.target.value);
+                    setResult(null);
+                    setSavedOk(false);
+                  }}
+                  onKeyDown={(e) => e.key === "Enter" && selectedAccountId && analyzeMutation.mutate()}
+                  placeholder="Issue key optional"
+                  className="text-xs border rounded-md px-3 py-2 bg-background w-36 font-mono"
                 />
                 <button
                   onClick={() => analyzeMutation.mutate()}
-                  disabled={!canWrite || !accounts.length || !issueKey.trim() || analyzeMutation.isPending}
+                  disabled={!canWrite || !accounts.length || !selectedAccountId || analyzeMutation.isPending}
                   className="flex items-center gap-1.5 px-4 py-2 bg-foreground text-background text-xs font-semibold rounded-md disabled:opacity-50"
                 >
                   {analyzeMutation.isPending ? <Loader2 className="size-3 animate-spin" /> : <Search className="size-3" />}
@@ -252,7 +273,7 @@ function EscalationsPage() {
         <>
           {!result && !analyzeMutation.isPending && !analyzeMutation.isError && (
             <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-              {canWrite ? "Select an account, enter a Jira issue key, and click Import."
+              {canWrite ? "Select an account and click Import. Add an issue key only for a specific Jira issue."
                         : "You have read-only access."}
             </div>
           )}
@@ -296,6 +317,11 @@ function EscalationsPage() {
                       {result.detectedAccount?.name ?? selectedAccount?.name}
                     </span>
                   )}
+                  {matchedJiraSpace && (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 font-medium">
+                      Jira space: {matchedJiraSpace.name} ({matchedJiraSpace.key})
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Priority</p>
@@ -314,7 +340,7 @@ function EscalationsPage() {
                 </div>
                 {result.detectedAccount && (
                   <p className="text-[10px] text-muted-foreground italic border rounded px-2 py-1.5">
-                    Account auto-detected from Jira ticket content.
+                    Account matched against the selected Jira space.
                   </p>
                 )}
                 {result.keywords.length > 0 && (
@@ -459,7 +485,13 @@ function EscalationsPage() {
                   </h3>
                   <div className="space-y-3">
                     {col.items.map((e) => (
-                      <EscalationCard key={e.id} esc={e} accounts={accounts} priorityBadge={priorityBadge} onOpen={() => setSelectedEscalation(e)} />
+                      <EscalationCard
+                        key={e.id}
+                        esc={e}
+                        accounts={accounts}
+                        priorityBadge={priorityBadge}
+                        onOpen={() => setSelectedEscalation(e)}
+                      />
                     ))}
                     {col.items.length === 0 && (
                       <p className="text-xs text-muted-foreground text-center py-6">None</p>
@@ -479,6 +511,7 @@ function EscalationsPage() {
           accounts={accounts}
           priorityBadge={priorityBadge}
           priorityColor={priorityColor}
+          editedBy={profile?.name ?? "Unknown"}
           onClose={() => setSelectedEscalation(null)}
           onActionToggled={(updated) => {
             setSelectedEscalation(updated);
@@ -604,6 +637,7 @@ function EscalationsPage() {
 
 function EscalationCard({ esc, accounts, priorityBadge, onOpen }) {
   const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
+
   return (
     <div
       onClick={onOpen}
@@ -654,7 +688,7 @@ function formatDate(val) {
   } catch { return val; }
 }
 
-function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, onClose, onActionToggled }) {
+function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, editedBy, onClose, onActionToggled }) {
   const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
   const [items, setItems] = useState(esc.actionItems ?? []);
   const [togglingIdx, setTogglingIdx] = useState(null);
@@ -667,7 +701,7 @@ function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, on
     const updated = items.map((a, i) => i === idx ? { ...a, done: newDone } : a);
     setItems(updated);
     try {
-      await toggleEscalationActionItem(item.id, newDone);
+      await toggleEscalationActionItem(item.id, newDone, { editedBy });
       onActionToggled({ ...esc, actionItems: updated });
     } catch {
       // Revert on failure
