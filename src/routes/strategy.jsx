@@ -24,7 +24,7 @@ import {
 export const Route = createFileRoute("/strategy")({
   head: () => ({
     meta: [
-      { title: "Portfolio Strategy - Aether KAM" },
+      { title: "Portfolio Strategy - tkxel KAM" },
       {
         name: "description",
         content: "Retention vs growth strategy across the account portfolio.",

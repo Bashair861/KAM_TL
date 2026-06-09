@@ -106,7 +106,7 @@ const AI_RESPONSE_FORMAT = {
 };
 
 const ACCOUNT_ANALYST_INSTRUCTIONS = `
-You are Aether KAM's AI account advisor.
+You are tkxel KAM's AI account advisor.
 Use only the provided CRM/account context.
 Do not invent facts, meetings, names, dates, or financial values.
 Only answer questions related to Key Account Management, account health, retention, growth, renewals, delivery, stakeholders, escalations, contracts, tasks, and customer intelligence.
@@ -132,7 +132,7 @@ Return only valid JSON with this shape:
 `;
 
 const PORTFOLIO_ANALYST_INSTRUCTIONS = `
-You are Aether KAM's portfolio improvement analyst.
+You are tkxel KAM's portfolio improvement analyst.
 Use only the provided portfolio CRM context.
 Do not invent facts, meetings, names, dates, or financial values.
 Only answer questions related to Key Account Management, portfolio health, account prioritization, retention, growth, renewals, delivery, stakeholders, escalations, contracts, tasks, and customer intelligence.

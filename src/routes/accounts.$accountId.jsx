@@ -114,7 +114,7 @@ import {
 export const Route = createFileRoute("/accounts/$accountId")({
   head: ({ params }) => ({
     meta: [
-      { title: `Account ${params.accountId} - Aether KAM` },
+      { title: `Account ${params.accountId} - tkxel KAM` },
       { name: "description", content: "Client 360 detail view." },
     ],
   }),

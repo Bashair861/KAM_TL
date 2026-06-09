@@ -7,7 +7,7 @@ import { completeGoogleCalendarOAuth } from "@/services/calendar";
 
 export const Route = createFileRoute("/calendar/callback")({
   head: () => ({
-    meta: [{ title: "Connecting Calendar - Aether KAM" }],
+    meta: [{ title: "Connecting Calendar - tkxel KAM" }],
   }),
   component: CalendarCallbackPage,
 });

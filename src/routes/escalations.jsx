@@ -11,7 +11,7 @@ import { Loader2, Search, Zap, Plus, X } from "lucide-react";
 export const Route = createFileRoute("/escalations")({
   head: () => ({
     meta: [
-      { title: "Jira Ticket Insights — Aether KAM" },
+      { title: "Jira Ticket Insights — tkxel KAM" },
       {
         name: "description",
         content: "Import a Jira issue, extract client keywords, education suggestions, and escalation action items.",

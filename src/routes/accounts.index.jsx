@@ -25,7 +25,7 @@ import {
 export const Route = createFileRoute("/accounts/")({
   head: () => ({
     meta: [
-      { title: "Accounts Portfolio — Aether KAM" },
+      { title: "Accounts Portfolio — tkxel KAM" },
       {
         name: "description",
         content: "Full list of key accounts with health, contract value, and trend.",
