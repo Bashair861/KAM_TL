@@ -210,6 +210,61 @@ function buildInsights(issueKey, title, description, accountName) {
   return { keywords, educationSuggestions, actionItems };
 }
 
+// ── OpenAI-powered insights (education suggestions + action items) ────────────
+
+async function generateAIInsights(keywords, title, description, issueKey, accountName) {
+  const apiKey = readEnv("OPENAI_API_KEY");
+  if (!apiKey) return null;
+
+  const prompt = `You are a KAM (Key Account Manager) assistant. Analyze this client escalation and return both education suggestions AND action items.
+
+Issue: ${issueKey} — ${title}
+Account: ${accountName}
+Detected keywords: ${keywords.join(", ")}
+Description: ${description.slice(0, 600)}
+
+Return ONLY a valid JSON object — no markdown, no code fences:
+{
+  "educationSuggestions": [
+    {
+      "title": "Short education topic title",
+      "description": "One sentence explaining why this is relevant to the ticket",
+      "context": "Use before the ${accountName} escalation/RCA conversation.",
+      "matchedKeywords": ["up to 3 keywords from the detected list"]
+    }
+  ],
+  "actionItems": [
+    "Specific KAM action item string referencing ${accountName} and ${issueKey} where relevant"
+  ]
+}
+
+Requirements:
+- educationSuggestions: 4–6 items, each grounded in the ticket content
+- actionItems: 8–12 specific, actionable steps the KAM should take to resolve this escalation`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-5.4-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.6,
+    }),
+  });
+
+  if (!res.ok) return null;
+  const json = await res.json();
+  const text = json.choices?.[0]?.message?.content ?? "";
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+  } catch {}
+  return null;
+}
+
 // ── Server function ────────────────────────────────────────────────────────────
 
 export const analyzeJiraIssue = createServerFn({ method: "POST" })
@@ -227,6 +282,15 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
     const resolvedAccountName = accountName || detectedAccount?.name || "the client";
 
     const insights = buildInsights(issueKey, title, description, resolvedAccountName);
+
+    // Use AI for both education suggestions and action items; fall back to rule-based
+    const aiInsights = await generateAIInsights(
+      insights.keywords,
+      title,
+      description,
+      issueKey,
+      resolvedAccountName,
+    );
 
     return {
       issue: {
@@ -247,7 +311,7 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
         ? { id: detectedAccount.id, name: detectedAccount.name }
         : null,
       keywords: insights.keywords,
-      educationSuggestions: insights.educationSuggestions,
-      suggestedActionItems: insights.actionItems,
+      educationSuggestions: aiInsights?.educationSuggestions ?? insights.educationSuggestions,
+      suggestedActionItems: aiInsights?.actionItems ?? insights.actionItems,
     };
   });

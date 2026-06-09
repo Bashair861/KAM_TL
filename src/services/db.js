@@ -1641,7 +1641,7 @@ export async function fetchEscalations(accountId) {
     realisticCheck: e.realistic_check ?? undefined,
     clientFeedback: e.client_feedback ?? undefined,
     stakeholders: e.stakeholders ?? [],
-    actionItems: (e.escalation_action_items ?? []).map((a) => ({ label: a.label, done: a.done })),
+    actionItems: (e.escalation_action_items ?? []).map((a) => ({ id: a.id, label: a.label, done: a.done })),
   }));
 }
 // --- fetch opportunities ------------------------------------------------------
@@ -3177,4 +3177,44 @@ export async function saveEducationSession(session) {
     ],
     session.editedBy ?? "Unknown",
   );
+}
+
+// ─── toggle escalation action item done state ─────────────────────────────────
+export async function toggleEscalationActionItem(id, done) {
+  const { error } = await supabase
+    .from("escalation_action_items")
+    .update({ done })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+// ─── create escalation (manual / runtime) ────────────────────────────────────
+export async function createEscalation(escalation) {
+  const id = `ESC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const slaHours = escalation.priority === "P1" ? 48 : escalation.priority === "P2" ? 72 : 120;
+
+  const { error: escalErr } = await supabase.from("escalations").insert({
+    id,
+    account_id: escalation.accountId,
+    title: escalation.title,
+    priority: escalation.priority,
+    description: escalation.description || null,
+    rca: escalation.rca || null,
+    sla_remaining_hours: slaHours,
+    opened_at: new Date().toISOString(),
+  });
+  if (escalErr) throw escalErr;
+
+  if (escalation.actionItems?.length) {
+    const { error: aiErr } = await supabase.from("escalation_action_items").insert(
+      escalation.actionItems.map((label) => ({
+        escalation_id: id,
+        label,
+        done: false,
+      })),
+    );
+    if (aiErr) throw aiErr;
+  }
+
+  return { id };
 }

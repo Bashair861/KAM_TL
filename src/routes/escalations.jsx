@@ -1,31 +1,42 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
-import { getRolePermissions } from "@/data/kam-data";
-import { fetchAccounts } from "@/services/db";
+import { getRolePermissions, getAccount } from "@/data/kam-data";
+import { fetchAccounts, fetchEscalations, createEscalation, toggleEscalationActionItem } from "@/services/db";
 import { analyzeJiraIssue } from "@/services/jiraInsights";
 import { saveJiraEscalations } from "@/services/jira";
 import { useAuth } from "@/context/AuthContext";
-import { Loader2, Search, Zap, Plus, X } from "lucide-react";
+import {
+  Loader2, Search, Zap, Plus, X, AlertTriangle,
+  CheckCircle2, Circle, Clock, Trash2,
+} from "lucide-react";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/escalations")({
+  validateSearch: (search) => ({
+    tab: typeof search.tab === "string" ? search.tab : "import",
+  }),
   head: () => ({
     meta: [
-      { title: "Jira Ticket Insights — tkxel KAM" },
-      {
-        name: "description",
-        content: "Import a Jira issue, extract client keywords, education suggestions, and escalation action items.",
-      },
+      { title: "Escalations - tkxel KAM" },
+      { name: "description", content: "Jira import, escalation insights and open escalations board." },
     ],
   }),
   component: EscalationsPage,
 });
 
 function EscalationsPage() {
+  const { tab: initialTab } = Route.useSearch();
   const { profile } = useAuth();
   const role = profile?.role ?? "KAM";
   const canWrite = Boolean(profile && getRolePermissions(role).write);
   const queryClient = useQueryClient();
+
+  const [activeTab, setActiveTab] = useState(initialTab ?? "import");
+
+  // Jira import state
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [issueKey, setIssueKey] = useState("SCRUM-1");
   const [result, setResult] = useState(null);
@@ -35,25 +46,38 @@ function EscalationsPage() {
   const [newItemText, setNewItemText] = useState("");
   const [priority, setPriority] = useState("P1");
 
+  // Escalation detail modal
+  const [selectedEscalation, setSelectedEscalation] = useState(null);
+
+  // Create escalation dialog state
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createForm, setCreateForm] = useState({ accountId: "", title: "", description: "", rca: "" });
+  const [createPriority, setCreatePriority] = useState("P1");
+  const [createItems, setCreateItems] = useState([]);
+  const [createItemText, setCreateItemText] = useState("");
+  const [createError, setCreateError] = useState("");
+
   const { data: accounts = [] } = useQuery({
     queryKey: ["accounts", role, profile?.id],
     queryFn: () => fetchAccounts({ role, userId: profile?.id }),
     enabled: Boolean(profile),
   });
 
-  // Set initial account when accounts first load (onSuccess removed in TanStack Query v5)
+  const { data: allEscalations = [] } = useQuery({
+    queryKey: ["escalations"],
+    queryFn: () => fetchEscalations(),
+  });
+
   useEffect(() => {
-    if (!accounts.length) {
-      setSelectedAccountId("");
-      return;
-    }
-    if (!selectedAccountId || !accounts.some((account) => account.id === selectedAccountId)) {
+    if (!accounts.length) { setSelectedAccountId(""); return; }
+    if (!selectedAccountId || !accounts.some((a) => a.id === selectedAccountId)) {
       setSelectedAccountId(accounts[0].id);
     }
   }, [accounts, selectedAccountId]);
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
 
+  // Jira analyze mutation
   const analyzeMutation = useMutation({
     mutationFn: () =>
       analyzeJiraIssue({
@@ -70,25 +94,23 @@ function EscalationsPage() {
       setCustomItems([]);
       setNewItemText("");
       setPriority(data.issue.priority);
-      if (data.detectedAccount && !selectedAccountId) {
-        setSelectedAccountId(data.detectedAccount.id);
-      }
+      if (data.detectedAccount && !selectedAccountId) setSelectedAccountId(data.detectedAccount.id);
     },
   });
 
+  // Save Jira escalation
   const saveMutation = useMutation({
     mutationFn: () => {
       if (!canWrite) throw new Error("You have read-only access.");
       const accountId = selectedAccountId || result?.detectedAccount?.id || accounts[0]?.id;
-      if (!accountId) throw new Error("Select an assigned account before saving.");
+      if (!accountId) throw new Error("Select an account before saving.");
       const allItems = [
         ...checkedItems.map((label) => ({ label, done: false })),
         ...customItems.map((label) => ({ label, done: false })),
       ];
-      const actionItems = allItems.length ? allItems : result.issue.subtaskActionItems;
       return saveJiraEscalations({
         data: {
-          issues: [{ ...result.issue, priority, actionItems }],
+          issues: [{ ...result.issue, priority, actionItems: allItems.length ? allItems : result.issue.subtaskActionItems }],
           accountId,
           editedBy: profile?.name ?? "Unknown",
         },
@@ -100,293 +122,656 @@ function EscalationsPage() {
     },
   });
 
+  // Create escalation mutation
+  const createMutation = useMutation({
+    mutationFn: ({ form, priority: p, items }) => {
+      if (!form.title.trim()) throw new Error("Title is required.");
+      if (!form.accountId) throw new Error("Account is required.");
+      return createEscalation({
+        accountId: form.accountId,
+        title: form.title.trim(),
+        priority: p,
+        description: form.description.trim() || null,
+        rca: form.rca.trim() || null,
+        actionItems: items,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["escalations"], exact: false });
+      setCreateOpen(false);
+      setCreateForm({ accountId: selectedAccountId, title: "", description: "", rca: "" });
+      setCreatePriority("P1");
+      setCreateItems([]);
+      setCreateItemText("");
+      setCreateError("");
+    },
+    onError: (e) => setCreateError(e.message),
+  });
+
+  function openCreateDialog() {
+    setCreateForm({ accountId: selectedAccountId || accounts[0]?.id || "", title: "", description: "", rca: "" });
+    setCreatePriority("P1");
+    setCreateItems([]);
+    setCreateItemText("");
+    setCreateError("");
+    setCreateOpen(true);
+  }
+
   const priorityColor = (p) =>
-    p === "P1"
-      ? "bg-red-100 text-red-600 border-red-200"
-      : p === "P2"
-        ? "bg-orange-100 text-orange-600 border-orange-200"
-        : "bg-gray-100 text-gray-500 border-gray-200";
+    p === "P1" ? "bg-red-100 text-red-600 border-red-200"
+    : p === "P2" ? "bg-orange-100 text-orange-600 border-orange-200"
+    : "bg-gray-100 text-gray-500 border-gray-200";
+
+  const priorityBadge = (p) =>
+    p === "P1" ? "bg-crit/10 text-crit"
+    : p === "P2" ? "bg-warn/10 text-warn"
+    : "bg-muted text-muted-foreground";
+
+  // Open escalations grouped
+  const openCols = [
+    { title: "Triage (< 24h)", items: allEscalations.filter((_, i) => i % 3 === 0) },
+    { title: "In Progress",    items: allEscalations.filter((_, i) => i % 3 === 1) },
+    { title: "Awaiting Client",items: allEscalations.filter((_, i) => i % 3 === 2) },
+  ];
 
   return (
     <div className="flex flex-col min-h-screen bg-background">
       {/* Header */}
-      <header className="bg-card border-b px-8 py-4 sticky top-0 z-10">
-        <div className="flex items-start justify-between gap-6">
-          <div className="flex items-center gap-2">
-            <Zap className="size-4 text-primary" />
-            <div>
-              <h1 className="font-semibold text-base">Jira Ticket Insights</h1>
-              <p className="text-xs text-muted-foreground">
-                Import a Jira issue, extract client keywords, education suggestions, and escalation action items.
-              </p>
+      <header className="bg-card border-b px-8 py-3 sticky top-0 z-10">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <Zap className="size-4 text-primary" />
+              <h1 className="font-semibold text-base">Escalations</h1>
+            </div>
+            {/* Tabs */}
+            <div className="flex border rounded-lg overflow-hidden text-xs font-semibold">
+              {[
+                { key: "import", label: "Jira Import" },
+                { key: "open",   label: `Open (${allEscalations.length})` },
+              ].map((t) => (
+                <button
+                  key={t.key}
+                  onClick={() => setActiveTab(t.key)}
+                  className={`px-4 py-1.5 transition-colors ${
+                    activeTab === t.key
+                      ? "bg-primary text-primary-foreground"
+                      : "hover:bg-muted text-muted-foreground"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <select
-              value={selectedAccountId}
-              onChange={(e) => setSelectedAccountId(e.target.value)}
-              disabled={!accounts.length}
-              className="text-xs border rounded-md px-3 py-2 bg-background min-w-[180px]"
-            >
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-            <input
-              value={issueKey}
-              onChange={(e) => setIssueKey(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && analyzeMutation.mutate()}
-              placeholder="SCRUM-1"
-              className="text-xs border rounded-md px-3 py-2 bg-background w-28 font-mono"
-            />
-            <button
-              onClick={() => analyzeMutation.mutate()}
-              disabled={!canWrite || !accounts.length || !issueKey.trim() || analyzeMutation.isPending}
-              className="flex items-center gap-1.5 px-4 py-2 bg-foreground text-background text-xs font-semibold rounded-md disabled:opacity-50"
-            >
-              {analyzeMutation.isPending ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <Search className="size-3" />
-              )}
-              Import
-            </button>
+
+          <div className="flex items-center gap-2">
+            {canWrite && (
+              <button
+                onClick={openCreateDialog}
+                disabled={!accounts.length}
+                className="flex items-center gap-1.5 px-4 py-2 bg-crit text-white text-xs font-semibold rounded-md disabled:opacity-50 hover:bg-crit/90"
+              >
+                <AlertTriangle className="size-3" />
+                Create Escalation
+              </button>
+            )}
+            {activeTab === "import" && (
+              <>
+                <select
+                  value={selectedAccountId}
+                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                  disabled={!accounts.length}
+                  className="text-xs border rounded-md px-3 py-2 bg-background min-w-[160px]"
+                >
+                  {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                <input
+                  value={issueKey}
+                  onChange={(e) => setIssueKey(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && analyzeMutation.mutate()}
+                  placeholder="SCRUM-1"
+                  className="text-xs border rounded-md px-3 py-2 bg-background w-28 font-mono"
+                />
+                <button
+                  onClick={() => analyzeMutation.mutate()}
+                  disabled={!canWrite || !accounts.length || !issueKey.trim() || analyzeMutation.isPending}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-foreground text-background text-xs font-semibold rounded-md disabled:opacity-50"
+                >
+                  {analyzeMutation.isPending ? <Loader2 className="size-3 animate-spin" /> : <Search className="size-3" />}
+                  Import
+                </button>
+              </>
+            )}
           </div>
         </div>
       </header>
 
-      {/* Body */}
-      {!result && !analyzeMutation.isPending && !analyzeMutation.isError && (
-        <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-          {canWrite
-            ? accounts.length
-              ? "Select an account, enter a Jira issue key, and click Import."
-              : "No assigned accounts are available for your KAM profile."
-            : "You have read-only access. Jira imports are available to Head of KAM and assigned KAMs only."}
-        </div>
-      )}
-
-      {analyzeMutation.isPending && (
-        <div className="flex-1 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="size-4 animate-spin" />
-          Fetching and analysing Jira issue…
-        </div>
-      )}
-
-      {analyzeMutation.isError && (
-        <div className="flex-1 flex items-center justify-center text-sm text-destructive px-8 text-center">
-          {analyzeMutation.error?.message ?? "Failed to fetch issue."}
-        </div>
-      )}
-
-      {result && !analyzeMutation.isPending && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 divide-x flex-1">
-          {/* ── Col 1: Imported Issue ── */}
-          <div className="p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                Imported Issue
-              </p>
-              <button
-                onClick={() => saveMutation.mutate()}
-                disabled={!canWrite || saveMutation.isPending || savedOk}
-                className={`px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded flex items-center gap-1.5 ${
-                  savedOk
-                    ? "bg-green-100 text-green-700"
-                    : "bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
-                }`}
-              >
-                {saveMutation.isPending && <Loader2 className="size-3 animate-spin" />}
-                {savedOk ? "Saved ✓" : "Save to Escalation"}
-              </button>
+      {/* ── TAB: Jira Import ── */}
+      {activeTab === "import" && (
+        <>
+          {!result && !analyzeMutation.isPending && !analyzeMutation.isError && (
+            <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+              {canWrite ? "Select an account, enter a Jira issue key, and click Import."
+                        : "You have read-only access."}
             </div>
-
-            {saveMutation.isError && (
-              <p className="text-xs text-destructive">{saveMutation.error?.message}</p>
-            )}
-
-            <div>
-              <a
-                href="#"
-                className="text-sm font-semibold text-primary hover:underline leading-snug"
-              >
-                {result.issue.key} · {result.issue.title}
-              </a>
+          )}
+          {analyzeMutation.isPending && (
+            <div className="flex-1 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Fetching and analysing Jira issue…
             </div>
-
-            <div className="flex flex-wrap gap-1.5 items-center">
-              <span className="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground font-medium">
-                {result.issue.status}
-              </span>
-              {(result.detectedAccount ?? selectedAccount) && (
-                <span className="text-[10px] px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
-                  {result.detectedAccount?.name ?? selectedAccount?.name}
-                </span>
-              )}
+          )}
+          {analyzeMutation.isError && (
+            <div className="flex-1 flex items-center justify-center text-sm text-destructive px-8 text-center">
+              {analyzeMutation.error?.message ?? "Failed to fetch issue."}
             </div>
-
-            {/* Priority picker */}
-            <div className="space-y-1.5">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                Priority
-              </p>
-              <div className="flex gap-1.5">
-                {["P1", "P2", "P3"].map((p) => (
+          )}
+          {result && !analyzeMutation.isPending && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 divide-x flex-1">
+              {/* Col 1: Issue */}
+              <div className="p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Imported Issue</p>
                   <button
-                    key={p}
-                    onClick={() => setPriority(p)}
-                    className={`px-3 py-1 text-[11px] font-bold rounded border transition-all ${
-                      priority === p
-                        ? priorityColor(p) + " ring-1 ring-offset-1 ring-current"
-                        : "bg-muted text-muted-foreground border-muted hover:bg-muted/80"
+                    onClick={() => saveMutation.mutate()}
+                    disabled={!canWrite || saveMutation.isPending || savedOk}
+                    className={`px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded flex items-center gap-1.5 ${
+                      savedOk ? "bg-green-100 text-green-700"
+                              : "bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
                     }`}
                   >
+                    {saveMutation.isPending && <Loader2 className="size-3 animate-spin" />}
+                    {savedOk ? "Saved ✓" : "Save to Escalation"}
+                  </button>
+                </div>
+                {saveMutation.isError && <p className="text-xs text-destructive">{saveMutation.error?.message}</p>}
+                <a href="#" className="text-sm font-semibold text-primary hover:underline leading-snug block">
+                  {result.issue.key} · {result.issue.title}
+                </a>
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground font-medium">{result.issue.status}</span>
+                  {(result.detectedAccount ?? selectedAccount) && (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+                      {result.detectedAccount?.name ?? selectedAccount?.name}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Priority</p>
+                  <div className="flex gap-1.5">
+                    {["P1","P2","P3"].map((p) => (
+                      <button key={p} onClick={() => setPriority(p)}
+                        className={`px-3 py-1 text-[11px] font-bold rounded border transition-all ${
+                          priority === p ? priorityColor(p) + " ring-1 ring-offset-1 ring-current"
+                                        : "bg-muted text-muted-foreground border-muted hover:bg-muted/80"
+                        }`}>
+                        {p}
+                      </button>
+                    ))}
+                    <span className="text-[10px] text-muted-foreground self-center ml-1">(Jira: {result.issue.priorityLabel})</span>
+                  </div>
+                </div>
+                {result.detectedAccount && (
+                  <p className="text-[10px] text-muted-foreground italic border rounded px-2 py-1.5">
+                    Account auto-detected from Jira ticket content.
+                  </p>
+                )}
+                {result.keywords.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Keywords</p>
+                    <div className="flex flex-wrap gap-1">
+                      {result.keywords.map((kw) => (
+                        <span key={kw} className="text-[10px] px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground">{kw}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.issue.description && (
+                  <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-6">{result.issue.description}</p>
+                )}
+              </div>
+
+              {/* Col 2: Education Suggestions */}
+              <div className="p-6 space-y-4">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  AI Education Suggestions
+                </p>
+                {result.educationSuggestions.length === 0 && (
+                  <p className="text-xs text-muted-foreground">No suggestions generated.</p>
+                )}
+                <div className="space-y-3">
+                  {result.educationSuggestions.map((s, i) => (
+                    <div key={i} className="border rounded-lg p-3 space-y-1.5">
+                      <p className="text-xs font-semibold">{s.title}</p>
+                      <p className="text-[11px] text-muted-foreground">{s.description}</p>
+                      {s.matchedKeywords?.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {s.matchedKeywords.map((kw) => (
+                            <span key={kw} className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium">{kw}</span>
+                          ))}
+                        </div>
+                      )}
+                      {s.context && <p className="text-[11px] text-primary">{s.context}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Col 3: Action Items */}
+              <div className="p-6 space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                  Suggested Action Items
+                </p>
+
+                {/* Suggested items (checklist style) */}
+                <div className="border rounded-lg divide-y overflow-hidden">
+                  {result.suggestedActionItems.map((item) => (
+                    <label key={item} className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/30 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="shrink-0 accent-primary"
+                        checked={checkedItems.includes(item)}
+                        onChange={() =>
+                          setCheckedItems((prev) =>
+                            prev.includes(item) ? prev.filter((x) => x !== item) : [...prev, item]
+                          )
+                        }
+                      />
+                      <span className="text-xs text-foreground leading-snug flex-1">{item}</span>
+                    </label>
+                  ))}
+                </div>
+
+                {/* Custom items */}
+                {customItems.length > 0 && (
+                  <div className="border rounded-lg divide-y overflow-hidden">
+                    {customItems.map((item, i) => (
+                      <div key={i} className="flex items-center gap-3 px-3 py-2.5 bg-accent/5">
+                        <input type="checkbox" className="shrink-0 accent-primary" defaultChecked />
+                        <span className="text-xs flex-1">{item}</span>
+                        <button
+                          onClick={() => setCustomItems((prev) => prev.filter((_, idx) => idx !== i))}
+                          className="text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Add item input */}
+                <div className="flex gap-2">
+                  <input
+                    value={newItemText}
+                    onChange={(e) => setNewItemText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && newItemText.trim()) {
+                        setCustomItems((prev) => [...prev, newItemText.trim()]);
+                        setNewItemText("");
+                      }
+                    }}
+                    placeholder="Add your own action item…"
+                    className="flex-1 text-xs border rounded-md px-2 py-1.5 bg-background"
+                  />
+                  <button
+                    onClick={() => {
+                      if (newItemText.trim()) {
+                        setCustomItems((prev) => [...prev, newItemText.trim()]);
+                        setNewItemText("");
+                      }
+                    }}
+                    className="px-2.5 py-1.5 border rounded-md hover:bg-muted text-xs font-semibold text-accent flex items-center gap-1"
+                  >
+                    <Plus className="size-3" /> Add
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {checkedItems.length + customItems.length} item{checkedItems.length + customItems.length !== 1 ? "s" : ""} will be saved.
+                </p>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── TAB: Open Escalations ── */}
+      {activeTab === "open" && (
+        <div className="p-8 max-w-7xl w-full mx-auto">
+          {allEscalations.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-24 gap-3 text-muted-foreground">
+              <AlertTriangle className="size-8 opacity-30" />
+              <p className="text-sm">No escalations yet.</p>
+              {canWrite && (
+                <button onClick={openCreateDialog} className="text-xs font-semibold text-primary hover:underline">
+                  + Create one manually
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {openCols.map((col) => (
+                <div key={col.title} className="bg-muted/30 rounded-xl border p-4">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3 flex items-center justify-between">
+                    {col.title}
+                    <span className="bg-card border text-[10px] px-1.5 py-0.5 rounded font-mono">{col.items.length}</span>
+                  </h3>
+                  <div className="space-y-3">
+                    {col.items.map((e) => (
+                      <EscalationCard key={e.id} esc={e} accounts={accounts} priorityBadge={priorityBadge} onOpen={() => setSelectedEscalation(e)} />
+                    ))}
+                    {col.items.length === 0 && (
+                      <p className="text-xs text-muted-foreground text-center py-6">None</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Escalation Detail Modal ── */}
+      {selectedEscalation && (
+        <EscalationDetailModal
+          esc={selectedEscalation}
+          accounts={accounts}
+          priorityBadge={priorityBadge}
+          priorityColor={priorityColor}
+          onClose={() => setSelectedEscalation(null)}
+          onActionToggled={(updated) => {
+            setSelectedEscalation(updated);
+            queryClient.invalidateQueries({ queryKey: ["escalations"], exact: false });
+          }}
+        />
+      )}
+
+      {/* ── Create Escalation Dialog ── */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-crit" />
+              Create Escalation
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Account *</label>
+              <select value={createForm.accountId} onChange={(e) => setCreateForm((f) => ({ ...f, accountId: e.target.value }))}
+                className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background">
+                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Title *</label>
+              <input value={createForm.title} onChange={(e) => setCreateForm((f) => ({ ...f, title: e.target.value }))}
+                placeholder="e.g. API downtime impacting client workflows"
+                className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background" />
+            </div>
+
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Priority *</label>
+              <div className="flex gap-2 mt-1">
+                {["P1","P2","P3"].map((p) => (
+                  <button key={p} type="button" onClick={() => setCreatePriority(p)}
+                    className={`px-4 py-1.5 text-xs font-bold rounded border transition-all ${
+                      createPriority === p ? priorityColor(p) + " ring-1 ring-offset-1 ring-current"
+                                           : "bg-muted text-muted-foreground border-muted hover:bg-muted/80"
+                    }`}>
                     {p}
                   </button>
                 ))}
                 <span className="text-[10px] text-muted-foreground self-center ml-1">
-                  (Jira: {result.issue.priorityLabel})
+                  SLA: {createPriority === "P1" ? "48h" : createPriority === "P2" ? "72h" : "120h"}
                 </span>
               </div>
             </div>
 
-            {result.detectedAccount && (
-              <p className="text-[10px] text-muted-foreground italic border rounded px-2 py-1.5">
-                Account auto-detected from Jira ticket content.
-              </p>
-            )}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Description</label>
+              <textarea value={createForm.description} onChange={(e) => setCreateForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="What is the issue? What's the client impact?"
+                rows={3} className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background resize-none" />
+            </div>
 
-            {result.keywords.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Keywords
-                </p>
-                <div className="flex flex-wrap gap-1">
-                  {result.keywords.map((kw) => (
-                    <span
-                      key={kw}
-                      className="text-[10px] px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground"
-                    >
-                      {kw}
-                    </span>
-                  ))}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Root Cause Analysis</label>
+              <textarea value={createForm.rca} onChange={(e) => setCreateForm((f) => ({ ...f, rca: e.target.value }))}
+                placeholder="Known or suspected root cause"
+                rows={2} className="w-full mt-1 text-xs border rounded-md px-3 py-2 bg-background resize-none" />
+            </div>
+
+            {/* Action Items — styled like screenshot */}
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Action Items</label>
+              <div className="mt-1 border rounded-lg overflow-hidden divide-y">
+                {createItems.map((item, i) => (
+                  <div key={i} className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/20">
+                    <input type="checkbox" className="shrink-0 accent-primary" />
+                    <span className="flex-1 text-xs">{item}</span>
+                    <button type="button" onClick={() => setCreateItems((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="text-muted-foreground hover:text-destructive">
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <input
+                    value={createItemText}
+                    onChange={(e) => setCreateItemText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && createItemText.trim()) {
+                        setCreateItems((prev) => [...prev, createItemText.trim()]);
+                        setCreateItemText("");
+                      }
+                    }}
+                    placeholder="Type and press Enter to add…"
+                    className="flex-1 text-xs outline-none bg-transparent"
+                  />
                 </div>
               </div>
-            )}
-
-            {result.issue.description && (
-              <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-6">
-                {result.issue.description}
-              </p>
-            )}
-          </div>
-
-          {/* ── Col 2: Education Suggestions ── */}
-          <div className="p-6 space-y-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-              Education Suggestions
-            </p>
-            {result.educationSuggestions.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No suggestions — add an ANTHROPIC_API_KEY to .env to enable AI analysis.
-              </p>
-            )}
-            <div className="space-y-3">
-              {result.educationSuggestions.map((s, i) => (
-                <div key={i} className="border rounded-lg p-3 space-y-1.5">
-                  <p className="text-xs font-semibold">{s.title}</p>
-                  <p className="text-[11px] text-muted-foreground">{s.description}</p>
-                  {s.matchedKeywords?.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-0.5">
-                      {s.matchedKeywords.map((kw) => (
-                        <span
-                          key={kw}
-                          className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium"
-                        >
-                          {kw}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {s.context && (
-                    <p className="text-[11px] text-primary cursor-default">{s.context}</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* ── Col 3: Suggested Action Items ── */}
-          <div className="p-6 space-y-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-              Suggested Action Items
-            </p>
-            <div className="space-y-2">
-              {result.suggestedActionItems.map((item) => (
-                <label key={item} className="flex items-start gap-2.5 cursor-pointer group">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 shrink-0 accent-primary"
-                    checked={checkedItems.includes(item)}
-                    onChange={() =>
-                      setCheckedItems((prev) =>
-                        prev.includes(item) ? prev.filter((x) => x !== item) : [...prev, item],
-                      )
-                    }
-                  />
-                  <span className="text-[11px] text-foreground leading-snug group-hover:text-primary transition-colors">
-                    {item}
-                  </span>
-                </label>
-              ))}
-
-              {customItems.map((item, i) => (
-                <div key={i} className="flex items-start gap-2.5">
-                  <input type="checkbox" className="mt-0.5 shrink-0 accent-primary" defaultChecked />
-                  <span className="text-[11px] text-foreground leading-snug flex-1">{item}</span>
-                  <button
-                    onClick={() => setCustomItems((prev) => prev.filter((_, idx) => idx !== i))}
-                    className="text-muted-foreground hover:text-destructive shrink-0"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex gap-2 pt-1">
-              <input
-                value={newItemText}
-                onChange={(e) => setNewItemText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && newItemText.trim()) {
-                    setCustomItems((prev) => [...prev, newItemText.trim()]);
-                    setNewItemText("");
-                  }
-                }}
-                placeholder="Add your own action item…"
-                className="flex-1 text-xs border rounded-md px-2 py-1.5 bg-background"
-              />
-              <button
-                onClick={() => {
-                  if (newItemText.trim()) {
-                    setCustomItems((prev) => [...prev, newItemText.trim()]);
-                    setNewItemText("");
-                  }
-                }}
-                className="px-2 py-1.5 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80"
+              <button type="button"
+                onClick={() => { if (createItemText.trim()) { setCreateItems((prev) => [...prev, createItemText.trim()]); setCreateItemText(""); } }}
+                className="mt-1.5 text-[11px] font-bold text-primary uppercase tracking-wider flex items-center gap-1 hover:opacity-70"
               >
-                <Plus className="size-3.5" />
+                <Plus className="size-3" /> Add Action Item
               </button>
             </div>
-            <p className="text-[10px] text-muted-foreground">
-              {checkedItems.length + customItems.length} item{checkedItems.length + customItems.length !== 1 ? "s" : ""} will be saved with the escalation.
-            </p>
+
+            {createError && <p className="text-xs text-destructive">{createError}</p>}
           </div>
+
+          <DialogFooter>
+            <button onClick={() => setCreateOpen(false)} className="px-4 py-2 text-xs border rounded-md hover:bg-muted">Cancel</button>
+            <button
+              onClick={() => createMutation.mutate({ form: createForm, priority: createPriority, items: createItems })}
+              disabled={createMutation.isPending}
+              className="px-4 py-2 text-xs bg-crit text-white rounded-md disabled:opacity-50 flex items-center gap-1.5 hover:bg-crit/90"
+            >
+              {createMutation.isPending && <Loader2 className="size-3 animate-spin" />}
+              Create Escalation
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function EscalationCard({ esc, accounts, priorityBadge, onOpen }) {
+  const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
+  return (
+    <div
+      onClick={onOpen}
+      className="bg-card border rounded-lg p-4 hover:shadow-md hover:border-primary/30 transition-all cursor-pointer"
+    >
+      <div className="flex items-center justify-between mb-2">
+        <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${priorityBadge(esc.priority)}`}>
+          {esc.priority}
+        </span>
+        <span className="text-[10px] font-mono text-muted-foreground flex items-center gap-1">
+          <Clock className="size-3" />
+          {Number(esc.slaRemainingHours ?? 0).toFixed(1)}h
+        </span>
+      </div>
+      <p className="text-sm font-semibold leading-snug">{esc.title}</p>
+      <p className="text-[11px] text-muted-foreground mt-1">{acc.name}</p>
+      {esc.description && (
+        <p className="text-[11px] text-muted-foreground mt-2 line-clamp-2">{esc.description}</p>
+      )}
+      {esc.actionItems?.length > 0 && (
+        <div className="mt-3 pt-3 border-t space-y-1.5">
+          {esc.actionItems.slice(0, 3).map((a) => (
+            <div key={a.label} className="flex items-center gap-2 text-[11px]">
+              {a.done
+                ? <CheckCircle2 className="size-3 text-success shrink-0" />
+                : <Circle className="size-3 text-muted-foreground shrink-0" />}
+              <span className={a.done ? "line-through text-muted-foreground" : ""}>{a.label}</span>
+            </div>
+          ))}
+          {esc.actionItems.length > 3 && (
+            <p className="text-[10px] text-muted-foreground">+{esc.actionItems.length - 3} more</p>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+function formatDate(val) {
+  if (!val) return "—";
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return d.toLocaleString("en-US", {
+      month: "short", day: "numeric", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch { return val; }
+}
+
+function EscalationDetailModal({ esc, accounts, priorityBadge, priorityColor, onClose, onActionToggled }) {
+  const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
+  const [items, setItems] = useState(esc.actionItems ?? []);
+  const [togglingIdx, setTogglingIdx] = useState(null);
+
+  async function toggle(item, idx) {
+    if (!item.id || togglingIdx !== null) return;
+    const newDone = !item.done;
+    setTogglingIdx(idx);
+    // Optimistic update
+    const updated = items.map((a, i) => i === idx ? { ...a, done: newDone } : a);
+    setItems(updated);
+    try {
+      await toggleEscalationActionItem(item.id, newDone);
+      onActionToggled({ ...esc, actionItems: updated });
+    } catch {
+      // Revert on failure
+      setItems(items);
+    } finally {
+      setTogglingIdx(null);
+    }
+  }
+
+  const slaColor = esc.slaRemainingHours < 24 ? "text-crit" : esc.slaRemainingHours < 48 ? "text-warn" : "text-success";
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <div className="flex items-start gap-3">
+            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0 mt-0.5 ${priorityBadge(esc.priority)}`}>
+              {esc.priority}
+            </span>
+            <DialogTitle className="text-base leading-snug">{esc.title}</DialogTitle>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 mt-2 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">{acc.name}</span>
+            <span>·</span>
+            <span className={`font-mono font-bold ${slaColor}`}>
+              <Clock className="size-3 inline mr-0.5" />
+              {Number(esc.slaRemainingHours ?? 0).toFixed(1)}h SLA remaining
+            </span>
+            <span>·</span>
+            <span>Opened {formatDate(esc.openedAt)}</span>
+          </div>
+        </DialogHeader>
+
+        <div className="overflow-y-auto flex-1 space-y-4 pr-1">
+          {esc.description && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Description</p>
+              <p className="text-sm leading-relaxed">{esc.description}</p>
+            </div>
+          )}
+
+          {esc.rca && (
+            <div className="bg-muted/30 rounded-lg p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Root Cause Analysis</p>
+              <p className="text-xs leading-relaxed">{esc.rca}</p>
+            </div>
+          )}
+
+          {items.length > 0 && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
+                Action Items ({items.filter((a) => a.done).length}/{items.length} done)
+              </p>
+              <div className="border rounded-lg divide-y overflow-hidden">
+                {items.map((a, i) => (
+                  <label
+                    key={a.id ?? a.label}
+                    className={`flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-colors ${
+                      a.done ? "bg-success/5 hover:bg-success/10" : "hover:bg-muted/30"
+                    } ${togglingIdx === i ? "opacity-60" : ""}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={a.done}
+                      onChange={() => toggle(a, i)}
+                      disabled={togglingIdx !== null}
+                      className="shrink-0 accent-primary size-4"
+                    />
+                    <span className={`text-xs flex-1 leading-snug ${a.done ? "line-through text-muted-foreground" : "text-foreground"}`}>
+                      {a.label}
+                    </span>
+                    {togglingIdx === i
+                      ? <Loader2 className="size-3.5 animate-spin text-muted-foreground shrink-0" />
+                      : a.done
+                        ? <CheckCircle2 className="size-3.5 text-success shrink-0" />
+                        : null
+                    }
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {esc.recommendation && (
+            <div className="bg-accent/5 border border-accent/20 rounded-lg p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-accent mb-1">Recommendation</p>
+              <p className="text-xs leading-relaxed">{esc.recommendation}</p>
+            </div>
+          )}
+
+          {esc.clientFeedback && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Client Feedback</p>
+              <p className="text-xs leading-relaxed">{esc.clientFeedback}</p>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="pt-2 border-t">
+          <button onClick={onClose} className="px-4 py-2 text-xs border rounded-md hover:bg-muted">
+            Close
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
