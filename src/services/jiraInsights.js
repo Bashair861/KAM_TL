@@ -1,4 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
+import { recordOpenAiUsage } from "@/services/ai-usage";
+
+const JIRA_INSIGHTS_MODEL = "gpt-5.4-mini";
 
 function readEnv(name) {
   if (typeof process !== "undefined" && process.env?.[name]) return process.env[name];
@@ -387,7 +390,7 @@ function buildInsights(issueKey, title, description, accountName) {
 
 // ── OpenAI-powered insights (education suggestions + action items) ────────────
 
-async function generateAIInsights(keywords, title, description, issueKey, accountName) {
+async function generateAIInsights(keywords, title, description, issueKey, accountName, accountId, user) {
   const apiKey = readEnv("OPENAI_API_KEY");
   if (!apiKey) return null;
 
@@ -424,7 +427,7 @@ Requirements:
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-5.4-mini",
+      model: JIRA_INSIGHTS_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.6,
     }),
@@ -432,6 +435,18 @@ Requirements:
 
   if (!res.ok) return null;
   const json = await res.json();
+  await recordOpenAiUsage({
+    feature: "Jira Escalation Insights",
+    agent: "jira_escalation_insights",
+    model: JIRA_INSIGHTS_MODEL,
+    responseJson: json,
+    accountId,
+    metadata: {
+      issueKey,
+      keywordCount: keywords.length,
+    },
+    user,
+  });
   const text = json.choices?.[0]?.message?.content ?? "";
   try {
     const match = text.match(/\{[\s\S]*\}/);
@@ -445,7 +460,7 @@ Requirements:
 export const analyzeJiraIssue = createServerFn({ method: "POST" })
   .inputValidator((data) => data)
   .handler(async ({ data }) => {
-    const { issueKey, accountId, accountName, accounts } = data;
+    const { issueKey, accountId, accountName, accounts, user } = data;
     const selectedAccount =
       (accounts ?? []).find((account) => account.id === accountId) ??
       (accounts ?? []).find((account) => normalizeSpaceName(account.name) === normalizeSpaceName(accountName));
@@ -485,6 +500,8 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
       description,
       resolvedIssueKey,
       resolvedAccountName,
+      selectedAccount?.id ?? detectedAccount?.id ?? null,
+      user,
     );
 
     return {

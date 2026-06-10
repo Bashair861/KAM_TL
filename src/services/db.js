@@ -1,6 +1,10 @@
 import { supabase } from "@/lib/supabase";
 import { normalizeRole } from "@/data/kam-data";
-import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-admin";
+import {
+  createManagedAuthUser,
+  deleteManagedAuthUser,
+  updateManagedAuthUser,
+} from "@/services/user-admin";
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
@@ -1000,6 +1004,24 @@ export async function createUserProfile(user) {
   };
 }
 
+export async function updateUserProfile(userId, updates) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before editing users.");
+
+  const result = await updateManagedAuthUser({
+    data: {
+      userId,
+      name: updates.name,
+      email: updates.email,
+      role: updates.role,
+      accessToken: session.access_token,
+    },
+  });
+  return mapManagedUser(result.profile);
+}
+
 export async function updateUserRole(userId, role) {
   const normalizedRole = normalizeRole(role);
   const rpc = await supabase.rpc("update_managed_profile_role", {
@@ -1482,7 +1504,7 @@ export async function syncSalesforceMappedFields(accountId, payload) {
     },
   });
 }
-export async function generateAccountLinkedinSummary(accountId) {
+export async function generateAccountLinkedinSummary(accountId, user = {}) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -1494,11 +1516,12 @@ export async function generateAccountLinkedinSummary(accountId) {
     data: {
       accountId,
       accessToken: session.access_token,
+      user,
     },
   });
 }
 // --- fetch single account (full shape) ---------------------------------------
-export async function generateAccountWebsiteSummary(accountId) {
+export async function generateAccountWebsiteSummary(accountId, user = {}) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -1510,6 +1533,7 @@ export async function generateAccountWebsiteSummary(accountId) {
     data: {
       accountId,
       accessToken: session.access_token,
+      user,
     },
   });
 }
