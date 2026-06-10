@@ -2,7 +2,13 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { getRolePermissions, getAccount } from "@/data/kam-data";
-import { fetchAccounts, fetchEscalations, createEscalation, toggleEscalationActionItem } from "@/services/db";
+import {
+  fetchAccounts,
+  fetchEscalations,
+  createEscalation,
+  toggleEscalationActionItem,
+  updateEscalationStage,
+} from "@/services/db";
 import { analyzeJiraIssue } from "@/services/jiraInsights";
 import { saveJiraEscalations } from "@/services/jira";
 import { useAuth } from "@/context/AuthContext";
@@ -26,6 +32,18 @@ export const Route = createFileRoute("/escalations")({
   }),
   component: EscalationsPage,
 });
+
+const ESCALATION_STAGES = [
+  { key: "Triage", title: "Triage (< 24h)", actionLabel: "Triage" },
+  { key: "In Progress", title: "In Progress", actionLabel: "In Progress" },
+  { key: "Awaiting Client", title: "Awaiting Client", actionLabel: "Awaiting" },
+];
+
+function getEscalationStage(escalation) {
+  return ESCALATION_STAGES.some((stage) => stage.key === escalation?.stage)
+    ? escalation.stage
+    : "Triage";
+}
 
 function EscalationsPage() {
   const { tab: initialTab } = Route.useSearch();
@@ -52,6 +70,7 @@ function EscalationsPage() {
 
   // Escalation detail modal
   const [selectedEscalation, setSelectedEscalation] = useState(null);
+  const [movingStage, setMovingStage] = useState(null);
 
   // Create escalation dialog state
   const [createOpen, setCreateOpen] = useState(false);
@@ -164,6 +183,19 @@ function EscalationsPage() {
     onError: (e) => setCreateError(e.message),
   });
 
+  const stageMutation = useMutation({
+    mutationFn: ({ escalation, stage }) =>
+      updateEscalationStage(escalation.id, stage, { editedBy: profile?.name ?? "Unknown" }),
+    onMutate: ({ escalation, stage }) => setMovingStage({ id: escalation.id, stage }),
+    onSuccess: (updated) => {
+      queryClient.invalidateQueries({ queryKey: ["escalations"], exact: false });
+      setSelectedEscalation((current) =>
+        current?.id === updated.id ? { ...current, stage: updated.stage } : current,
+      );
+    },
+    onSettled: () => setMovingStage(null),
+  });
+
   function openCreateDialog() {
     setCreateForm({ accountId: selectedAccountId || accounts[0]?.id || "", title: "", description: "", rca: "" });
     setCreatePriority("P1");
@@ -183,11 +215,10 @@ function EscalationsPage() {
     : p === "P2" ? "bg-warn/10 text-warn"
     : "bg-muted text-muted-foreground";
 
-  const openCols = [
-    { title: "Triage (< 24h)", items: allEscalations.filter((_, i) => i % 3 === 0) },
-    { title: "In Progress", items: allEscalations.filter((_, i) => i % 3 === 1) },
-    { title: "Awaiting Client", items: allEscalations.filter((_, i) => i % 3 === 2) },
-  ];
+  const openCols = ESCALATION_STAGES.map((stage) => ({
+    ...stage,
+    items: allEscalations.filter((escalation) => getEscalationStage(escalation) === stage.key),
+  }));
   const matchedJiraSpace = result?.jiraSpace ?? result?.jiraProject;
 
   return (
@@ -458,6 +489,11 @@ function EscalationsPage() {
       {/* ── TAB: Open Escalations ── */}
       {activeTab === "open" && (
         <div className="p-8 max-w-7xl w-full mx-auto">
+          {stageMutation.isError && (
+            <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
+              {stageMutation.error?.message ?? "Could not update escalation stage."}
+            </div>
+          )}
           {allEscalations.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-24 gap-3 text-muted-foreground">
               <AlertTriangle className="size-8 opacity-30" />
@@ -471,7 +507,7 @@ function EscalationsPage() {
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {openCols.map((col) => (
-                <div key={col.title} className="bg-muted/30 rounded-xl border p-4">
+                <div key={col.key} className="bg-muted/30 rounded-xl border p-4">
                   <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3 flex items-center justify-between">
                     {col.title}
                     <span className="bg-card border text-[10px] px-1.5 py-0.5 rounded font-mono">{col.items.length}</span>
@@ -483,6 +519,10 @@ function EscalationsPage() {
                         esc={e}
                         accounts={accounts}
                         priorityBadge={priorityBadge}
+                        stageOptions={ESCALATION_STAGES}
+                        canMove={canWrite}
+                        movingStage={movingStage}
+                        onStageChange={(stage) => stageMutation.mutate({ escalation: e, stage })}
                         onOpen={() => setSelectedEscalation(e)}
                       />
                     ))}
@@ -628,8 +668,19 @@ function EscalationsPage() {
   );
 }
 
-function EscalationCard({ esc, accounts, priorityBadge, onOpen }) {
+function EscalationCard({
+  esc,
+  accounts,
+  priorityBadge,
+  stageOptions,
+  canMove,
+  movingStage,
+  onStageChange,
+  onOpen,
+}) {
   const acc = accounts.find((a) => a.id === esc.accountId) ?? { name: esc.accountId };
+  const currentStage = getEscalationStage(esc);
+  const isMoving = movingStage?.id === esc.id;
 
   return (
     <div
@@ -647,6 +698,9 @@ function EscalationCard({ esc, accounts, priorityBadge, onOpen }) {
       </div>
       <p className="text-sm font-semibold leading-snug">{esc.title}</p>
       <p className="text-[11px] text-muted-foreground mt-1">{acc.name}</p>
+      <span className="inline-flex mt-2 text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground font-semibold">
+        {currentStage}
+      </span>
       {esc.description && (
         <p className="text-[11px] text-muted-foreground mt-2 line-clamp-2">{esc.description}</p>
       )}
@@ -663,6 +717,27 @@ function EscalationCard({ esc, accounts, priorityBadge, onOpen }) {
           {esc.actionItems.length > 3 && (
             <p className="text-[10px] text-muted-foreground">+{esc.actionItems.length - 3} more</p>
           )}
+        </div>
+      )}
+      {canMove && (
+        <div className="mt-3 pt-3 border-t flex flex-wrap gap-1.5">
+          {stageOptions
+            .filter((stage) => stage.key !== currentStage)
+            .map((stage) => (
+              <button
+                key={stage.key}
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onStageChange(stage.key);
+                }}
+                disabled={isMoving}
+                className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isMoving && movingStage?.stage === stage.key && <Loader2 className="size-3 animate-spin" />}
+                {stage.actionLabel}
+              </button>
+            ))}
         </div>
       )}
     </div>
