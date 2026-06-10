@@ -291,6 +291,12 @@ const OVERVIEW_KYC_FIELD_CONFIG = [
   { id: "business", label: KYC_FORM_FIELDS.business.label, icon: "workflow", defaultVisible: true },
   { id: "description", label: "Description", icon: "building", wide: true },
   { id: "history", label: KYC_FORM_FIELDS.history.label, icon: "clock", defaultVisible: true },
+  {
+    id: "stakeholdersInfo",
+    label: KYC_FORM_FIELDS.stakeholdersInfo.label,
+    icon: "users",
+    wide: true,
+  },
   { id: "revenue", label: KYC_FORM_FIELDS.revenue.label, icon: "money", defaultVisible: true },
   { id: "mrrArr", label: KYC_FORM_FIELDS.mrrArr.label, icon: "growth", defaultVisible: true },
   { id: "primary", label: KYC_FORM_FIELDS.primary.label, icon: "user", defaultVisible: true },
@@ -2114,6 +2120,16 @@ function AccountDetailPage() {
               <Lock className="size-3" /> Read-only ({role})
             </span>
           )}
+          <input
+            ref={sowInputRef}
+            type="file"
+            className="hidden"
+            accept=".pdf,.docx,.txt,.md,.rtf"
+            onChange={(event) => {
+              handleSowFile(event.target.files?.[0]);
+              event.currentTarget.value = "";
+            }}
+          />
           <button
             onClick={() => setAskAiOpen(true)}
             className="px-3 py-2 bg-accent text-white text-xs font-bold rounded-md hover:opacity-90 transition-opacity flex items-center gap-2"
@@ -2121,51 +2137,15 @@ function AccountDetailPage() {
             <Sparkles className="size-3.5" />
             Ask AI
           </button>
-          <div className="flex flex-col items-end gap-1">
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <input
-                ref={sowInputRef}
-                type="file"
-                className="hidden"
-                accept=".pdf,.docx,.txt,.md,.rtf"
-                onChange={(event) => {
-                  handleSowFile(event.target.files?.[0]);
-                  event.currentTarget.value = "";
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => sowInputRef.current?.click()}
-                disabled={!editable || uploadingSow}
-                className="hidden px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed items-center gap-2"
-              >
-                {uploadingSow ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <Upload className="size-3" />
-                )}
-                {uploadingSow ? "Uploading SOW" : "Upload SOW"}
-              </button>
-              <button
-                disabled={!editable}
-                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Log Activity
-              </button>
-            </div>
-            <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Last sync with Jira - 4m ago
+          {(sowMessage || sowError) && (
+            <p
+              className={`text-[11px] max-w-[28rem] text-right ${
+                sowError ? "text-crit" : "text-success"
+              }`}
+            >
+              {sowError || sowMessage}
             </p>
-            {(sowMessage || sowError) && (
-              <p
-                className={`text-[11px] max-w-[28rem] text-right ${
-                  sowError ? "text-crit" : "text-success"
-                }`}
-              >
-                {sowError || sowMessage}
-              </p>
-            )}
-          </div>
+          )}
         </div>
       </header>
 
@@ -2214,7 +2194,7 @@ function AccountDetailPage() {
                   <TrendingDown className="size-3" />
                 )}
                 {account.trend >= 0 ? "+" : ""}
-                {account.trend}% this quarter
+                {account.trend}% this month
               </span>
             </div>
 
@@ -4038,13 +4018,16 @@ function OverviewTab({ account }) {
     onMutate: () => {
       setKycSaveError("");
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       setSavedSnapshot({ ...fields });
       setShowSaved(true);
       setKycSaveError("");
-      queryClient.invalidateQueries({ queryKey: ["accounts"] });
-      queryClient.invalidateQueries({ queryKey: ["contracts"] });
-      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["contracts"] }),
+        queryClient.invalidateQueries({ queryKey: ["account-history", account.id] }),
+      ]);
+      await router.invalidate();
     },
     onError: (error) => {
       setKycSaveError(error?.message ?? "Could not save KYC fields to the database.");
@@ -4351,7 +4334,11 @@ function OverviewTab({ account }) {
       if (fields.linkedinUrl !== savedSnapshot.linkedinUrl) {
         await updateAccountKyc(account.id, { linkedin_url: fields.linkedinUrl });
       }
-      const result = await generateAccountLinkedinSummary(account.id);
+      const result = await generateAccountLinkedinSummary(account.id, {
+        id: profile?.id,
+        name: profile?.name,
+        role: profile?.role,
+      });
       await logAccountChanges(
         account.id,
         [
@@ -4388,7 +4375,11 @@ function OverviewTab({ account }) {
       if (fields.websiteUrl !== savedSnapshot.websiteUrl) {
         await updateAccountKyc(account.id, { website_url: fields.websiteUrl });
       }
-      const result = await generateAccountWebsiteSummary(account.id);
+      const result = await generateAccountWebsiteSummary(account.id, {
+        id: profile?.id,
+        name: profile?.name,
+        role: profile?.role,
+      });
       await logAccountChanges(
         account.id,
         [
@@ -4462,6 +4453,23 @@ function OverviewTab({ account }) {
     }
     extractCharterMatches(file);
   }
+  function openCharterFilePicker() {
+    if (!charterInputRef.current) return;
+    charterInputRef.current.value = "";
+    charterInputRef.current.click();
+  }
+  function showOverviewFields(fieldIds) {
+    const displayableFieldIds = fieldIds.filter((fieldId) =>
+      OVERVIEW_CONFIGURABLE_FIELD_IDS.includes(fieldId),
+    );
+    if (displayableFieldIds.length === 0) return;
+    setVisibleOverviewFieldIds((current) => {
+      const nextFieldIds = normalizeOverviewVisibleFieldIds([...current, ...displayableFieldIds]);
+      writeOverviewVisibleFieldIds(account.id, nextFieldIds);
+      setOverviewSectionDraftIds(nextFieldIds);
+      return nextFieldIds;
+    });
+  }
   function handleAutofillSelectedCharterFields() {
     const selectedIds = charterMatches
       .filter((match) => checkedCharterFields.includes(match.id) && match.canAutofill)
@@ -4479,6 +4487,7 @@ function OverviewTab({ account }) {
       setCharterError("No selected extracted values could be mapped to the KYC form.");
       return;
     }
+    setCharterError("");
     setFields((current) => ({ ...current, ...fieldPatch }));
     setSavedSnapshot((current) => {
       const localOnlyUpdates = Object.fromEntries(
@@ -4491,6 +4500,7 @@ function OverviewTab({ account }) {
         : current;
     });
     setAutofilledFieldKeys(selectedKeys);
+    showOverviewFields(selectedKeys);
     setCharterMessage(
       updatedKeys.length > 0
         ? `Project charter autofilled ${selectedKeys
@@ -4500,6 +4510,7 @@ function OverviewTab({ account }) {
             .map((key) => KYC_LABELS[key] ?? key)
             .join(", ")}. The selected value is already shown in the form.`,
     );
+    setCharterMappingOpen(false);
   }
   function openOverviewSectionEditor() {
     setOverviewSectionDraftIds(visibleOverviewFieldIds);
@@ -5123,14 +5134,18 @@ function OverviewTab({ account }) {
               className="hidden"
               accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               disabled={!editable || readingCharter}
+              onClick={(event) => {
+                event.currentTarget.value = "";
+              }}
               onChange={(e) => {
                 handleCharterFile(e.target.files?.[0] ?? null);
+                e.currentTarget.value = "";
               }}
             />
           </label>
           <button
             type="button"
-            onClick={() => charterInputRef.current?.click()}
+            onClick={openCharterFilePicker}
             disabled={!editable || readingCharter}
             className="px-4 py-2.5 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
@@ -5616,8 +5631,8 @@ function OverviewTab({ account }) {
       />
       <CharterMappingDialog
         open={charterMappingOpen}
-        fileName={charterFile?.name ?? ""}
         matches={charterMatches}
+        currentValues={fields}
         checkedFields={checkedCharterFields}
         uploading={readingCharter}
         error={charterError}
@@ -5978,8 +5993,8 @@ function StakeholderDialog({
 }
 function CharterMappingDialog({
   open,
-  fileName,
   matches,
+  currentValues,
   checkedFields,
   uploading,
   error,
@@ -5990,7 +6005,6 @@ function CharterMappingDialog({
   onDeselectAll,
   onConfirm,
 }) {
-  const matchedCount = matches.filter((match) => match.isMatched).length;
   const selectableMatches = matches.filter((match) => match.canAutofill);
   const selectedCount = checkedFields.filter((fieldKey) =>
     selectableMatches.some((match) => match.id === fieldKey),
@@ -6001,139 +6015,157 @@ function CharterMappingDialog({
   const selectedLocalOnlyCount = matches.filter(
     (match) => checkedFields.includes(match.id) && match.canAutofill && !match.canSaveToDb,
   ).length;
-  const allSelected = selectableMatches.length > 0 && selectedCount === selectableMatches.length;
-  return (
-    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !uploading && onCancel()}>
-      <DialogContent className="sm:max-w-5xl max-h-[88vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Confirm Extracted Field Mapping</DialogTitle>
-          <DialogDescription>
-            {fileName
-              ? `${fileName} - ${matchedCount}/${matches.length} charter field(s) matched. DB-backed rows save when you click Save KYC.`
-              : ""}
-          </DialogDescription>
-        </DialogHeader>
+  if (!open) return null;
 
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-          <p className="text-[11px] font-mono text-muted-foreground">
-            {selectedCount}/{matches.length} selected
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={allSelected ? onDeselectAll : onSelectAll}
-            disabled={uploading || selectableMatches.length === 0}
-          >
-            {allSelected ? "Deselect All" : "Select All"}
-          </Button>
+  const closeIfAllowed = () => {
+    if (!uploading) onCancel();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 flex items-stretch md:items-center justify-center md:p-6 overflow-y-auto"
+      onClick={closeIfAllowed}
+    >
+      <div
+        className="bg-background w-full md:max-w-6xl md:rounded-xl border shadow-2xl flex flex-col max-h-screen md:max-h-[90vh]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-widest font-bold text-accent">
+              Charter Upload
+            </p>
+            <h3 className="text-lg font-bold">Confirm Extracted Field Mapping</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-muted-foreground font-mono">
+              {selectedCount} selected
+            </span>
+            <button
+              type="button"
+              onClick={onSelectAll}
+              disabled={uploading || selectableMatches.length === 0}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Select All
+            </button>
+            <button
+              type="button"
+              onClick={onDeselectAll}
+              disabled={uploading}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Clear All
+            </button>
+            <button
+              type="button"
+              onClick={closeIfAllowed}
+              disabled={uploading}
+              className="size-8 border rounded-md flex items-center justify-center hover:bg-muted disabled:opacity-40"
+              aria-label="Close charter mapping"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
         </div>
 
-        <div className="border rounded-lg overflow-hidden">
+        <div className="flex-1 overflow-auto">
           <div className="overflow-x-auto">
-            <div className="min-w-[960px]">
-              <div className="grid grid-cols-[2.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(10rem,1fr)_7rem] gap-3 px-3 py-2 bg-muted/40 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                <span />
-                <span>Matched Excel label</span>
-                <span>Main form field</span>
-                <span>Extracted value</span>
-                <span>DB target</span>
-                <span>Will save?</span>
-              </div>
-              <div className="divide-y max-h-[46vh] overflow-y-auto">
+            <table className="w-full min-w-[900px] text-left border-collapse">
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
+                  <th className="w-12 px-5 py-2">Sync</th>
+                  <th className="w-44 px-3 py-2">Our field</th>
+                  <th className="w-64 px-3 py-2">Current value</th>
+                  <th className="w-48 px-3 py-2">Charter Fields</th>
+                  <th className="px-3 py-2">Charter Field Values</th>
+                </tr>
+              </thead>
+              <tbody>
                 {matches.map((match) => {
                   const checked = checkedFields.includes(match.id);
                   const canAutofill = match.canAutofill;
                   return (
-                    <label
-                      key={match.id}
-                      className={`grid grid-cols-[2.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(10rem,1fr)_7rem] gap-3 px-3 py-3 items-center hover:bg-muted/30 ${
-                        canAutofill ? "cursor-pointer" : "cursor-not-allowed opacity-70"
-                      }`}
-                    >
-                      <Checkbox
-                        checked={checked}
-                        disabled={uploading || !canAutofill}
-                        onCheckedChange={(nextChecked) =>
-                          onToggle(match.id, Boolean(nextChecked))
-                        }
-                        aria-label={`Include ${match.formLabel}`}
-                      />
-                      <span className="text-sm font-medium min-w-0 truncate">
-                        {hasSyncValue(match.xlsxLabel) ? match.xlsxLabel : "null"}
-                      </span>
-                      <span className="text-xs font-semibold min-w-0 truncate">
-                        {match.formLabel}
-                      </span>
-                      <span className="text-xs min-w-0 truncate">
-                        {hasSyncValue(match.value) ? match.value : "null"}
-                      </span>
-                      <code className="text-[11px] bg-muted rounded px-2 py-1 truncate">
-                        {match.dbTarget || "Not mapped"}
-                      </code>
-                      <span
-                        className={`text-[10px] font-bold uppercase tracking-wider ${
-                          match.canSaveToDb
-                            ? "text-success"
-                            : match.canAutofill
-                              ? "text-warn"
-                              : "text-muted-foreground"
-                        }`}
-                      >
-                        {match.canSaveToDb
-                          ? "Yes"
-                          : match.canAutofill
-                            ? "Local"
-                            : match.isMatched
-                              ? "No value"
-                              : "No match"}
-                      </span>
-                    </label>
+                    <tr key={match.id} className={`border-b ${!canAutofill ? "opacity-50" : ""}`}>
+                      <td className="px-5 py-3 align-top">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={uploading || !canAutofill}
+                          onChange={() => onToggle(match.id, !checked)}
+                          className="size-4"
+                          aria-label={`Apply ${match.formLabel}`}
+                        />
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <p className="text-xs font-bold">{match.formLabel}</p>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono text-muted-foreground">
+                          {displaySyncValue(currentValues?.[match.formKey])}
+                        </pre>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <p className="text-xs font-semibold">
+                          {hasSyncValue(match.xlsxLabel) ? match.xlsxLabel : "not found"}
+                        </p>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono">
+                          {displaySyncValue(match.value)}
+                        </pre>
+                      </td>
+                    </tr>
                   );
                 })}
-              </div>
-            </div>
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {selectedNoValueCount > 0 && (
-          <p className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-md px-3 py-2">
-            {selectedNoValueCount} selected field(s) have no extracted value.
-          </p>
-        )}
-        {selectedLocalOnlyCount > 0 && (
-          <p className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-md px-3 py-2">
-            {selectedLocalOnlyCount} selected field(s) can be shown in the KYC cards but are not
-            written by Save KYC.
-          </p>
-        )}
-
-        {error && (
-          <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">
-            {error}
-          </p>
-        )}
-        {message && !error && (
-          <p className="text-xs text-success bg-success/10 border border-success/20 rounded-md px-3 py-2">
-            {message}
-          </p>
-        )}
-
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onCancel} disabled={uploading}>
-            Close
-          </Button>
-          <Button
-            type="button"
-            onClick={onConfirm}
-            disabled={uploading || selectedCount === 0 || selectedNoValueCount > 0}
-          >
-            {uploading && <Loader2 className="size-3.5 animate-spin" />}
-            Apply Selected
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <div className="px-5 py-4 border-t flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div className="space-y-1">
+            <p
+              className={`text-xs ${
+                error ? "text-crit" : message ? "text-success" : "text-muted-foreground"
+              }`}
+            >
+              {error || message || "Unchecked fields will stay unchanged."}
+            </p>
+            {selectedNoValueCount > 0 && (
+              <p className="text-xs text-warn">
+                {selectedNoValueCount} selected field(s) have no extracted value.
+              </p>
+            )}
+            {selectedLocalOnlyCount > 0 && (
+              <p className="text-xs text-warn">
+                {selectedLocalOnlyCount} selected field(s) can be shown in the KYC cards but are
+                not written by Save KYC.
+              </p>
+            )}
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={uploading}
+              className="px-4 py-2 border rounded-md text-xs font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={uploading || selectedCount === 0 || selectedNoValueCount > 0}
+              className="px-4 py-2 bg-accent text-white rounded-md text-xs font-bold disabled:opacity-40 flex items-center gap-2"
+            >
+              {uploading && <Loader2 className="size-3.5 animate-spin" />}
+              Apply Selected
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 function SalesforceMappingModal({
@@ -7574,7 +7606,7 @@ function ActivityTab({ account, opportunities, escalations, session }) {
                 disabled={!editable}
                 className="text-[10px] font-bold text-accent uppercase tracking-wider disabled:opacity-40 whitespace-nowrap"
               >
-                + Add
+                Add To Action Items
               </button>
             </li>
           ))}
@@ -7690,7 +7722,17 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
     error: summaryOpportunityError,
   } = useQuery({
     queryKey: ["summary-opportunity-sync", account.id, summarySourceKey],
-    queryFn: () => syncSummaryOpportunities({ data: { accountId: account.id } }),
+    queryFn: () =>
+      syncSummaryOpportunities({
+        data: {
+          accountId: account.id,
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
+        },
+      }),
     enabled: Boolean(account.id && hasSummarySources),
     staleTime: 60 * 60 * 1000,
   });
@@ -7891,10 +7933,10 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
     setConfirmActionTarget({
       kind: "opportunity-pursue",
       item: opportunity,
-      title: "Pursue this opportunity?",
+      title: "Add this opportunity to action items?",
       description:
         "This will create a My Open Action Items task on the dashboard and remove this opportunity from the active planning list.",
-      confirmLabel: "Pursue opportunity",
+      confirmLabel: "Add To Action Items",
     });
   }
 
@@ -7912,7 +7954,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
           <p className="font-semibold text-warn">View-only opportunities for this account</p>
           <p className="text-[12px] text-muted-foreground mt-1">
-            Only the assigned KAM can pursue or reject opportunity suggestions here.
+            Only the assigned KAM can add opportunity suggestions to action items or reject them here.
           </p>
         </div>
       )}
@@ -7984,7 +8026,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
                       {pursuingOpportunityId === opportunity.id && (
                         <Loader2 className="size-3.5 animate-spin mr-1" />
                       )}
-                      Pursue
+                      Add To Action Items
                     </Button>
                     <Button
                       variant="outline"
@@ -8237,7 +8279,17 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: requestAiSuggestions, isPending: generatingAiSuggestions } = useMutation({
-    mutationFn: () => fetchKamAiSuggestions({ data: { accountId: account.id } }),
+    mutationFn: () => {
+      if (!session?.access_token) {
+        throw new Error("Please sign in again before requesting AI suggestions.");
+      }
+      return fetchKamAiSuggestions({
+        data: { accountId: account.id },
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+    },
     onMutate: () => {
       setAiSuggestionRequested(true);
       setAiSuggestionError("");
@@ -9157,7 +9209,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                       onClick={() => requestAddMeetingInsight(item)}
                     >
                       {addingMeetingInsight && <Loader2 className="size-3.5 animate-spin mr-1" />}
-                      Add
+                      Add To Action Items
                     </Button>
                     <Button
                       variant="outline"
@@ -9422,7 +9474,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
             </div>
             <Button
               size="sm"
-              disabled={generatingAiSuggestions}
+              disabled={!canAct || !session?.access_token || generatingAiSuggestions}
               onClick={generateAiSuggestions}
               className="shadow-sm"
             >
@@ -9487,7 +9539,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
                     disabled={!canAct || addingAiSuggestionId === suggestion.id}
                     onClick={() => dismissStagedAiRecommendation(suggestion)}
                   >
-                    Remove/Reject
+                    Reject
                   </Button>
                 </div>
               </div>
@@ -11660,6 +11712,11 @@ function EducateTab({ account }) {
           services: account.retentionGrowth ?? [],
           industry: account.industry ?? "",
           accountName: account.name ?? "",
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
         },
       }),
   });
@@ -11811,8 +11868,7 @@ function EscalationsTab({ list }) {
         <AlertTriangle className="size-6 text-muted-foreground mx-auto mb-2" />
         <p className="text-sm text-muted-foreground">No active escalations for this account.</p>
         <p className="text-[11px] text-muted-foreground mt-1">
-          When opened, a 48h SLA timer will appear here with RCA, action items, recommendation, and
-          a realistic-requirement check.
+          When opened, escalation action items will appear here for follow-up tracking.
         </p>
       </div>
     );
@@ -11839,16 +11895,11 @@ function EscalationsTab({ list }) {
               </div>
             </div>
           </div>
-          <p className="text-sm mb-4">{e.description}</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">RCA</p>
-              <p className="text-xs">{e.rca}</p>
-            </div>
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-2">
-                Action Items
-              </p>
+          <div className="bg-card p-3 rounded border">
+            <p className="text-[10px] font-bold text-muted-foreground uppercase mb-2">
+              Action Items
+            </p>
+            {e.actionItems?.length ? (
               <ul className="space-y-1.5">
                 {e.actionItems.map((a) => (
                   <li key={a.label} className="flex items-center gap-2 text-xs">
@@ -11863,64 +11914,9 @@ function EscalationsTab({ list }) {
                   </li>
                 ))}
               </ul>
-            </div>
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                Our Recommendation
-              </p>
-              <p className="text-xs">{e.recommendation ?? "-"}</p>
-            </div>
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                Realistic / Achievable?
-              </p>
-              <p className="text-xs">{e.realisticCheck ?? "-"}</p>
-            </div>
-            <div className="bg-card p-3 rounded border md:col-span-2">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                Client Feedback
-              </p>
-              <p className="text-xs italic">
-                {e.clientFeedback ?? "Pending - schedule meeting within 48h."}
-              </p>
-            </div>
-            <div className="bg-card p-3 rounded border md:col-span-2">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-bold text-muted-foreground uppercase flex items-center gap-1.5">
-                  <span className="inline-block size-1.5 rounded-full bg-accent" />
-                  Jira Conversation Summary
-                </p>
-                <span className="text-[10px] font-mono text-muted-foreground">
-                  3 tickets - 12 comments
-                </span>
-              </div>
-              <ul className="space-y-2 text-xs">
-                <li className="border-l-2 border-accent/40 pl-3">
-                  <p className="font-semibold">
-                    [ESC-{e.id.toUpperCase()}-1] On-call engineer acknowledged at 14:02 GMT
-                  </p>
-                  <p className="text-muted-foreground text-[11px]">
-                    Hot-patch staged in pre-prod; awaiting QA sign-off before client window.
-                  </p>
-                </li>
-                <li className="border-l-2 border-warn/40 pl-3">
-                  <p className="font-semibold">
-                    [ESC-{e.id.toUpperCase()}-2] Client requested hourly status updates
-                  </p>
-                  <p className="text-muted-foreground text-[11px]">
-                    Set up Slack-Jira bridge to auto-post comments to the client channel.
-                  </p>
-                </li>
-                <li className="border-l-2 border-success/40 pl-3">
-                  <p className="font-semibold">
-                    [ESC-{e.id.toUpperCase()}-3] RCA draft uploaded by SRE lead
-                  </p>
-                  <p className="text-muted-foreground text-[11px]">
-                    Pending KAM review before sharing externally - flagged for 48h SLA.
-                  </p>
-                </li>
-              </ul>
-            </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">No action items recorded.</p>
+            )}
           </div>
         </div>
       ))}

@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { recordOpenAiUsage } from "@/services/ai-usage";
 
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 const OPENAI_FALLBACK_MODELS = ["gpt-5.4-mini", "gpt-4o-mini", "gpt-4.1-mini"];
@@ -14,7 +15,7 @@ function validateInput(input) {
   const accessToken = String(input.accessToken ?? "");
   if (!accountId) throw new Error("Account ID is required before generating a website summary.");
   if (!accessToken) throw new Error("Please sign in again before generating a website summary.");
-  return { accountId, accessToken };
+  return { accountId, accessToken, user: input.user ?? {} };
 }
 
 function isMissingColumnError(error, column) {
@@ -121,7 +122,7 @@ async function requestOpenAISummary(apiKey, model, account) {
   });
 }
 
-async function generateWithOpenAI(account) {
+async function generateWithOpenAI(account, user = {}) {
   const apiKey = readEnv("OPENAI_API_KEY");
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is missing. Add it before generating a website summary.");
@@ -132,6 +133,18 @@ async function generateWithOpenAI(account) {
     const response = await requestOpenAISummary(apiKey, model, account);
     if (response.ok) {
       const json = await response.json();
+      await recordOpenAiUsage({
+        feature: "Website Summary",
+        agent: "account_website_summary",
+        model,
+        responseJson: json,
+        accountId: account.id,
+        metadata: {
+          accountName: account.name,
+        },
+        toolCalls: [{ type: "web_search", count: 1 }],
+        user,
+      });
       const summary = normalizeSummary(extractOpenAIText(json));
       if (!summary) throw new Error("OpenAI returned an empty website summary.");
       return summary;
@@ -169,7 +182,7 @@ export const generateWebsiteSummaryServer = createServerFn({ method: "POST" })
       throw new Error("Add a Website URL before generating the account website summary.");
     }
 
-    const summary = await generateWithOpenAI(account);
+    const summary = await generateWithOpenAI(account, data.user);
     const generatedAt = new Date().toISOString();
     const { error: updateError } = await admin
       .from("accounts")

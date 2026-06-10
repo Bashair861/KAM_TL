@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { recordOpenAiUsage } from "@/services/ai-usage";
 
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
@@ -15,7 +16,7 @@ function validateInput(input) {
   const accessToken = String(input.accessToken ?? "");
   if (!accountId) throw new Error("Account ID is required before generating a LinkedIn summary.");
   if (!accessToken) throw new Error("Please sign in again before generating a LinkedIn summary.");
-  return { accountId, accessToken };
+  return { accountId, accessToken, user: input.user ?? {} };
 }
 
 function isMissingColumnError(error, column) {
@@ -163,7 +164,7 @@ async function generateWithGemini(account) {
   return summary;
 }
 
-async function generateWithOpenAI(account) {
+async function generateWithOpenAI(account, user = {}) {
   const apiKey = readEnv("OPENAI_API_KEY");
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is missing.");
@@ -174,6 +175,18 @@ async function generateWithOpenAI(account) {
     const response = await requestOpenAISummary(apiKey, model, account);
     if (response.ok) {
       const json = await response.json();
+      await recordOpenAiUsage({
+        feature: "LinkedIn Summary",
+        agent: "account_linkedin_summary",
+        model,
+        responseJson: json,
+        accountId: account.id,
+        metadata: {
+          accountName: account.name,
+        },
+        toolCalls: [{ type: "web_search", count: 1 }],
+        user,
+      });
       const summary = normalizeSummary(extractOpenAIText(json));
       if (!summary) throw new Error("OpenAI returned an empty LinkedIn summary.");
       return summary;
@@ -190,9 +203,9 @@ async function generateWithOpenAI(account) {
   );
 }
 
-async function generateSummary(account) {
+async function generateSummary(account, user = {}) {
   if (readEnv("GEMINI_API_KEY")) return generateWithGemini(account);
-  if (readEnv("OPENAI_API_KEY")) return generateWithOpenAI(account);
+  if (readEnv("OPENAI_API_KEY")) return generateWithOpenAI(account, user);
   throw new Error("Add GEMINI_API_KEY or OPENAI_API_KEY before generating a LinkedIn summary.");
 }
 
@@ -210,7 +223,7 @@ export const generateLinkedinSummaryServer = createServerFn({ method: "POST" })
       throw new Error("Add a LinkedIn URL before generating the account summary.");
     }
 
-    const summary = await generateSummary(account);
+    const summary = await generateSummary(account, data.user);
     const generatedAt = new Date().toISOString();
     const { error: updateError } = await admin
       .from("accounts")

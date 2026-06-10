@@ -186,6 +186,7 @@ create table if not exists escalations (
   account_id           text not null references accounts(id) on delete cascade,
   title                text not null,
   priority             priority_level not null default 'P3',
+  stage                text not null default 'Triage' check (stage in ('Triage', 'In Progress', 'Awaiting Client')),
   sla_remaining_hours  numeric,
   opened_at            text,
   rca                  text,
@@ -220,6 +221,42 @@ create table if not exists opportunities (
 );
 
 -- ── notifications ─────────────────────────────────────────────────────────────
+-- AI usage events
+create table if not exists ai_usage_events (
+  id                    uuid primary key default gen_random_uuid(),
+  provider              text not null default 'openai',
+  feature               text not null,
+  agent                 text,
+  model                 text not null,
+  account_id            text references accounts(id) on delete set null,
+  requester_profile_id  uuid references profiles(id) on delete set null,
+  requester_name        text,
+  requester_role        text,
+  input_tokens          int not null default 0,
+  cached_input_tokens   int not null default 0,
+  output_tokens         int not null default 0,
+  total_tokens          int not null default 0,
+  input_cost_usd        numeric(12,6) not null default 0,
+  cached_input_cost_usd numeric(12,6) not null default 0,
+  output_cost_usd       numeric(12,6) not null default 0,
+  tool_cost_usd         numeric(12,6) not null default 0,
+  estimated_cost_usd    numeric(12,6) not null default 0,
+  pricing_known         boolean not null default true,
+  request_status        text not null default 'success',
+  pricing_snapshot      jsonb not null default '{}'::jsonb,
+  metadata              jsonb not null default '{}'::jsonb,
+  created_at            timestamptz not null default now()
+);
+
+create index if not exists ai_usage_events_created_at_idx
+  on ai_usage_events (created_at desc);
+create index if not exists ai_usage_events_feature_idx
+  on ai_usage_events (feature, agent, model);
+create index if not exists ai_usage_events_account_idx
+  on ai_usage_events (account_id);
+create index if not exists ai_usage_events_requester_idx
+  on ai_usage_events (requester_profile_id, requester_role);
+
 create table if not exists notifications (
   id                   text primary key,
   recipient_profile_id uuid references profiles(id) on delete cascade,
@@ -256,4 +293,5 @@ alter table education_log          disable row level security;
 alter table escalations            disable row level security;
 alter table escalation_action_items disable row level security;
 alter table opportunities          disable row level security;
+alter table ai_usage_events        disable row level security;
 alter table notifications          disable row level security;

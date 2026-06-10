@@ -1,6 +1,10 @@
 import { supabase } from "@/lib/supabase";
 import { normalizeRole } from "@/data/kam-data";
-import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-admin";
+import {
+  createManagedAuthUser,
+  deleteManagedAuthUser,
+  updateManagedAuthUser,
+} from "@/services/user-admin";
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
@@ -8,6 +12,18 @@ import { applySowFieldsServer } from "@/services/sow-upload";
 import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import { markNotificationsReadServer } from "@/services/notification-read";
 import { repairAccountConstraintUpdates } from "@/services/account-constraint-repairs";
+import {
+  normalizeDate as validateDate,
+  normalizeEmail as validateEmail,
+  normalizeEnum as validateEnum,
+  normalizeId as validateId,
+  normalizeMoney as validateMoney,
+  normalizeNumber as validateNumber,
+  normalizePhone as validatePhone,
+  normalizeStringList as validateStringList,
+  normalizeText as validateText,
+  normalizeUrl as validateUrl,
+} from "@/services/validation";
 import {
   createAccountAssignmentNotifications,
   createActionItemNotifications,
@@ -51,7 +67,6 @@ const RAG_VALUES = new Set(["R", "A", "G"]);
 const ESCALATION_PRIORITY_VALUES = new Set(["P1", "P2", "P3"]);
 const OPPORTUNITY_CONFIDENCE_VALUES = new Set(["High", "Medium", "Low"]);
 const SHORT_CODE_RE = /^[A-Z0-9]{2,4}$/;
-const DAY_MS = 1000 * 60 * 60 * 24;
 
 function normalizeBooleanInput(value) {
   if (typeof value === "boolean") return value;
@@ -93,7 +108,7 @@ function normalizeAccountCreateInput(data = {}) {
     id: validateId(data.id, "Account ID"),
     name: normalizeRequiredBusinessText(data.name, "Account name"),
     shortCode: normalizeShortCode(data.shortCode),
-    industry: normalizeRequiredBusinessText(data.industry, "Industry", 160),
+    industry: normalizeRequiredBusinessText(data.industry, "Industry", 500),
     tier: validateEnum(data.tier, ACCOUNT_TIER_VALUES, "Tier"),
     contractType: validateEnum(data.contractType, CONTRACT_TYPE_VALUES, "Contract type"),
     contractValue: validateMoney(data.contractValue, "Contract value", { required: true }),
@@ -140,7 +155,7 @@ function normalizeAccountUpdateValue(column, value) {
     case "short_code":
       return normalizeShortCode(value);
     case "industry":
-      return normalizeRequiredBusinessText(value, "Industry", 160);
+      return normalizeRequiredBusinessText(value, "Industry", 500);
     case "tier":
       return validateEnum(value, ACCOUNT_TIER_VALUES, "Tier");
     case "status":
@@ -226,29 +241,23 @@ function normalizeAccountUpdateValue(column, value) {
   }
 }
 
-function getCalendarDate(value) {
-  if (!value) return null;
-  const dateText = String(value).slice(0, 10);
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
-  if (match) {
-    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  }
+const ESCALATION_STAGE_VALUES = new Set(["Triage", "In Progress", "Awaiting Client"]);
+const DEFAULT_ESCALATION_STAGE = "Triage";
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+function normalizeEscalationStage(stage) {
+  return ESCALATION_STAGE_VALUES.has(stage) ? stage : DEFAULT_ESCALATION_STAGE;
 }
 
-function getRenewalDays(row, renewalDate) {
-  const storedDays = Number(row.renewal_days);
-  if (Number.isFinite(storedDays)) return Math.round(storedDays);
+function isMissingEscalationStageError(error) {
+  const text = `${error?.message ?? ""} ${error?.details ?? ""} ${error?.hint ?? ""}`.toLowerCase();
+  return text.includes("stage") && text.includes("escalation");
+}
 
-  const renewal = getCalendarDate(renewalDate);
-  if (!renewal) return null;
-
-  const today = new Date();
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  return Math.round((renewal.getTime() - todayStart.getTime()) / DAY_MS);
+function throwEscalationStageMigrationError(error) {
+  if (isMissingEscalationStageError(error)) {
+    throw new Error("Escalation stage column is missing. Run src/db/add-escalation-stage.sql in Supabase SQL Editor, then try again.");
+  }
+  throw error;
 }
 
 function mapFlatAccount(r) {
@@ -709,6 +718,19 @@ export async function fetchAccounts(opts) {
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map(mapFlatAccount);
+}
+
+export async function fetchAccountDirectory() {
+  const { data, error } = await supabase
+    .from("accounts")
+    .select("id, name, short_code, assigned_kam_id");
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    shortCode: row.short_code,
+    assignedKamId: row.assigned_kam_id ?? null,
+  }));
 }
 
 export async function fetchKamTasks(opts = {}) {
@@ -1245,6 +1267,24 @@ export async function createUserProfile(user) {
     ...mapManagedUser(authUser.profile),
     inviteSent: authUser.inviteSent,
   };
+}
+
+export async function updateUserProfile(userId, updates) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before editing users.");
+
+  const result = await updateManagedAuthUser({
+    data: {
+      userId,
+      name: updates.name,
+      email: updates.email,
+      role: updates.role,
+      accessToken: session.access_token,
+    },
+  });
+  return mapManagedUser(result.profile);
 }
 
 export async function updateUserRole(userId, role) {
@@ -1891,7 +1931,7 @@ export async function syncSalesforceMappedFields(accountId, payload, accessToken
     },
   });
 }
-export async function generateAccountLinkedinSummary(accountId) {
+export async function generateAccountLinkedinSummary(accountId, user = {}) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -1903,11 +1943,12 @@ export async function generateAccountLinkedinSummary(accountId) {
     data: {
       accountId,
       accessToken: session.access_token,
+      user,
     },
   });
 }
 // --- fetch single account (full shape) ---------------------------------------
-export async function generateAccountWebsiteSummary(accountId) {
+export async function generateAccountWebsiteSummary(accountId, user = {}) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -1919,6 +1960,7 @@ export async function generateAccountWebsiteSummary(accountId) {
     data: {
       accountId,
       accessToken: session.access_token,
+      user,
     },
   });
 }
@@ -2185,6 +2227,7 @@ export async function fetchEscalations(accountId, opts = {}) {
     accountId: e.account_id,
     title: e.title,
     priority: e.priority,
+    stage: normalizeEscalationStage(e.stage),
     slaRemainingHours: e.sla_remaining_hours ?? 0,
     openedAt: e.opened_at ?? "",
     rca: e.rca ?? "",
@@ -2195,6 +2238,55 @@ export async function fetchEscalations(accountId, opts = {}) {
     stakeholders: e.stakeholders ?? [],
     actionItems: (e.escalation_action_items ?? []).map((a) => ({ id: a.id, label: a.label, done: a.done })),
   }));
+}
+
+export async function updateEscalationStage(escalationId, stage, opts = {}) {
+  const nextStage = normalizeEscalationStage(stage);
+  const { data: current, error: currentError } = await supabase
+    .from("escalations")
+    .select("id, account_id, title, stage")
+    .eq("id", escalationId)
+    .maybeSingle();
+  if (currentError) throwEscalationStageMigrationError(currentError);
+  if (!current) throw new Error("Escalation was not found.");
+
+  const previousStage = normalizeEscalationStage(current.stage);
+  if (previousStage === nextStage) {
+    return {
+      id: current.id,
+      accountId: current.account_id,
+      title: current.title,
+      stage: nextStage,
+    };
+  }
+
+  const { error: updateError } = await supabase
+    .from("escalations")
+    .update({
+      stage: nextStage,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", escalationId);
+  if (updateError) throwEscalationStageMigrationError(updateError);
+
+  await logAccountChanges(
+    current.account_id,
+    [
+      {
+        field: `Escalation stage: ${current.title ?? current.id}`,
+        oldValue: previousStage,
+        newValue: nextStage,
+      },
+    ],
+    opts.editedBy ?? "Unknown",
+  );
+
+  return {
+    id: current.id,
+    accountId: current.account_id,
+    title: current.title,
+    stage: nextStage,
+  };
 }
 // --- fetch opportunities ------------------------------------------------------
 export async function fetchOpportunities(accountId) {

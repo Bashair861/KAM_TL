@@ -52,6 +52,20 @@ function validateDeleteUserInput(input) {
   return { userId, accessToken };
 }
 
+function validateUpdateUserInput(input) {
+  if (!input || typeof input !== "object") throw new Error("Invalid user payload.");
+  const userId = String(input.userId ?? "").trim();
+  const name = String(input.name ?? "").trim();
+  const email = String(input.email ?? "").trim().toLowerCase();
+  const role = normalizeRole(String(input.role ?? "KAM"));
+  const accessToken = String(input.accessToken ?? "");
+  if (!userId) throw new Error("User id is required.");
+  if (!name) throw new Error("User name is required.");
+  if (!email || !email.includes("@")) throw new Error("Valid email is required.");
+  if (!accessToken) throw new Error("You must be signed in to edit users.");
+  return { userId, name, email, role, accessToken };
+}
+
 function isMissingAuthUserError(error) {
   const message = error?.message?.toLowerCase() ?? "";
   return error?.status === 404 || message.includes("not found") || message.includes("no user");
@@ -133,6 +147,91 @@ export const createManagedAuthUser = createServerFn({ method: "POST" })
 
     if (profileError) throw profileError;
     return { profile, inviteSent: true };
+  });
+
+export const updateManagedAuthUser = createServerFn({ method: "POST" })
+  .inputValidator(validateUpdateUserInput)
+  .handler(async ({ data }) => {
+    const supabaseUrl = readEnv("VITE_SUPABASE_URL");
+    const supabaseAnonKey = readEnv("VITE_SUPABASE_ANON_KEY");
+    const serviceRoleKey = readEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+    if (!supabaseUrl || !supabaseAnonKey || !serviceRoleKey) {
+      throw new Error("SUPABASE_SERVICE_ROLE_KEY is required to edit sign-in users.");
+    }
+
+    const { createClient } = await import("@supabase/supabase-js");
+    const requester = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: `Bearer ${data.accessToken}` } },
+    });
+
+    const { data: requesterUser, error: requesterError } = await requester.auth.getUser(
+      data.accessToken,
+    );
+    if (requesterError) throw requesterError;
+    if (requesterUser?.user?.id === data.userId) {
+      throw new Error("You cannot edit your own user account from this table.");
+    }
+
+    const { data: canManage, error: permissionError } = await requester.rpc(
+      "current_user_is_head_of_kam",
+    );
+    if (permissionError) throw permissionError;
+    if (!canManage) throw new Error("Only Head of KAM can edit users.");
+
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { data: existingProfile, error: profileLookupError } = await admin
+      .from("profiles")
+      .select("id, role, is_active")
+      .eq("id", data.userId)
+      .maybeSingle();
+    if (profileLookupError) throw profileLookupError;
+    if (!existingProfile) throw new Error("User profile was not found.");
+
+    if (
+      existingProfile.role === "Head of KAM" &&
+      existingProfile.is_active !== false &&
+      data.role !== "Head of KAM"
+    ) {
+      const { count, error: headCountError } = await admin
+        .from("profiles")
+        .select("id", { count: "exact", head: true })
+        .eq("role", "Head of KAM")
+        .eq("is_active", true)
+        .neq("id", data.userId);
+      if (headCountError) throw headCountError;
+      if ((count ?? 0) === 0) throw new Error("Keep at least one active Head of KAM user.");
+    }
+
+    const initials = initialsFromName(data.name);
+    const { error: authUpdateError } = await admin.auth.admin.updateUserById(data.userId, {
+      email: data.email,
+      user_metadata: {
+        name: data.name,
+        initials,
+        role: data.role,
+      },
+    });
+    if (authUpdateError && !isMissingAuthUserError(authUpdateError)) throw authUpdateError;
+
+    const { data: profile, error: updateProfileError } = await admin
+      .from("profiles")
+      .update({
+        name: data.name,
+        initials,
+        role: data.role,
+        email: data.email,
+      })
+      .eq("id", data.userId)
+      .select("*")
+      .single();
+    if (updateProfileError) throw updateProfileError;
+
+    return { profile };
   });
 
 export const deleteManagedAuthUser = createServerFn({ method: "POST" })
