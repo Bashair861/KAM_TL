@@ -13,6 +13,18 @@ import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import { markNotificationsReadServer } from "@/services/notification-read";
 import { repairAccountConstraintUpdates } from "@/services/account-constraint-repairs";
 import {
+  normalizeDate as validateDate,
+  normalizeEmail as validateEmail,
+  normalizeEnum as validateEnum,
+  normalizeId as validateId,
+  normalizeMoney as validateMoney,
+  normalizeNumber as validateNumber,
+  normalizePhone as validatePhone,
+  normalizeStringList as validateStringList,
+  normalizeText as validateText,
+  normalizeUrl as validateUrl,
+} from "@/services/validation";
+import {
   createAccountAssignmentNotifications,
   createActionItemNotifications,
   ensureContractRenewalNotifications,
@@ -96,7 +108,7 @@ function normalizeAccountCreateInput(data = {}) {
     id: validateId(data.id, "Account ID"),
     name: normalizeRequiredBusinessText(data.name, "Account name"),
     shortCode: normalizeShortCode(data.shortCode),
-    industry: normalizeRequiredBusinessText(data.industry, "Industry", 160),
+    industry: normalizeRequiredBusinessText(data.industry, "Industry", 500),
     tier: validateEnum(data.tier, ACCOUNT_TIER_VALUES, "Tier"),
     contractType: validateEnum(data.contractType, CONTRACT_TYPE_VALUES, "Contract type"),
     contractValue: validateMoney(data.contractValue, "Contract value", { required: true }),
@@ -143,7 +155,7 @@ function normalizeAccountUpdateValue(column, value) {
     case "short_code":
       return normalizeShortCode(value);
     case "industry":
-      return normalizeRequiredBusinessText(value, "Industry", 160);
+      return normalizeRequiredBusinessText(value, "Industry", 500);
     case "tier":
       return validateEnum(value, ACCOUNT_TIER_VALUES, "Tier");
     case "status":
@@ -227,6 +239,25 @@ function normalizeAccountUpdateValue(column, value) {
     default:
       return value;
   }
+}
+
+const ESCALATION_STAGE_VALUES = new Set(["Triage", "In Progress", "Awaiting Client"]);
+const DEFAULT_ESCALATION_STAGE = "Triage";
+
+function normalizeEscalationStage(stage) {
+  return ESCALATION_STAGE_VALUES.has(stage) ? stage : DEFAULT_ESCALATION_STAGE;
+}
+
+function isMissingEscalationStageError(error) {
+  const text = `${error?.message ?? ""} ${error?.details ?? ""} ${error?.hint ?? ""}`.toLowerCase();
+  return text.includes("stage") && text.includes("escalation");
+}
+
+function throwEscalationStageMigrationError(error) {
+  if (isMissingEscalationStageError(error)) {
+    throw new Error("Escalation stage column is missing. Run src/db/add-escalation-stage.sql in Supabase SQL Editor, then try again.");
+  }
+  throw error;
 }
 
 function mapFlatAccount(r) {
@@ -687,6 +718,19 @@ export async function fetchAccounts(opts) {
   const { data, error } = await q;
   if (error) throw error;
   return (data ?? []).map(mapFlatAccount);
+}
+
+export async function fetchAccountDirectory() {
+  const { data, error } = await supabase
+    .from("accounts")
+    .select("id, name, short_code, assigned_kam_id");
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    shortCode: row.short_code,
+    assignedKamId: row.assigned_kam_id ?? null,
+  }));
 }
 
 export async function fetchKamTasks(opts = {}) {
@@ -2183,6 +2227,7 @@ export async function fetchEscalations(accountId, opts = {}) {
     accountId: e.account_id,
     title: e.title,
     priority: e.priority,
+    stage: normalizeEscalationStage(e.stage),
     slaRemainingHours: e.sla_remaining_hours ?? 0,
     openedAt: e.opened_at ?? "",
     rca: e.rca ?? "",
@@ -2193,6 +2238,55 @@ export async function fetchEscalations(accountId, opts = {}) {
     stakeholders: e.stakeholders ?? [],
     actionItems: (e.escalation_action_items ?? []).map((a) => ({ id: a.id, label: a.label, done: a.done })),
   }));
+}
+
+export async function updateEscalationStage(escalationId, stage, opts = {}) {
+  const nextStage = normalizeEscalationStage(stage);
+  const { data: current, error: currentError } = await supabase
+    .from("escalations")
+    .select("id, account_id, title, stage")
+    .eq("id", escalationId)
+    .maybeSingle();
+  if (currentError) throwEscalationStageMigrationError(currentError);
+  if (!current) throw new Error("Escalation was not found.");
+
+  const previousStage = normalizeEscalationStage(current.stage);
+  if (previousStage === nextStage) {
+    return {
+      id: current.id,
+      accountId: current.account_id,
+      title: current.title,
+      stage: nextStage,
+    };
+  }
+
+  const { error: updateError } = await supabase
+    .from("escalations")
+    .update({
+      stage: nextStage,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", escalationId);
+  if (updateError) throwEscalationStageMigrationError(updateError);
+
+  await logAccountChanges(
+    current.account_id,
+    [
+      {
+        field: `Escalation stage: ${current.title ?? current.id}`,
+        oldValue: previousStage,
+        newValue: nextStage,
+      },
+    ],
+    opts.editedBy ?? "Unknown",
+  );
+
+  return {
+    id: current.id,
+    accountId: current.account_id,
+    title: current.title,
+    stage: nextStage,
+  };
 }
 // --- fetch opportunities ------------------------------------------------------
 export async function fetchOpportunities(accountId) {

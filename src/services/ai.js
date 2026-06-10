@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import {
   fetchAccount,
+  fetchAccountDirectory,
   fetchAccountHistory,
   fetchAccounts,
   fetchEscalations,
@@ -9,6 +10,7 @@ import {
   fetchOpportunities,
 } from "@/services/db";
 import { recordOpenAiUsage } from "@/services/ai-usage";
+import { normalizeRole } from "@/data/kam-data";
 
 // OpenAI requires a model value, but Ask AI should not depend on one brittle model slug.
 const OPENAI_ASK_AI_FALLBACK_MODELS = [
@@ -263,6 +265,21 @@ const ACCOUNT_SCOPE_ESCAPE_PATTERNS = [
   /every client/i,
 ];
 
+const KAM_DASHBOARD_FORBIDDEN_SCOPE_PATTERNS = [
+  /\ball accounts\b/i,
+  /\ball clients\b/i,
+  /\bevery account\b/i,
+  /\bevery client\b/i,
+  /\bentire portfolio\b/i,
+  /\bwhole portfolio\b/i,
+  /\bcompany[-\s]?wide\b/i,
+  /\borganization[-\s]?wide\b/i,
+  /\bother clients\b/i,
+  /\bother accounts\b/i,
+  /\bhead of kam\b/i,
+  /\bleadership portfolio\b/i,
+];
+
 function assertKamIntelligenceQuestion(question, scope) {
   const normalized = question.toLowerCase();
   if (PROMPT_ATTACK_PATTERNS.some((pattern) => pattern.test(question))) {
@@ -293,6 +310,7 @@ function validateAskAiInput(data) {
   const input = data && typeof data === "object" ? data : {};
   const accountId = String(input.accountId ?? "").trim();
   const question = String(input.question ?? "").trim();
+  const role = normalizeRole(input.user?.role);
   if (!accountId) throw new Error("accountId is required");
   if (!question) throw new Error("question is required");
   assertKamIntelligenceQuestion(question, "account");
@@ -303,7 +321,7 @@ function validateAskAiInput(data) {
     user: {
       id: String(input.user?.id ?? ""),
       name: String(input.user?.name ?? "Unknown"),
-      role: String(input.user?.role ?? "KAM"),
+      role,
     },
   };
 }
@@ -311,6 +329,7 @@ function validateAskAiInput(data) {
 function validatePortfolioAiInput(data) {
   const input = data && typeof data === "object" ? data : {};
   const question = String(input.question ?? "").trim();
+  const role = normalizeRole(input.user?.role);
   if (!question) throw new Error("question is required");
   assertKamIntelligenceQuestion(question, "portfolio");
   return {
@@ -318,7 +337,7 @@ function validatePortfolioAiInput(data) {
     user: {
       id: String(input.user?.id ?? ""),
       name: String(input.user?.name ?? "Unknown"),
-      role: String(input.user?.role ?? "KAM"),
+      role,
     },
   };
 }
@@ -369,7 +388,7 @@ function buildAskAiTokenMap({ accounts = [], account = null, user = {} }) {
   const kamIds = [...new Set(accountRows.map((row) => row.assignedKamId).filter(Boolean))];
   kamIds.forEach((kamId, index) => {
     const token = `KAM_${padTokenNumber(index)}`;
-    addToken(tokenMap, kamId, token, token);
+    addToken(tokenMap, kamId, token, `Assigned KAM ${index + 1}`);
   });
 
   addToken(tokenMap, user.id, "User_001", user.name || "User");
@@ -405,6 +424,38 @@ function moneyBandFromNumber(value) {
   if (amount < 5000000) return "VALUE_BAND_1M_5M";
   if (amount < 10000000) return "VALUE_BAND_5M_10M";
   return "VALUE_BAND_10M_PLUS";
+}
+
+const VALUE_BAND_DISPLAY = {
+  VALUE_BAND_UNKNOWN: "an undisclosed value range",
+  VALUE_BAND_UNDER_10K: "under $10K",
+  VALUE_BAND_10K_50K: "$10K-$50K",
+  VALUE_BAND_50K_100K: "$50K-$100K",
+  VALUE_BAND_100K_250K: "$100K-$250K",
+  VALUE_BAND_250K_500K: "$250K-$500K",
+  VALUE_BAND_500K_1M: "$500K-$1M",
+  VALUE_BAND_1M_5M: "$1M-$5M",
+  VALUE_BAND_5M_10M: "$5M-$10M",
+  VALUE_BAND_10M_PLUS: "$10M+",
+};
+
+function restoreValueBands(value) {
+  return String(value ?? "").replace(/\bVALUE_BAND_[A-Z0-9_]+\b/g, (token) => {
+    const displayValue = VALUE_BAND_DISPLAY[token];
+    return displayValue ? `${displayValue} range` : "a banded value range";
+  });
+}
+
+function scrubResidualMaskTokensForDisplay(value) {
+  return restoreValueBands(value)
+    .replace(/\bAccount_\d{3}\b/g, "the account")
+    .replace(/\bKAM_\d{3}\b/g, "assigned KAM")
+    .replace(/\bStakeholder_\d{3}_EMAIL\b/g, "redacted email")
+    .replace(/\bStakeholder_\d{3}\b/g, "the stakeholder")
+    .replace(/\bUser_\d{3}\b/g, "the user")
+    .replace(/\bREDACTED_EMAIL\b/g, "redacted email")
+    .replace(/\bREDACTED_PHONE\b/g, "redacted phone")
+    .replace(/\bREDACTED_SECRET\b/g, "redacted secret");
 }
 
 function parseMoneyExpression(value) {
@@ -467,7 +518,7 @@ function restoreMaskedString(value, tokenMap) {
       entry.display,
     );
   }
-  return restored;
+  return scrubResidualMaskTokensForDisplay(restored);
 }
 
 function restoreMaskedAiResult(value, tokenMap) {
@@ -975,6 +1026,172 @@ function fallbackPortfolioAnalysis(context, question) {
   });
 }
 
+const COMMON_ACCOUNT_LOOKUP_WORDS = new Set([
+  "and",
+  "company",
+  "corp",
+  "corporation",
+  "inc",
+  "limited",
+  "llc",
+  "ltd",
+  "the",
+]);
+
+function normalizeLookupText(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function accountMentionScore(account, normalizedQuestion) {
+  const candidates = [account.name, account.shortCode].filter(Boolean);
+  let bestScore = 0;
+
+  for (const candidate of candidates) {
+    const normalizedCandidate = normalizeLookupText(candidate);
+    if (!normalizedCandidate) continue;
+
+    if (normalizedQuestion.includes(normalizedCandidate)) {
+      bestScore = Math.max(bestScore, 100 + normalizedCandidate.length);
+    }
+
+    const tokenScore = normalizedCandidate
+      .split(" ")
+      .filter((token) => token.length >= 3 && !COMMON_ACCOUNT_LOOKUP_WORDS.has(token))
+      .reduce((score, token) => score + (normalizedQuestion.includes(token) ? token.length : 0), 0);
+    bestScore = Math.max(bestScore, tokenScore);
+  }
+
+  return bestScore;
+}
+
+function findMentionedAccount(accounts, question) {
+  return findMentionedAccountMatches(accounts, question)[0]?.account ?? null;
+}
+
+function findMentionedAccountMatches(accounts, question) {
+  const normalizedQuestion = normalizeLookupText(question);
+  return accounts
+    .map((account) => ({
+      account,
+      score: accountMentionScore(account, normalizedQuestion),
+    }))
+    .filter((match) => match.score > 0)
+    .sort((left, right) => right.score - left.score);
+}
+
+function riskLevelFromAccount(account) {
+  if (account.retentionRisk === "High" || account.health < 60) return "high";
+  if (account.retentionRisk === "Medium" || account.health < 75) return "medium";
+  return "low";
+}
+
+function isKamUser(user) {
+  return normalizeRole(user?.role) === "KAM";
+}
+
+function assertKamDashboardAccountScope({ question, user, visibleAccounts, accountDirectory }) {
+  if (!isKamUser(user)) return;
+
+  if (!user.id) {
+    throw new Error("Dashboard Ask AI requires a valid KAM user before account context can be used.");
+  }
+
+  if (!visibleAccounts.length) {
+    throw new Error("Dashboard Ask AI has no assigned accounts available for this KAM user.");
+  }
+
+  if (KAM_DASHBOARD_FORBIDDEN_SCOPE_PATTERNS.some((pattern) => pattern.test(question))) {
+    throw new Error(
+      "Dashboard Ask AI for KAM users is limited to your assigned accounts. Please ask about your assigned account context, tasks, risks, renewals, or growth actions.",
+    );
+  }
+
+  const visibleAccountIds = new Set(visibleAccounts.map((account) => account.id));
+  const mentionedAccounts = findMentionedAccountMatches(accountDirectory, question);
+  const unassignedMentions = mentionedAccounts.filter(
+    ({ account }) => !visibleAccountIds.has(account.id),
+  );
+
+  if (unassignedMentions.length) {
+    const accountNames = unassignedMentions
+      .slice(0, 3)
+      .map(({ account }) => account.name)
+      .join(", ");
+    throw new Error(
+      `Dashboard Ask AI for KAM users can only answer questions about assigned accounts. ${accountNames} is outside your assigned account scope.`,
+    );
+  }
+}
+
+function buildDirectPortfolioFactAnswer(accounts, question, options = {}) {
+  if (!/\b(arr|annual recurring revenue)\b/i.test(question)) return null;
+  if (/\b(how|improve|increase|grow|growth|recommend|roadmap|strategy|why|should|next|plan)\b/i.test(question)) {
+    return null;
+  }
+
+  const normalizedQuestion = normalizeLookupText(question);
+  const account = findMentionedAccount(accounts, question);
+  if (account) {
+    return normalizeAiResult({
+      summary: `${account.name} ARR is ${shortMoney(account.arr)}.`,
+      confidence: 0.99,
+      riskLevel: riskLevelFromAccount(account),
+      risks: [],
+      opportunities: [],
+      recommendations: [],
+      roadmap: [],
+      followUpQuestions: [
+        `Should I also summarize ${account.name}'s renewal risk and growth upside?`,
+      ],
+    });
+  }
+
+  if (/\b(total|overall|portfolio|all accounts|entire portfolio)\b/.test(normalizedQuestion)) {
+    const totalArr = accounts.reduce((sum, accountRow) => sum + Number(accountRow.arr ?? 0), 0);
+    const scopeLabel = options.scopeLabel === "assigned-account" ? "assigned-account" : "portfolio";
+    const summarySubject =
+      scopeLabel === "assigned-account" ? "Total assigned-account ARR" : "Total portfolio ARR";
+    const followUpSubject =
+      scopeLabel === "assigned-account" ? "assigned account" : "account";
+    return normalizeAiResult({
+      summary: `${summarySubject} is ${shortMoney(totalArr)} across ${accounts.length} active accounts.`,
+      confidence: 0.99,
+      riskLevel: "low",
+      risks: [],
+      opportunities: [],
+      recommendations: [],
+      roadmap: [],
+      followUpQuestions: [`Should I break this ARR down by ${followUpSubject} or risk level?`],
+    });
+  }
+
+  return null;
+}
+
+function buildDirectAccountFactAnswer(account, question) {
+  if (!/\b(arr|annual recurring revenue)\b/i.test(question)) return null;
+  if (/\b(how|improve|increase|grow|growth|recommend|roadmap|strategy|why|should|next|plan)\b/i.test(question)) {
+    return null;
+  }
+
+  return normalizeAiResult({
+    summary: `${account.name} ARR is ${shortMoney(account.arr)}.`,
+    confidence: 0.99,
+    riskLevel: riskLevelFromAccount(account),
+    risks: [],
+    opportunities: [],
+    recommendations: [],
+    roadmap: [],
+    followUpQuestions: [
+      `Should I also summarize ${account.name}'s renewal risk and growth upside?`,
+    ],
+  });
+}
+
 function extractOpenAiText(payload) {
   if (typeof payload?.output_text === "string") return payload.output_text.trim();
 
@@ -1146,25 +1363,43 @@ async function askOpenAi({ prompt, instructions, usageContext }) {
 export const askAccountAi = createServerFn({ method: "POST" })
   .inputValidator(validateAskAiInput)
   .handler(async ({ data }) => {
-    const [account, escalations, opportunities, history, tasks, notifications] = await Promise.all([
-      fetchAccount(data.accountId),
+    const account = await fetchAccount(data.accountId);
+
+    if (!account) throw new Error("Account not found");
+
+    if (isKamUser(data.user) && (!data.user.id || account.assignedKamId !== data.user.id)) {
+      throw new Error("You do not have access to this account.");
+    }
+
+    const directFactAnswer = buildDirectAccountFactAnswer(account, data.question);
+    if (directFactAnswer) {
+      return {
+        ...directFactAnswer,
+        source: "system-data",
+        agent: AI_AGENTS.account_advisor.id,
+        generatedAt: new Date().toISOString(),
+        contextSummary: {
+          accountId: account.id,
+          accountName: account.name,
+          escalationsUsed: 0,
+          opportunitiesUsed: 0,
+          historyItemsUsed: 0,
+          maskingEnabled: false,
+          valueMode: "raw-system-fact",
+        },
+      };
+    }
+
+    const notificationOptions = isKamUser(data.user)
+      ? { role: data.user.role, userId: data.user.id }
+      : { role: data.user.role };
+    const [escalations, opportunities, history, tasks, notifications] = await Promise.all([
       fetchEscalations(data.accountId),
       fetchOpportunities(data.accountId),
       fetchAccountHistory(data.accountId),
       fetchKamTasks({ accountId: data.accountId, includeCompleted: true }),
-      fetchNotifications(),
+      fetchNotifications(notificationOptions),
     ]);
-
-    if (!account) throw new Error("Account not found");
-
-    if (
-      data.user.role === "KAM" &&
-      data.user.id &&
-      account.assignedKamId &&
-      account.assignedKamId !== data.user.id
-    ) {
-      throw new Error("You do not have access to this account.");
-    }
 
     const accountNotifications = notifications.filter(
       (notification) => notification.accountId === account.id,
@@ -1260,25 +1495,82 @@ ${JSON.stringify(maskedPayload.maskedContext, null, 2)}
 export const askPortfolioAi = createServerFn({ method: "POST" })
   .inputValidator(validatePortfolioAiInput)
   .handler(async ({ data }) => {
-    const [accounts, escalations, opportunities, allTasks, notifications] = await Promise.all([
-      fetchAccounts({ role: data.user.role, userId: data.user.id }),
-      fetchEscalations(),
-      fetchOpportunities(),
-      fetchKamTasks({ includeCompleted: true }),
-      fetchNotifications(),
-    ]);
-
+    const accounts = await fetchAccounts({ role: data.user.role, userId: data.user.id });
     const visibleAccountIds = new Set(accounts.map((account) => account.id));
-    const visibleEscalations = escalations.filter((escalation) =>
-      visibleAccountIds.has(escalation.accountId),
-    );
-    const visibleOpportunities = opportunities.filter((opportunity) =>
-      visibleAccountIds.has(opportunity.accountId),
-    );
-    const visibleTasks = allTasks.filter((task) => visibleAccountIds.has(task.accountId));
-    const visibleNotifications = notifications.filter(
-      (notification) => !notification.accountId || visibleAccountIds.has(notification.accountId),
-    );
+    const visibleAccountIdList = [...visibleAccountIds];
+
+    if (isKamUser(data.user)) {
+      const accountDirectory = await fetchAccountDirectory();
+      assertKamDashboardAccountScope({
+        question: data.question,
+        user: data.user,
+        visibleAccounts: accounts,
+        accountDirectory,
+      });
+    }
+
+    const directFactAnswer = buildDirectPortfolioFactAnswer(accounts, data.question, {
+      scopeLabel: isKamUser(data.user) ? "assigned-account" : "portfolio",
+    });
+    if (directFactAnswer) {
+      return {
+        ...directFactAnswer,
+        source: "system-data",
+        agent: AI_AGENTS.portfolio_analyst.id,
+        generatedAt: new Date().toISOString(),
+        contextSummary: {
+          accountCount: accounts.length,
+          escalationsUsed: 0,
+          opportunitiesUsed: 0,
+          tasksUsed: 0,
+          maskingEnabled: false,
+          valueMode: "raw-system-fact",
+        },
+      };
+    }
+
+    let visibleEscalations = [];
+    let visibleOpportunities = [];
+    let visibleTasks = [];
+    let visibleNotifications = [];
+
+    if (visibleAccountIdList.length) {
+      if (isKamUser(data.user)) {
+        const [escalationGroups, opportunityGroups, scopedTasks, scopedNotifications] =
+          await Promise.all([
+            Promise.all(visibleAccountIdList.map((accountId) => fetchEscalations(accountId))),
+            Promise.all(visibleAccountIdList.map((accountId) => fetchOpportunities(accountId))),
+            fetchKamTasks({ accountIds: visibleAccountIdList, includeCompleted: true }),
+            fetchNotifications({ role: data.user.role, userId: data.user.id }),
+          ]);
+        visibleEscalations = escalationGroups.flat();
+        visibleOpportunities = opportunityGroups.flat();
+        visibleTasks = scopedTasks;
+        visibleNotifications = scopedNotifications.filter(
+          (notification) =>
+            !notification.accountId || visibleAccountIds.has(notification.accountId),
+        );
+      } else {
+        const [escalations, opportunities, allTasks, notifications] = await Promise.all([
+          fetchEscalations(),
+          fetchOpportunities(),
+          fetchKamTasks({ includeCompleted: true }),
+          fetchNotifications(),
+        ]);
+        visibleEscalations = escalations.filter((escalation) =>
+          visibleAccountIds.has(escalation.accountId),
+        );
+        visibleOpportunities = opportunities.filter((opportunity) =>
+          visibleAccountIds.has(opportunity.accountId),
+        );
+        visibleTasks = allTasks.filter((task) => visibleAccountIds.has(task.accountId));
+        visibleNotifications = notifications.filter(
+          (notification) =>
+            !notification.accountId || visibleAccountIds.has(notification.accountId),
+        );
+      }
+    }
+
     const context = buildPortfolioContext({
       accounts,
       escalations: visibleEscalations,
@@ -1308,6 +1600,19 @@ ${JSON.stringify(
 
 Masking:
 ${JSON.stringify(maskedPayload.maskingSummary, null, 2)}
+
+Access policy:
+${JSON.stringify(
+  {
+    role: data.user.role,
+    scope: isKamUser(data.user) ? "assigned_accounts_only" : "portfolio_wide",
+    instruction: isKamUser(data.user)
+      ? "Answer only from the assigned accounts in this masked context. Do not reference unassigned accounts or all-company portfolio data."
+      : "Portfolio-wide Head of KAM access. Answer only from the masked context provided.",
+  },
+  null,
+  2,
+)}
 
 Masked portfolio context:
 ${JSON.stringify(maskedPayload.maskedContext, null, 2)}
