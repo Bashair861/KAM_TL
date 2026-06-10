@@ -43,7 +43,6 @@ function EscalationsPage() {
 
   // Jira import state
   const [selectedAccountId, setSelectedAccountId] = useState("");
-  const [issueKey, setIssueKey] = useState("");
   const [result, setResult] = useState(null);
   const [savedOk, setSavedOk] = useState(false);
   const [checkedItems, setCheckedItems] = useState([]);
@@ -92,7 +91,7 @@ function EscalationsPage() {
       if (!selectedAccount) throw new Error("Select an account before importing.");
       return analyzeJiraIssue({
         data: {
-          issueKey: issueKey.trim().toUpperCase(),
+          issueKey: "",
           accountId: selectedAccount.id,
           accountName: selectedAccount.name,
           accounts: accounts.map((a) => ({ id: a.id, name: a.name, shortCode: a.shortCode })),
@@ -248,17 +247,6 @@ function EscalationsPage() {
                   <option value="" disabled>Select account</option>
                   {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
-                <input
-                  value={issueKey}
-                  onChange={(e) => {
-                    setIssueKey(e.target.value);
-                    setResult(null);
-                    setSavedOk(false);
-                  }}
-                  onKeyDown={(e) => e.key === "Enter" && selectedAccountId && analyzeMutation.mutate()}
-                  placeholder="Issue key optional"
-                  className="text-xs border rounded-md px-3 py-2 bg-background w-36 font-mono"
-                />
                 <button
                   onClick={() => analyzeMutation.mutate()}
                   disabled={!canWrite || !accounts.length || !selectedAccountId || analyzeMutation.isPending}
