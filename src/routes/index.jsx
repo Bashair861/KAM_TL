@@ -426,8 +426,8 @@ function DashboardPage() {
             </div>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-card rounded-xl border shadow-sm">
+          <div className="h-full">
+            <div className="bg-card rounded-xl border shadow-sm h-full">
               <div className="px-6 py-4 border-b flex items-center justify-between">
                 <h3 className="text-sm font-bold flex items-center gap-2">
                   <AlertTriangle className="size-4 text-crit" />
@@ -466,15 +466,6 @@ function DashboardPage() {
               </div>
             </div>
 
-            <div className="bg-primary text-primary-foreground rounded-xl p-6">
-              <p className="text-[10px] uppercase tracking-widest text-slate-400 mb-2">This week</p>
-              <p className="text-2xl font-bold leading-tight">
-                4 QBRs scheduled <span className="text-slate-400">-</span> 12 touchpoints logged
-              </p>
-              <p className="text-xs text-slate-400 mt-3">
-                Cooperation index up 1.4 points across the portfolio.
-              </p>
-            </div>
           </div>
         </section>
 
@@ -838,15 +829,31 @@ function DashboardPage() {
 }
 function PortfolioAiDrawer({ open, onClose, profile }) {
   const askAi = useServerFn(askPortfolioAi);
-  const [question, setQuestion] = useState("Which accounts need my attention this week?");
+  const isKam = profile?.role === "KAM";
+  const defaultQuestion = isKam
+    ? "Which of my assigned accounts needs attention this week?"
+    : "Which accounts need my attention this week?";
+  const [question, setQuestion] = useState(defaultQuestion);
   const [result, setResult] = useState(null);
-  const prompts = [
-    "Which accounts need my attention this week?",
-    "Where is the biggest retention risk?",
-    "Which client has the strongest growth opportunity?",
-    "What should I do next as Head of KAM?",
-    "Summarize the portfolio for leadership.",
-  ];
+  const prompts = useMemo(
+    () =>
+      isKam
+        ? [
+            "Which of my assigned accounts needs attention this week?",
+            "Where is the biggest risk in my assigned accounts?",
+            "Which assigned client has the strongest growth opportunity?",
+            "What task should I complete next?",
+            "Summarize my assigned account portfolio.",
+          ]
+        : [
+            "Which accounts need my attention this week?",
+            "Where is the biggest retention risk?",
+            "Which client has the strongest growth opportunity?",
+            "What should I do next as Head of KAM?",
+            "Summarize the portfolio for leadership.",
+          ],
+    [isKam],
+  );
   const {
     mutate: runAi,
     isPending,
@@ -869,7 +876,8 @@ function PortfolioAiDrawer({ open, onClose, profile }) {
   useEffect(() => {
     if (!open) return;
     setResult(null);
-  }, [open]);
+    setQuestion(defaultQuestion);
+  }, [defaultQuestion, open]);
 
   if (!open) return null;
 
@@ -887,9 +895,11 @@ function PortfolioAiDrawer({ open, onClose, profile }) {
               <Sparkles className="size-4" />
             </span>
             <div>
-              <h2 className="text-sm font-bold">Portfolio Ask AI</h2>
+              <h2 className="text-sm font-bold">Dashboard Ask AI</h2>
               <p className="text-[11px] text-muted-foreground">
-                Business improvement analyst for all visible accounts
+                {isKam
+                  ? "Business improvement analyst for your assigned accounts"
+                  : "Business improvement analyst for the full account portfolio"}
               </p>
             </div>
           </div>
@@ -929,7 +939,11 @@ function PortfolioAiDrawer({ open, onClose, profile }) {
               onChange={(e) => setQuestion(e.target.value)}
               rows={4}
               className="w-full rounded-lg border bg-background p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder="Ask about portfolio risk, account priority, growth, escalations, or next actions..."
+              placeholder={
+                isKam
+                  ? "Ask about your assigned accounts, tasks, risks, renewals, growth, or next actions..."
+                  : "Ask about portfolio risk, account priority, growth, escalations, or next actions..."
+              }
             />
           </label>
 
@@ -943,7 +957,11 @@ function PortfolioAiDrawer({ open, onClose, profile }) {
             ) : (
               <Sparkles className="size-4" />
             )}
-            {isPending ? "Analyzing portfolio" : "Generate analyst view"}
+            {isPending
+              ? isKam
+                ? "Analyzing assigned accounts"
+                : "Analyzing portfolio"
+              : "Generate analyst view"}
           </button>
 
           {error && (
