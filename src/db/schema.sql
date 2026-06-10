@@ -27,6 +27,7 @@ create table if not exists profiles (
   initials   text not null,
   role       user_role not null default 'KAM',
   email      text,
+  is_active  boolean not null default true,
   created_at timestamptz default now()
 );
 
@@ -41,13 +42,24 @@ create table if not exists accounts (
   trend                numeric not null default 0,
   contract_value       bigint not null,
   arr                  bigint not null,
-  renewal_days         int not null,
+  renewal_date         date,
+  contract_duration    text,
   contract_type        contract_type not null,
   last_touch           text,
   status               account_status not null default 'healthy',
   retention_risk       retention_risk not null default 'Low',
   growth_upside        bigint not null default 0,
   white_space_count    int not null default 0,
+  retention_health_score numeric not null default 0,
+  calculated_retention_risk retention_risk not null default 'Low',
+  growth_potential_score numeric not null default 0,
+  growth_potential_level text not null default 'Low',
+  revenue_at_risk      bigint not null default 0,
+  growth_pipeline_value bigint not null default 0,
+  retention_growth_quadrant text,
+  retention_growth_next_action text,
+  retention_growth_calculated_at timestamptz,
+  retention_growth_calculation_reason jsonb not null default '{}'::jsonb,
   cooperation          numeric,
   service_consumption  numeric,
   meetings_per_month   int,
@@ -67,6 +79,12 @@ create table if not exists accounts (
   team_size            int,
   competitors          text[],
   main_business_flow   text,
+  linkedin_url         text,
+  linkedin_summary     text,
+  linkedin_summary_updated_at timestamptz,
+  website_url          text,
+  website_summary      text,
+  website_summary_updated_at timestamptz,
   created_at           timestamptz default now(),
   updated_at           timestamptz default now()
 );
@@ -79,6 +97,7 @@ create table if not exists stakeholders (
   role         text not null,
   influence    influence_type not null,
   email        text,
+  phone        text,
   last_contact text,
   created_at   timestamptz default now()
 );
@@ -108,6 +127,7 @@ create table if not exists contract_details (
   account_id         text not null unique references accounts(id) on delete cascade,
   type               text,
   duration           text,
+  renewal_date       date,
   auto_renew         boolean default false,
   non_terminator     boolean default false,
   min_one_year       boolean default false,
@@ -166,6 +186,7 @@ create table if not exists escalations (
   account_id           text not null references accounts(id) on delete cascade,
   title                text not null,
   priority             priority_level not null default 'P3',
+  stage                text not null default 'Triage' check (stage in ('Triage', 'In Progress', 'Awaiting Client')),
   sla_remaining_hours  numeric,
   opened_at            text,
   rca                  text,
@@ -200,16 +221,64 @@ create table if not exists opportunities (
 );
 
 -- ── notifications ─────────────────────────────────────────────────────────────
-create table if not exists notifications (
-  id         text primary key,
-  title      text not null,
-  body       text,
-  account_id text references accounts(id) on delete set null,
-  time       text,
-  type       notif_type not null default 'info',
-  read       boolean not null default false,
-  created_at timestamptz default now()
+-- AI usage events
+create table if not exists ai_usage_events (
+  id                    uuid primary key default gen_random_uuid(),
+  provider              text not null default 'openai',
+  feature               text not null,
+  agent                 text,
+  model                 text not null,
+  account_id            text references accounts(id) on delete set null,
+  requester_profile_id  uuid references profiles(id) on delete set null,
+  requester_name        text,
+  requester_role        text,
+  input_tokens          int not null default 0,
+  cached_input_tokens   int not null default 0,
+  output_tokens         int not null default 0,
+  total_tokens          int not null default 0,
+  input_cost_usd        numeric(12,6) not null default 0,
+  cached_input_cost_usd numeric(12,6) not null default 0,
+  output_cost_usd       numeric(12,6) not null default 0,
+  tool_cost_usd         numeric(12,6) not null default 0,
+  estimated_cost_usd    numeric(12,6) not null default 0,
+  pricing_known         boolean not null default true,
+  request_status        text not null default 'success',
+  pricing_snapshot      jsonb not null default '{}'::jsonb,
+  metadata              jsonb not null default '{}'::jsonb,
+  created_at            timestamptz not null default now()
 );
+
+create index if not exists ai_usage_events_created_at_idx
+  on ai_usage_events (created_at desc);
+create index if not exists ai_usage_events_feature_idx
+  on ai_usage_events (feature, agent, model);
+create index if not exists ai_usage_events_account_idx
+  on ai_usage_events (account_id);
+create index if not exists ai_usage_events_requester_idx
+  on ai_usage_events (requester_profile_id, requester_role);
+
+create table if not exists notifications (
+  id                   text primary key,
+  recipient_profile_id uuid references profiles(id) on delete cascade,
+  notification_key     text,
+  badge_key            text,
+  target_path          text,
+  title                text not null,
+  body                 text,
+  account_id           text references accounts(id) on delete set null,
+  time                 text,
+  type                 notif_type not null default 'info',
+  read                 boolean not null default false,
+  read_at              timestamptz,
+  created_at           timestamptz default now()
+);
+
+create unique index if not exists notifications_recipient_key_idx
+  on notifications (recipient_profile_id, notification_key);
+create index if not exists notifications_recipient_read_idx
+  on notifications (recipient_profile_id, read_at, created_at desc);
+create index if not exists notifications_recipient_badge_idx
+  on notifications (recipient_profile_id, badge_key, read_at);
 
 -- ── RLS: disable for now (anon key has full access for seeding) ───────────────
 alter table profiles               disable row level security;
@@ -224,4 +293,5 @@ alter table education_log          disable row level security;
 alter table escalations            disable row level security;
 alter table escalation_action_items disable row level security;
 alter table opportunities          disable row level security;
+alter table ai_usage_events        disable row level security;
 alter table notifications          disable row level security;

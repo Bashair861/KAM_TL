@@ -25,6 +25,9 @@ dist-ssr
 .wrangler/
 .dev.vars
 
+# Local Salesforce setup helpers and seed artifacts
+salesforce-local/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

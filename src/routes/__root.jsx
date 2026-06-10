@@ -72,15 +72,15 @@ export const Route = createRootRouteWithContext()({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Aether KAM — Key Account Management Portal" },
+      { title: "tkxel KAM — Key Account Management Portal" },
       {
         name: "description",
         content:
           "Enterprise Key Account Management portal: client 360, scoring, white-space, contracts, retention, growth, escalations.",
       },
-      { name: "author", content: "Aether KAM" },
-      { property: "og:title", content: "Aether KAM — Key Account Management Portal" },
-      { name: "twitter:title", content: "Aether KAM — Key Account Management Portal" },
+      { name: "author", content: "tkxel KAM" },
+      { property: "og:title", content: "tkxel KAM — Key Account Management Portal" },
+      { name: "twitter:title", content: "tkxel KAM — Key Account Management Portal" },
       { name: "description", content: "This software is use for learning purposes only." },
       { property: "og:description", content: "This software is use for learning purposes only." },
       { name: "twitter:description", content: "This software is use for learning purposes only." },
@@ -139,12 +139,12 @@ function AppShell() {
   const { session, loading } = useAuth();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
-  const isAuthPage = pathname === "/login";
+  const isAuthPage = pathname === "/login" || pathname === "/set-password";
   useEffect(() => {
     if (loading) return;
     if (!session && !isAuthPage) navigate({ to: "/login" });
-    if (session && isAuthPage) navigate({ to: "/" });
-  }, [loading, session, isAuthPage]);
+    if (session && pathname === "/login") navigate({ to: "/" });
+  }, [loading, session, isAuthPage, pathname, navigate]);
   // Full-screen spinner while session is being resolved
   if (loading) {
     return (

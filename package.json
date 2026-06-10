@@ -8,8 +8,11 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
+    "test": "npm run verify:retention-growth-rules && npm run verify:kam-ai-security",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "verify:retention-growth-rules": "tsx scripts/verify-retention-growth-rules.js",
+    "verify:kam-ai-security": "tsx scripts/verify-kam-ai-security.js",
     "seed": "node src/db/seed.js"
   },
   "dependencies": {
