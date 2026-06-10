@@ -31,7 +31,8 @@
       "PowerShell($git = \"C:\\\\Users\\\\bashair.ahmad\\\\AppData\\\\Local\\\\GitHubDesktop\\\\app-3.5.12\\\\resources\\\\app\\\\git\\\\cmd\\\\git.exe\"; Set-Location \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\"; & $git log --oneline -6)",
       "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\" -Recurse -Directory | Select-Object -First 20 | ForEach-Object { $_.FullName })",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\bashair.ahmad\\\\Documents\\\\GitHub\\\\KAM_TL\\\\src\" -Recurse -File | Where-Object {$_.Extension -match '\\\\.\\(ts|tsx|js\\)$'} | Select-Object -First 50 | ForEach-Object { $_.FullName })",
-      "PowerShell(head -30)"
+      "PowerShell(head -30)",
+      "WebSearch"
     ]
   }
 }

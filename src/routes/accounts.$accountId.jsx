@@ -2120,6 +2120,16 @@ function AccountDetailPage() {
               <Lock className="size-3" /> Read-only ({role})
             </span>
           )}
+          <input
+            ref={sowInputRef}
+            type="file"
+            className="hidden"
+            accept=".pdf,.docx,.txt,.md,.rtf"
+            onChange={(event) => {
+              handleSowFile(event.target.files?.[0]);
+              event.currentTarget.value = "";
+            }}
+          />
           <button
             onClick={() => setAskAiOpen(true)}
             className="px-3 py-2 bg-accent text-white text-xs font-bold rounded-md hover:opacity-90 transition-opacity flex items-center gap-2"
@@ -2127,51 +2137,15 @@ function AccountDetailPage() {
             <Sparkles className="size-3.5" />
             Ask AI
           </button>
-          <div className="flex flex-col items-end gap-1">
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <input
-                ref={sowInputRef}
-                type="file"
-                className="hidden"
-                accept=".pdf,.docx,.txt,.md,.rtf"
-                onChange={(event) => {
-                  handleSowFile(event.target.files?.[0]);
-                  event.currentTarget.value = "";
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => sowInputRef.current?.click()}
-                disabled={!editable || uploadingSow}
-                className="hidden px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed items-center gap-2"
-              >
-                {uploadingSow ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <Upload className="size-3" />
-                )}
-                {uploadingSow ? "Uploading SOW" : "Upload SOW"}
-              </button>
-              <button
-                disabled={!editable}
-                className="px-3 py-2 border text-xs font-semibold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Log Activity
-              </button>
-            </div>
-            <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-              Last sync with Jira - 4m ago
+          {(sowMessage || sowError) && (
+            <p
+              className={`text-[11px] max-w-[28rem] text-right ${
+                sowError ? "text-crit" : "text-success"
+              }`}
+            >
+              {sowError || sowMessage}
             </p>
-            {(sowMessage || sowError) && (
-              <p
-                className={`text-[11px] max-w-[28rem] text-right ${
-                  sowError ? "text-crit" : "text-success"
-                }`}
-              >
-                {sowError || sowMessage}
-              </p>
-            )}
-          </div>
+          )}
         </div>
       </header>
 
@@ -2220,7 +2194,7 @@ function AccountDetailPage() {
                   <TrendingDown className="size-3" />
                 )}
                 {account.trend >= 0 ? "+" : ""}
-                {account.trend}% this quarter
+                {account.trend}% this month
               </span>
             </div>
 

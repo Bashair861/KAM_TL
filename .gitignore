@@ -38,3 +38,4 @@ salesforce-local/
 *.njsproj
 *.sln
 *.sw?
+src/routeTree.gen.js
