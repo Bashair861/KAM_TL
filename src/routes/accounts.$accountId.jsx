@@ -6494,10 +6494,10 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
     setConfirmActionTarget({
       kind: "opportunity-pursue",
       item: opportunity,
-      title: "Pursue this opportunity?",
+      title: "Add this opportunity to action items?",
       description:
         "This will create a My Open Action Items task on the dashboard and remove this opportunity from the active planning list.",
-      confirmLabel: "Pursue opportunity",
+      confirmLabel: "Add To Action Items",
     });
   }
 
@@ -6515,7 +6515,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
         <div className="rounded-xl border border-warn/30 bg-warn/5 px-4 py-3 text-sm">
           <p className="font-semibold text-warn">View-only opportunities for this account</p>
           <p className="text-[12px] text-muted-foreground mt-1">
-            Only the assigned KAM can pursue or reject opportunity suggestions here.
+            Only the assigned KAM can add opportunity suggestions to action items or reject them here.
           </p>
         </div>
       )}
@@ -6587,7 +6587,7 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
                       {pursuingOpportunityId === opportunity.id && (
                         <Loader2 className="size-3.5 animate-spin mr-1" />
                       )}
-                      Pursue
+                      Add To Action Items
                     </Button>
                     <Button
                       variant="outline"
