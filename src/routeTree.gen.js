@@ -16,6 +16,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as EscalationsRouteImport } from './routes/escalations'
 import { Route as EducateRouteImport } from './routes/educate'
 import { Route as ContractsRouteImport } from './routes/contracts'
+import { Route as AiCostsRouteImport } from './routes/ai-costs'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ContractsIndexRouteImport } from './routes/contracts.index'
 import { Route as AccountsIndexRouteImport } from './routes/accounts.index'
@@ -56,6 +57,11 @@ const EducateRoute = EducateRouteImport.update({
 const ContractsRoute = ContractsRouteImport.update({
   id: '/contracts',
   path: '/contracts',
+  getParentRoute: () => rootRouteImport,
+})
+const AiCostsRoute = AiCostsRouteImport.update({
+  id: '/ai-costs',
+  path: '/ai-costs',
   getParentRoute: () => rootRouteImport,
 })
 const IndexRoute = IndexRouteImport.update({
@@ -99,6 +105,7 @@ const ContractsRouteWithChildren = ContractsRoute._addFileChildren(
 
 const rootRouteChildren = {
   IndexRoute: IndexRoute,
+  AiCostsRoute: AiCostsRoute,
   ContractsRoute: ContractsRouteWithChildren,
   EducateRoute: EducateRoute,
   EscalationsRoute: EscalationsRoute,

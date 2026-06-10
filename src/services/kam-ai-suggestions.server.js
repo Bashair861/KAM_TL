@@ -8,6 +8,7 @@ import {
   normalizeAiSuggestionPayload,
   removeDuplicateAiSuggestions,
 } from "@/services/activity-ai-suggestions";
+import { recordOpenAiUsage } from "@/services/ai-usage";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
@@ -79,7 +80,7 @@ function validateInput(input = {}) {
   if (!input || typeof input !== "object" || typeof input.accountId !== "string") {
     throw new Error("AI suggestions require a valid account id.");
   }
-  return { accountId: input.accountId };
+  return { accountId: input.accountId, user: input.user ?? {} };
 }
 
 function getRuntimeEnvValue(key) {
@@ -1278,10 +1279,10 @@ async function postOpenAiSuggestionRequest({ apiKey, model, context }) {
     model,
     accountRef: hashForLog(context.account?.id),
   });
-  return response;
+  return { response, model };
 }
 
-async function callOpenAiForSuggestions(context) {
+async function callOpenAiForSuggestions(context, user = {}) {
   const apiKey = getOpenAiApiKey();
   if (!apiKey) {
     const error = new Error("OPENAI_API_KEY is not configured.");
@@ -1291,11 +1292,11 @@ async function callOpenAiForSuggestions(context) {
   }
 
   const preferredModels = getOpenAiModelCandidates();
-  let response;
+  let result;
   let firstError;
 
   try {
-    response = await postOpenAiSuggestionRequest({
+    result = await postOpenAiSuggestionRequest({
       apiKey,
       model: preferredModels[0],
       context,
@@ -1320,14 +1321,25 @@ async function callOpenAiForSuggestions(context) {
       throw firstError;
     }
 
-    response = await postOpenAiSuggestionRequest({
+    result = await postOpenAiSuggestionRequest({
       apiKey,
       model: fallbackModel,
       context,
     });
   }
 
-  const payload = await response.json().catch(() => null);
+  const payload = await result.response.json().catch(() => null);
+  await recordOpenAiUsage({
+    feature: "Score Matrix Suggestions",
+    agent: "kam_score_suggestions",
+    model: result.model,
+    responseJson: payload,
+    accountId: context.account?.id,
+    metadata: {
+      healthAreas: context.model?.healthAreas?.length ?? 0,
+    },
+    user,
+  });
   const outputText = getOutputText(payload);
   if (!outputText) {
     const error = new Error("OpenAI returned no structured suggestions.");
@@ -1452,7 +1464,11 @@ export async function generateKamAiSuggestions({ accountId }, authContext = {}) 
   }
 
   try {
-    const openAiResult = await callOpenAiForSuggestions(context);
+    const openAiResult = await callOpenAiForSuggestions(context, {
+      id: auth.profile.id,
+      name: auth.profile.name,
+      role: auth.profile.role,
+    });
     selectedModel = getOpenAiModelCandidates()[0];
     const suggestions = normalizeAndFilterSuggestions(
       openAiResult.suggestions,

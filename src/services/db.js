@@ -1,6 +1,10 @@
 import { supabase } from "@/lib/supabase";
 import { normalizeRole } from "@/data/kam-data";
-import { createManagedAuthUser, deleteManagedAuthUser } from "@/services/user-admin";
+import {
+  createManagedAuthUser,
+  deleteManagedAuthUser,
+  updateManagedAuthUser,
+} from "@/services/user-admin";
 import { syncSalesforceMappedFieldsServer } from "@/services/salesforce-sync";
 import { generateLinkedinSummaryServer } from "@/services/linkedin-summary";
 import { generateWebsiteSummaryServer } from "@/services/website-summary";
@@ -51,7 +55,6 @@ const RAG_VALUES = new Set(["R", "A", "G"]);
 const ESCALATION_PRIORITY_VALUES = new Set(["P1", "P2", "P3"]);
 const OPPORTUNITY_CONFIDENCE_VALUES = new Set(["High", "Medium", "Low"]);
 const SHORT_CODE_RE = /^[A-Z0-9]{2,4}$/;
-const DAY_MS = 1000 * 60 * 60 * 24;
 
 function normalizeBooleanInput(value) {
   if (typeof value === "boolean") return value;
@@ -224,31 +227,6 @@ function normalizeAccountUpdateValue(column, value) {
     default:
       return value;
   }
-}
-
-function getCalendarDate(value) {
-  if (!value) return null;
-  const dateText = String(value).slice(0, 10);
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
-  if (match) {
-    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
-function getRenewalDays(row, renewalDate) {
-  const storedDays = Number(row.renewal_days);
-  if (Number.isFinite(storedDays)) return Math.round(storedDays);
-
-  const renewal = getCalendarDate(renewalDate);
-  if (!renewal) return null;
-
-  const today = new Date();
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  return Math.round((renewal.getTime() - todayStart.getTime()) / DAY_MS);
 }
 
 function mapFlatAccount(r) {
@@ -1247,6 +1225,24 @@ export async function createUserProfile(user) {
   };
 }
 
+export async function updateUserProfile(userId, updates) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Please sign in again before editing users.");
+
+  const result = await updateManagedAuthUser({
+    data: {
+      userId,
+      name: updates.name,
+      email: updates.email,
+      role: updates.role,
+      accessToken: session.access_token,
+    },
+  });
+  return mapManagedUser(result.profile);
+}
+
 export async function updateUserRole(userId, role) {
   const normalizedRole = normalizeRole(role);
   const rpc = await supabase.rpc("update_managed_profile_role", {
@@ -1891,7 +1887,7 @@ export async function syncSalesforceMappedFields(accountId, payload, accessToken
     },
   });
 }
-export async function generateAccountLinkedinSummary(accountId) {
+export async function generateAccountLinkedinSummary(accountId, user = {}) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -1903,11 +1899,12 @@ export async function generateAccountLinkedinSummary(accountId) {
     data: {
       accountId,
       accessToken: session.access_token,
+      user,
     },
   });
 }
 // --- fetch single account (full shape) ---------------------------------------
-export async function generateAccountWebsiteSummary(accountId) {
+export async function generateAccountWebsiteSummary(accountId, user = {}) {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -1919,6 +1916,7 @@ export async function generateAccountWebsiteSummary(accountId) {
     data: {
       accountId,
       accessToken: session.access_token,
+      user,
     },
   });
 }

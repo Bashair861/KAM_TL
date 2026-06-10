@@ -4351,7 +4351,11 @@ function OverviewTab({ account }) {
       if (fields.linkedinUrl !== savedSnapshot.linkedinUrl) {
         await updateAccountKyc(account.id, { linkedin_url: fields.linkedinUrl });
       }
-      const result = await generateAccountLinkedinSummary(account.id);
+      const result = await generateAccountLinkedinSummary(account.id, {
+        id: profile?.id,
+        name: profile?.name,
+        role: profile?.role,
+      });
       await logAccountChanges(
         account.id,
         [
@@ -4388,7 +4392,11 @@ function OverviewTab({ account }) {
       if (fields.websiteUrl !== savedSnapshot.websiteUrl) {
         await updateAccountKyc(account.id, { website_url: fields.websiteUrl });
       }
-      const result = await generateAccountWebsiteSummary(account.id);
+      const result = await generateAccountWebsiteSummary(account.id, {
+        id: profile?.id,
+        name: profile?.name,
+        role: profile?.role,
+      });
       await logAccountChanges(
         account.id,
         [
@@ -7690,7 +7698,17 @@ function OpportunitiesTab({ account, opportunities, escalations }) {
     error: summaryOpportunityError,
   } = useQuery({
     queryKey: ["summary-opportunity-sync", account.id, summarySourceKey],
-    queryFn: () => syncSummaryOpportunities({ data: { accountId: account.id } }),
+    queryFn: () =>
+      syncSummaryOpportunities({
+        data: {
+          accountId: account.id,
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
+        },
+      }),
     enabled: Boolean(account.id && hasSummarySources),
     staleTime: 60 * 60 * 1000,
   });
@@ -11670,6 +11688,11 @@ function EducateTab({ account }) {
           services: account.retentionGrowth ?? [],
           industry: account.industry ?? "",
           accountName: account.name ?? "",
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
         },
       }),
   });
