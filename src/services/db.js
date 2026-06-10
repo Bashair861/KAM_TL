@@ -241,6 +241,25 @@ function normalizeAccountUpdateValue(column, value) {
   }
 }
 
+const ESCALATION_STAGE_VALUES = new Set(["Triage", "In Progress", "Awaiting Client"]);
+const DEFAULT_ESCALATION_STAGE = "Triage";
+
+function normalizeEscalationStage(stage) {
+  return ESCALATION_STAGE_VALUES.has(stage) ? stage : DEFAULT_ESCALATION_STAGE;
+}
+
+function isMissingEscalationStageError(error) {
+  const text = `${error?.message ?? ""} ${error?.details ?? ""} ${error?.hint ?? ""}`.toLowerCase();
+  return text.includes("stage") && text.includes("escalation");
+}
+
+function throwEscalationStageMigrationError(error) {
+  if (isMissingEscalationStageError(error)) {
+    throw new Error("Escalation stage column is missing. Run src/db/add-escalation-stage.sql in Supabase SQL Editor, then try again.");
+  }
+  throw error;
+}
+
 function mapFlatAccount(r) {
   const contractRenewalDate = r.renewal_date ?? r.contract_renewal_date ?? null;
 
@@ -2195,6 +2214,7 @@ export async function fetchEscalations(accountId, opts = {}) {
     accountId: e.account_id,
     title: e.title,
     priority: e.priority,
+    stage: normalizeEscalationStage(e.stage),
     slaRemainingHours: e.sla_remaining_hours ?? 0,
     openedAt: e.opened_at ?? "",
     rca: e.rca ?? "",
@@ -2205,6 +2225,55 @@ export async function fetchEscalations(accountId, opts = {}) {
     stakeholders: e.stakeholders ?? [],
     actionItems: (e.escalation_action_items ?? []).map((a) => ({ id: a.id, label: a.label, done: a.done })),
   }));
+}
+
+export async function updateEscalationStage(escalationId, stage, opts = {}) {
+  const nextStage = normalizeEscalationStage(stage);
+  const { data: current, error: currentError } = await supabase
+    .from("escalations")
+    .select("id, account_id, title, stage")
+    .eq("id", escalationId)
+    .maybeSingle();
+  if (currentError) throwEscalationStageMigrationError(currentError);
+  if (!current) throw new Error("Escalation was not found.");
+
+  const previousStage = normalizeEscalationStage(current.stage);
+  if (previousStage === nextStage) {
+    return {
+      id: current.id,
+      accountId: current.account_id,
+      title: current.title,
+      stage: nextStage,
+    };
+  }
+
+  const { error: updateError } = await supabase
+    .from("escalations")
+    .update({
+      stage: nextStage,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", escalationId);
+  if (updateError) throwEscalationStageMigrationError(updateError);
+
+  await logAccountChanges(
+    current.account_id,
+    [
+      {
+        field: `Escalation stage: ${current.title ?? current.id}`,
+        oldValue: previousStage,
+        newValue: nextStage,
+      },
+    ],
+    opts.editedBy ?? "Unknown",
+  );
+
+  return {
+    id: current.id,
+    accountId: current.account_id,
+    title: current.title,
+    stage: nextStage,
+  };
 }
 // --- fetch opportunities ------------------------------------------------------
 export async function fetchOpportunities(accountId) {

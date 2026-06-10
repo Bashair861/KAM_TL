@@ -186,6 +186,7 @@ create table if not exists escalations (
   account_id           text not null references accounts(id) on delete cascade,
   title                text not null,
   priority             priority_level not null default 'P3',
+  stage                text not null default 'Triage' check (stage in ('Triage', 'In Progress', 'Awaiting Client')),
   sla_remaining_hours  numeric,
   opened_at            text,
   rca                  text,
