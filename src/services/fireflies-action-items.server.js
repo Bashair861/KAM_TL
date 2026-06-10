@@ -326,6 +326,11 @@ export async function syncFirefliesForAccount({
     perTranscriptLimit: 3,
     opportunityGlobalMaxItems: Math.max(data.limit * 2, 12),
     opportunityPerTranscriptLimit: 3,
+    user: {
+      id: actorProfile?.id,
+      name: actorProfile?.name,
+      role: actorProfile?.role,
+    },
   });
   const allActions = result.items;
   const allOpportunities = result.opportunities;

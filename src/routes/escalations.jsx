@@ -96,6 +96,11 @@ function EscalationsPage() {
           accountId: selectedAccount.id,
           accountName: selectedAccount.name,
           accounts: accounts.map((a) => ({ id: a.id, name: a.name, shortCode: a.shortCode })),
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
         },
       });
     },

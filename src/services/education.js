@@ -1,4 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
+import { recordOpenAiUsage } from "@/services/ai-usage";
+
+const EDUCATION_MODEL = "gpt-5.4-mini";
 
 function readEnv(name) {
   if (typeof process !== "undefined" && process.env?.[name]) return process.env[name];
@@ -8,7 +11,7 @@ function readEnv(name) {
 export const fetchEducationArticles = createServerFn({ method: "POST" })
   .inputValidator((data) => data)
   .handler(async ({ data }) => {
-    const { services = [], industry = "", accountName = "" } = data;
+    const { services = [], industry = "", accountName = "", user = {} } = data;
     const apiKey = readEnv("OPENAI_API_KEY");
     if (!apiKey) throw new Error("OPENAI_API_KEY not configured in .env");
 
@@ -55,7 +58,7 @@ Return ONLY a valid JSON array — no markdown:
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-5.4-mini",
+        model: EDUCATION_MODEL,
         tools: [{ type: "web_search_preview" }],
         input: prompt,
       }),
@@ -64,10 +67,23 @@ Return ONLY a valid JSON array — no markdown:
     if (!res.ok) {
       const err = await res.text().catch(() => "");
       // Fallback to standard chat completions without web search
-      return await fetchWithChatCompletions(apiKey, prompt);
+      return await fetchWithChatCompletions(apiKey, prompt, { accountName, type }, user);
     }
 
     const json = await res.json();
+    await recordOpenAiUsage({
+      feature: "Education Articles",
+      agent: "education_research",
+      model: EDUCATION_MODEL,
+      responseJson: json,
+      metadata: {
+        type,
+        accountName,
+        serviceCount: serviceList.length,
+      },
+      toolCalls: [{ type: "web_search_preview", count: 1 }],
+      user,
+    });
 
     // Extract text and annotations from Responses API output
     let content = "";
@@ -110,7 +126,7 @@ function parseArticles(content, urlMap = {}) {
   }));
 }
 
-async function fetchWithChatCompletions(apiKey, prompt) {
+async function fetchWithChatCompletions(apiKey, prompt, metadata = {}, user = {}) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -118,7 +134,7 @@ async function fetchWithChatCompletions(apiKey, prompt) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-5.4-mini",
+      model: EDUCATION_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
     }),
@@ -128,6 +144,14 @@ async function fetchWithChatCompletions(apiKey, prompt) {
     throw new Error(`OpenAI error ${res.status}: ${err.slice(0, 300)}`);
   }
   const json = await res.json();
+  await recordOpenAiUsage({
+    feature: "Education Articles",
+    agent: "education_chat_fallback",
+    model: EDUCATION_MODEL,
+    responseJson: json,
+    metadata,
+    user,
+  });
   const content = json.choices?.[0]?.message?.content ?? "";
   return parseArticles(content);
 }

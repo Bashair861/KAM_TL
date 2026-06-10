@@ -3,6 +3,7 @@ import {
   normalize,
   toFirefliesId,
 } from "@/services/fireflies-utils";
+import { recordOpenAiUsage } from "@/services/ai-usage";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -360,7 +361,7 @@ function buildPromptInput({ account, transcript }) {
   };
 }
 
-async function callOpenAiFallback({ account, transcript }) {
+async function callOpenAiFallback({ account, transcript, user = {} }) {
   const apiKey = getOpenAiApiKey();
   if (!apiKey) {
     return {
@@ -369,6 +370,7 @@ async function callOpenAiFallback({ account, transcript }) {
       result: null,
     };
   }
+  const model = getOpenAiModel();
 
   const response = await withRetry(async () => {
     let result;
@@ -380,7 +382,7 @@ async function callOpenAiFallback({ account, transcript }) {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: getOpenAiModel(),
+          model,
           input: [
             {
               role: "system",
@@ -417,6 +419,18 @@ async function callOpenAiFallback({ account, transcript }) {
   });
 
   const payload = await response.json().catch(() => null);
+  await recordOpenAiUsage({
+    feature: "Fireflies Fallback Extraction",
+    agent: "fireflies_llm_fallback",
+    model,
+    responseJson: payload,
+    accountId: account.id,
+    metadata: {
+      transcriptId: transcript.id,
+      transcriptTitle: transcript.title,
+    },
+    user,
+  });
   const outputText = getOutputText(payload);
   if (!outputText) {
     throw new Error("OpenAI fallback returned no structured output.");
@@ -532,7 +546,7 @@ function getTranscriptContentGate(transcript) {
   return { allowed: true, reason: "" };
 }
 
-export async function runFirefliesLlmFallbackAgent({ account, transcripts }) {
+export async function runFirefliesLlmFallbackAgent({ account, transcripts, user = {} }) {
   const transcriptResults = [];
   const diagnostics = {
     enabled: Boolean(getOpenAiApiKey()),
@@ -571,7 +585,7 @@ export async function runFirefliesLlmFallbackAgent({ account, transcripts }) {
 
     diagnostics.transcriptsAttempted += 1;
     try {
-      const response = await callOpenAiFallback({ account, transcript });
+      const response = await callOpenAiFallback({ account, transcript, user });
       if (response.disabled) {
         diagnostics.transcriptsSkipped += 1;
         transcriptResults.push({

@@ -189,6 +189,7 @@ export async function runFirefliesMeetingAgent({
   perTranscriptLimit,
   opportunityGlobalMaxItems,
   opportunityPerTranscriptLimit,
+  user = {},
 }) {
   const actionResult = runFirefliesMeetingActionAgent({
     account,
@@ -223,6 +224,7 @@ export async function runFirefliesMeetingAgent({
   const llmResult = await runFirefliesLlmFallbackAgent({
     account,
     transcripts: fallbackTranscripts,
+    user,
   });
   const llmResultsByTranscript = indexTranscriptResults(llmResult.transcriptResults);
 

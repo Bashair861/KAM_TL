@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   AlertTriangle,
   Bell,
+  Bot,
   Compass,
   FileText,
   GraduationCap,
@@ -46,7 +47,10 @@ const items = [
   { to: "/educate", label: "Education", icon: GraduationCap },
 ];
 
-const userItems = [{ to: "/users", label: "All Users", icon: UserCog }];
+const userItems = [
+  { to: "/users", label: "All Users", icon: UserCog },
+  { to: "/ai-costs", label: "AI Costs", icon: Bot },
+];
 
 export function AppSidebar() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });

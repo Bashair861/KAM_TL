@@ -6,6 +6,7 @@ import {
   logAccountChanges,
   upsertOpportunitiesFromMeetingAgent,
 } from "@/services/db";
+import { recordOpenAiUsage } from "@/services/ai-usage";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-5.4-mini";
@@ -86,7 +87,7 @@ function validateInput(input = {}) {
   if (!input || typeof input.accountId !== "string" || !input.accountId.trim()) {
     throw new Error("Opportunity extraction requires a valid account id.");
   }
-  return { accountId: input.accountId };
+  return { accountId: input.accountId, user: input.user ?? {} };
 }
 
 function getRuntimeEnvValue(key) {
@@ -322,9 +323,10 @@ function dedupeOpportunityCandidates(candidates = []) {
   return accepted;
 }
 
-async function callOpenAiForOpportunities(account) {
+async function callOpenAiForOpportunities(account, user = {}) {
   const apiKey = getOpenAiApiKey();
   if (!apiKey) throw new Error("OPENAI_API_KEY is not configured.");
+  const model = getOpenAiModel();
 
   const response = await fetch(OPENAI_RESPONSES_URL, {
     method: "POST",
@@ -333,7 +335,7 @@ async function callOpenAiForOpportunities(account) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: getOpenAiModel(),
+      model,
       input: [
         { role: "system", content: SYSTEM_PROMPT },
         {
@@ -369,6 +371,17 @@ async function callOpenAiForOpportunities(account) {
   }
 
   const payload = await response.json().catch(() => null);
+  await recordOpenAiUsage({
+    feature: "Summary Opportunity Extraction",
+    agent: "summary_opportunity_scanner",
+    model,
+    responseJson: payload,
+    accountId: account.id,
+    metadata: {
+      accountName: account.name,
+    },
+    user,
+  });
   const outputText = getOutputText(payload);
   if (!outputText) return [];
   const parsed = JSON.parse(outputText);
@@ -489,12 +502,12 @@ function removeExistingOpportunities(candidates, existingOpportunities) {
   return newCandidates;
 }
 
-async function buildSummaryOpportunities(account) {
+async function buildSummaryOpportunities(account, user = {}) {
   const hasSummary = Boolean(account.linkedinSummary?.trim() || account.websiteSummary?.trim());
   if (!hasSummary) return { opportunities: [], fallback: false, status: "No summaries available." };
 
   try {
-    const opportunities = await callOpenAiForOpportunities(account);
+    const opportunities = await callOpenAiForOpportunities(account, user);
     return { opportunities, fallback: false, status: "AI opportunity extraction completed." };
   } catch (error) {
     const opportunities = buildLocalOpportunityCandidates(account);
@@ -510,12 +523,12 @@ async function buildSummaryOpportunities(account) {
 
 export const syncSummaryOpportunitiesServer = createServerFn({ method: "POST" }).handler(
   async ({ data }) => {
-    const { accountId } = validateInput(data);
+    const { accountId, user } = validateInput(data);
     const account = await fetchAccount(accountId);
     if (!account) throw new Error("Account not found.");
 
     const existingOpportunities = await fetchOpportunities(accountId);
-    const result = await buildSummaryOpportunities(account);
+    const result = await buildSummaryOpportunities(account, user);
     const newCandidates = removeExistingOpportunities(result.opportunities, existingOpportunities);
     const savedOpportunities = await persistSummaryOpportunities({
       accountId,
