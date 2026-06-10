@@ -6840,7 +6840,17 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
   });
 
   const { mutate: requestAiSuggestions, isPending: generatingAiSuggestions } = useMutation({
-    mutationFn: () => fetchKamAiSuggestions({ data: { accountId: account.id } }),
+    mutationFn: () => {
+      if (!session?.access_token) {
+        throw new Error("Please sign in again before requesting AI suggestions.");
+      }
+      return fetchKamAiSuggestions({
+        data: { accountId: account.id },
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+    },
     onMutate: () => {
       setAiSuggestionRequested(true);
       setAiSuggestionError("");
@@ -8025,7 +8035,7 @@ function ActivityTabPlanner({ account, opportunities, escalations, profile, sess
             </div>
             <Button
               size="sm"
-              disabled={generatingAiSuggestions}
+              disabled={!canAct || !session?.access_token || generatingAiSuggestions}
               onClick={generateAiSuggestions}
               className="shadow-sm"
             >
