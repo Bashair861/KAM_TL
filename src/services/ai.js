@@ -8,6 +8,7 @@ import {
   fetchNotifications,
   fetchOpportunities,
 } from "@/services/db";
+import { recordOpenAiUsage } from "@/services/ai-usage";
 
 // OpenAI requires a model value, but Ask AI should not depend on one brittle model slug.
 const OPENAI_ASK_AI_FALLBACK_MODELS = [
@@ -1066,7 +1067,7 @@ async function getOpenAiModelCandidates(apiKey) {
   return cachedOpenAiModelCandidates;
 }
 
-async function requestOpenAiJson({ apiKey, model, prompt, instructions }) {
+async function requestOpenAiJson({ apiKey, model, prompt, instructions, usageContext }) {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -1094,10 +1095,20 @@ async function requestOpenAiJson({ apiKey, model, prompt, instructions }) {
     throw error;
   }
 
-  return response.json();
+  const payload = await response.json();
+  await recordOpenAiUsage({
+    feature: usageContext?.feature ?? "Ask AI",
+    agent: usageContext?.agent,
+    model,
+    responseJson: payload,
+    accountId: usageContext?.accountId,
+    metadata: usageContext?.metadata,
+    user: usageContext?.user,
+  });
+  return payload;
 }
 
-async function askOpenAi({ prompt, instructions }) {
+async function askOpenAi({ prompt, instructions, usageContext }) {
   const apiKey = process.env.OPENAI_API_KEY ?? process.env.CHATGPT_API_KEY;
   if (!apiKey) return null;
 
@@ -1106,7 +1117,13 @@ async function askOpenAi({ prompt, instructions }) {
 
   for (const model of modelCandidates) {
     try {
-      const payload = await requestOpenAiJson({ apiKey, model, prompt, instructions });
+      const payload = await requestOpenAiJson({
+        apiKey,
+        model,
+        prompt,
+        instructions,
+        usageContext,
+      });
       const text = extractOpenAiText(payload);
       if (!text) throw new Error("OpenAI returned an empty response");
       return JSON.parse(text);
@@ -1194,6 +1211,15 @@ ${JSON.stringify(maskedPayload.maskedContext, null, 2)}
       const openAiResult = await askOpenAi({
         prompt,
         instructions: AI_AGENTS.account_advisor.instructions,
+        usageContext: {
+          feature: "Account Ask AI",
+          agent: AI_AGENTS.account_advisor.id,
+          accountId: account.id,
+          metadata: {
+            scope: "account",
+          },
+          user: data.user,
+        },
       });
       if (openAiResult) {
         result = restoreMaskedAiResult(
@@ -1294,6 +1320,15 @@ ${JSON.stringify(maskedPayload.maskedContext, null, 2)}
       const openAiResult = await askOpenAi({
         prompt,
         instructions: AI_AGENTS.portfolio_analyst.instructions,
+        usageContext: {
+          feature: "Portfolio Ask AI",
+          agent: AI_AGENTS.portfolio_analyst.id,
+          metadata: {
+            scope: "portfolio",
+            visibleAccounts: accounts.length,
+          },
+          user: data.user,
+        },
       });
       if (openAiResult) {
         result = restoreMaskedAiResult(

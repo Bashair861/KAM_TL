@@ -87,6 +87,11 @@ function EducatePage() {
           services: selectedAccount?.retentionGrowth ?? [],
           industry: selectedAccount?.industry ?? "",
           accountName: selectedAccount?.name ?? "",
+          user: {
+            id: profile?.id,
+            name: profile?.name,
+            role: profile?.role,
+          },
         },
       }),
   });
