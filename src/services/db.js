@@ -701,6 +701,19 @@ export async function fetchAccounts(opts) {
   return (data ?? []).map(mapFlatAccount);
 }
 
+export async function fetchAccountDirectory() {
+  const { data, error } = await supabase
+    .from("accounts")
+    .select("id, name, short_code, assigned_kam_id");
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    shortCode: row.short_code,
+    assignedKamId: row.assigned_kam_id ?? null,
+  }));
+}
+
 export async function fetchKamTasks(opts = {}) {
   const accountIds = opts.accountIds ?? (opts.accountId ? [opts.accountId] : null);
   if (accountIds && accountIds.length === 0) return [];
