@@ -11894,8 +11894,7 @@ function EscalationsTab({ list }) {
         <AlertTriangle className="size-6 text-muted-foreground mx-auto mb-2" />
         <p className="text-sm text-muted-foreground">No active escalations for this account.</p>
         <p className="text-[11px] text-muted-foreground mt-1">
-          When opened, a 48h SLA timer will appear here with RCA, action items, recommendation, and
-          a realistic-requirement check.
+          When opened, escalation action items will appear here for follow-up tracking.
         </p>
       </div>
     );
@@ -11922,16 +11921,11 @@ function EscalationsTab({ list }) {
               </div>
             </div>
           </div>
-          <p className="text-sm mb-4">{e.description}</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">RCA</p>
-              <p className="text-xs">{e.rca}</p>
-            </div>
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-2">
-                Action Items
-              </p>
+          <div className="bg-card p-3 rounded border">
+            <p className="text-[10px] font-bold text-muted-foreground uppercase mb-2">
+              Action Items
+            </p>
+            {e.actionItems?.length ? (
               <ul className="space-y-1.5">
                 {e.actionItems.map((a) => (
                   <li key={a.label} className="flex items-center gap-2 text-xs">
@@ -11946,64 +11940,9 @@ function EscalationsTab({ list }) {
                   </li>
                 ))}
               </ul>
-            </div>
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                Our Recommendation
-              </p>
-              <p className="text-xs">{e.recommendation ?? "-"}</p>
-            </div>
-            <div className="bg-card p-3 rounded border">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                Realistic / Achievable?
-              </p>
-              <p className="text-xs">{e.realisticCheck ?? "-"}</p>
-            </div>
-            <div className="bg-card p-3 rounded border md:col-span-2">
-              <p className="text-[10px] font-bold text-muted-foreground uppercase mb-1">
-                Client Feedback
-              </p>
-              <p className="text-xs italic">
-                {e.clientFeedback ?? "Pending - schedule meeting within 48h."}
-              </p>
-            </div>
-            <div className="bg-card p-3 rounded border md:col-span-2">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-bold text-muted-foreground uppercase flex items-center gap-1.5">
-                  <span className="inline-block size-1.5 rounded-full bg-accent" />
-                  Jira Conversation Summary
-                </p>
-                <span className="text-[10px] font-mono text-muted-foreground">
-                  3 tickets - 12 comments
-                </span>
-              </div>
-              <ul className="space-y-2 text-xs">
-                <li className="border-l-2 border-accent/40 pl-3">
-                  <p className="font-semibold">
-                    [ESC-{e.id.toUpperCase()}-1] On-call engineer acknowledged at 14:02 GMT
-                  </p>
-                  <p className="text-muted-foreground text-[11px]">
-                    Hot-patch staged in pre-prod; awaiting QA sign-off before client window.
-                  </p>
-                </li>
-                <li className="border-l-2 border-warn/40 pl-3">
-                  <p className="font-semibold">
-                    [ESC-{e.id.toUpperCase()}-2] Client requested hourly status updates
-                  </p>
-                  <p className="text-muted-foreground text-[11px]">
-                    Set up Slack-Jira bridge to auto-post comments to the client channel.
-                  </p>
-                </li>
-                <li className="border-l-2 border-success/40 pl-3">
-                  <p className="font-semibold">
-                    [ESC-{e.id.toUpperCase()}-3] RCA draft uploaded by SRE lead
-                  </p>
-                  <p className="text-muted-foreground text-[11px]">
-                    Pending KAM review before sharing externally - flagged for 48h SLA.
-                  </p>
-                </li>
-              </ul>
-            </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">No action items recorded.</p>
+            )}
           </div>
         </div>
       ))}
