@@ -214,9 +214,10 @@ async function findJiraSpaceByAccountName(accountName, aliases = []) {
 async function fetchJiraIssueForSpace(issueKey, space) {
   const key = normalizeIssueKey(issueKey);
   const spaceKey = String(space?.key ?? "").replace(/"/g, '\\"');
+  const escalationKeywordJql = 'text ~ "Escalation"';
   const jql = key
-    ? `project = "${spaceKey}" AND key = "${key}" ORDER BY created DESC`
-    : `project = "${spaceKey}" AND statusCategory != Done ORDER BY created DESC`;
+    ? `project = "${spaceKey}" AND key = "${key}" AND ${escalationKeywordJql} ORDER BY created DESC`
+    : `project = "${spaceKey}" AND statusCategory != Done AND ${escalationKeywordJql} ORDER BY created DESC`;
 
   const json = await jiraRequest("/rest/api/3/search/jql", {
     method: "POST",
@@ -479,7 +480,9 @@ export const analyzeJiraIssue = createServerFn({ method: "POST" })
     const raw = await fetchJiraIssueForSpace(normalizedIssueKey, jiraSpace);
     if (!raw) {
       const issueText = normalizedIssueKey ? ` ${normalizedIssueKey}` : "";
-      throw new Error(`No Jira escalation${issueText} was found in space "${jiraSpace.name}".`);
+      throw new Error(
+        `No Jira task${issueText} containing keyword "Escalation" was found in space "${jiraSpace.name}".`,
+      );
     }
 
     const resolvedIssueKey = raw.key ?? normalizedIssueKey;
