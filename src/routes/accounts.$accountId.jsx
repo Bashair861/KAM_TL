@@ -291,6 +291,12 @@ const OVERVIEW_KYC_FIELD_CONFIG = [
   { id: "business", label: KYC_FORM_FIELDS.business.label, icon: "workflow", defaultVisible: true },
   { id: "description", label: "Description", icon: "building", wide: true },
   { id: "history", label: KYC_FORM_FIELDS.history.label, icon: "clock", defaultVisible: true },
+  {
+    id: "stakeholdersInfo",
+    label: KYC_FORM_FIELDS.stakeholdersInfo.label,
+    icon: "users",
+    wide: true,
+  },
   { id: "revenue", label: KYC_FORM_FIELDS.revenue.label, icon: "money", defaultVisible: true },
   { id: "mrrArr", label: KYC_FORM_FIELDS.mrrArr.label, icon: "growth", defaultVisible: true },
   { id: "primary", label: KYC_FORM_FIELDS.primary.label, icon: "user", defaultVisible: true },
@@ -4038,13 +4044,16 @@ function OverviewTab({ account }) {
     onMutate: () => {
       setKycSaveError("");
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       setSavedSnapshot({ ...fields });
       setShowSaved(true);
       setKycSaveError("");
-      queryClient.invalidateQueries({ queryKey: ["accounts"] });
-      queryClient.invalidateQueries({ queryKey: ["contracts"] });
-      queryClient.invalidateQueries({ queryKey: ["account-history", account.id] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["contracts"] }),
+        queryClient.invalidateQueries({ queryKey: ["account-history", account.id] }),
+      ]);
+      await router.invalidate();
     },
     onError: (error) => {
       setKycSaveError(error?.message ?? "Could not save KYC fields to the database.");
@@ -4462,6 +4471,23 @@ function OverviewTab({ account }) {
     }
     extractCharterMatches(file);
   }
+  function openCharterFilePicker() {
+    if (!charterInputRef.current) return;
+    charterInputRef.current.value = "";
+    charterInputRef.current.click();
+  }
+  function showOverviewFields(fieldIds) {
+    const displayableFieldIds = fieldIds.filter((fieldId) =>
+      OVERVIEW_CONFIGURABLE_FIELD_IDS.includes(fieldId),
+    );
+    if (displayableFieldIds.length === 0) return;
+    setVisibleOverviewFieldIds((current) => {
+      const nextFieldIds = normalizeOverviewVisibleFieldIds([...current, ...displayableFieldIds]);
+      writeOverviewVisibleFieldIds(account.id, nextFieldIds);
+      setOverviewSectionDraftIds(nextFieldIds);
+      return nextFieldIds;
+    });
+  }
   function handleAutofillSelectedCharterFields() {
     const selectedIds = charterMatches
       .filter((match) => checkedCharterFields.includes(match.id) && match.canAutofill)
@@ -4479,6 +4505,7 @@ function OverviewTab({ account }) {
       setCharterError("No selected extracted values could be mapped to the KYC form.");
       return;
     }
+    setCharterError("");
     setFields((current) => ({ ...current, ...fieldPatch }));
     setSavedSnapshot((current) => {
       const localOnlyUpdates = Object.fromEntries(
@@ -4491,6 +4518,7 @@ function OverviewTab({ account }) {
         : current;
     });
     setAutofilledFieldKeys(selectedKeys);
+    showOverviewFields(selectedKeys);
     setCharterMessage(
       updatedKeys.length > 0
         ? `Project charter autofilled ${selectedKeys
@@ -4500,6 +4528,7 @@ function OverviewTab({ account }) {
             .map((key) => KYC_LABELS[key] ?? key)
             .join(", ")}. The selected value is already shown in the form.`,
     );
+    setCharterMappingOpen(false);
   }
   function openOverviewSectionEditor() {
     setOverviewSectionDraftIds(visibleOverviewFieldIds);
@@ -5123,14 +5152,18 @@ function OverviewTab({ account }) {
               className="hidden"
               accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               disabled={!editable || readingCharter}
+              onClick={(event) => {
+                event.currentTarget.value = "";
+              }}
               onChange={(e) => {
                 handleCharterFile(e.target.files?.[0] ?? null);
+                e.currentTarget.value = "";
               }}
             />
           </label>
           <button
             type="button"
-            onClick={() => charterInputRef.current?.click()}
+            onClick={openCharterFilePicker}
             disabled={!editable || readingCharter}
             className="px-4 py-2.5 bg-accent text-white text-xs font-bold rounded-md disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
@@ -5616,8 +5649,8 @@ function OverviewTab({ account }) {
       />
       <CharterMappingDialog
         open={charterMappingOpen}
-        fileName={charterFile?.name ?? ""}
         matches={charterMatches}
+        currentValues={fields}
         checkedFields={checkedCharterFields}
         uploading={readingCharter}
         error={charterError}
@@ -5978,8 +6011,8 @@ function StakeholderDialog({
 }
 function CharterMappingDialog({
   open,
-  fileName,
   matches,
+  currentValues,
   checkedFields,
   uploading,
   error,
@@ -5990,7 +6023,6 @@ function CharterMappingDialog({
   onDeselectAll,
   onConfirm,
 }) {
-  const matchedCount = matches.filter((match) => match.isMatched).length;
   const selectableMatches = matches.filter((match) => match.canAutofill);
   const selectedCount = checkedFields.filter((fieldKey) =>
     selectableMatches.some((match) => match.id === fieldKey),
@@ -6001,139 +6033,157 @@ function CharterMappingDialog({
   const selectedLocalOnlyCount = matches.filter(
     (match) => checkedFields.includes(match.id) && match.canAutofill && !match.canSaveToDb,
   ).length;
-  const allSelected = selectableMatches.length > 0 && selectedCount === selectableMatches.length;
-  return (
-    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && !uploading && onCancel()}>
-      <DialogContent className="sm:max-w-5xl max-h-[88vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Confirm Extracted Field Mapping</DialogTitle>
-          <DialogDescription>
-            {fileName
-              ? `${fileName} - ${matchedCount}/${matches.length} charter field(s) matched. DB-backed rows save when you click Save KYC.`
-              : ""}
-          </DialogDescription>
-        </DialogHeader>
+  if (!open) return null;
 
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-          <p className="text-[11px] font-mono text-muted-foreground">
-            {selectedCount}/{matches.length} selected
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={allSelected ? onDeselectAll : onSelectAll}
-            disabled={uploading || selectableMatches.length === 0}
-          >
-            {allSelected ? "Deselect All" : "Select All"}
-          </Button>
+  const closeIfAllowed = () => {
+    if (!uploading) onCancel();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 flex items-stretch md:items-center justify-center md:p-6 overflow-y-auto"
+      onClick={closeIfAllowed}
+    >
+      <div
+        className="bg-background w-full md:max-w-6xl md:rounded-xl border shadow-2xl flex flex-col max-h-screen md:max-h-[90vh]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-widest font-bold text-accent">
+              Charter Upload
+            </p>
+            <h3 className="text-lg font-bold">Confirm Extracted Field Mapping</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-muted-foreground font-mono">
+              {selectedCount} selected
+            </span>
+            <button
+              type="button"
+              onClick={onSelectAll}
+              disabled={uploading || selectableMatches.length === 0}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Select All
+            </button>
+            <button
+              type="button"
+              onClick={onDeselectAll}
+              disabled={uploading}
+              className="px-3 py-1.5 border rounded-md text-[11px] font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Clear All
+            </button>
+            <button
+              type="button"
+              onClick={closeIfAllowed}
+              disabled={uploading}
+              className="size-8 border rounded-md flex items-center justify-center hover:bg-muted disabled:opacity-40"
+              aria-label="Close charter mapping"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
         </div>
 
-        <div className="border rounded-lg overflow-hidden">
+        <div className="flex-1 overflow-auto">
           <div className="overflow-x-auto">
-            <div className="min-w-[960px]">
-              <div className="grid grid-cols-[2.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(10rem,1fr)_7rem] gap-3 px-3 py-2 bg-muted/40 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                <span />
-                <span>Matched Excel label</span>
-                <span>Main form field</span>
-                <span>Extracted value</span>
-                <span>DB target</span>
-                <span>Will save?</span>
-              </div>
-              <div className="divide-y max-h-[46vh] overflow-y-auto">
+            <table className="w-full min-w-[900px] text-left border-collapse">
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="text-[10px] uppercase tracking-widest text-muted-foreground border-b">
+                  <th className="w-12 px-5 py-2">Sync</th>
+                  <th className="w-44 px-3 py-2">Our field</th>
+                  <th className="w-64 px-3 py-2">Current value</th>
+                  <th className="w-48 px-3 py-2">Charter Fields</th>
+                  <th className="px-3 py-2">Charter Field Values</th>
+                </tr>
+              </thead>
+              <tbody>
                 {matches.map((match) => {
                   const checked = checkedFields.includes(match.id);
                   const canAutofill = match.canAutofill;
                   return (
-                    <label
-                      key={match.id}
-                      className={`grid grid-cols-[2.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(10rem,1fr)_7rem] gap-3 px-3 py-3 items-center hover:bg-muted/30 ${
-                        canAutofill ? "cursor-pointer" : "cursor-not-allowed opacity-70"
-                      }`}
-                    >
-                      <Checkbox
-                        checked={checked}
-                        disabled={uploading || !canAutofill}
-                        onCheckedChange={(nextChecked) =>
-                          onToggle(match.id, Boolean(nextChecked))
-                        }
-                        aria-label={`Include ${match.formLabel}`}
-                      />
-                      <span className="text-sm font-medium min-w-0 truncate">
-                        {hasSyncValue(match.xlsxLabel) ? match.xlsxLabel : "null"}
-                      </span>
-                      <span className="text-xs font-semibold min-w-0 truncate">
-                        {match.formLabel}
-                      </span>
-                      <span className="text-xs min-w-0 truncate">
-                        {hasSyncValue(match.value) ? match.value : "null"}
-                      </span>
-                      <code className="text-[11px] bg-muted rounded px-2 py-1 truncate">
-                        {match.dbTarget || "Not mapped"}
-                      </code>
-                      <span
-                        className={`text-[10px] font-bold uppercase tracking-wider ${
-                          match.canSaveToDb
-                            ? "text-success"
-                            : match.canAutofill
-                              ? "text-warn"
-                              : "text-muted-foreground"
-                        }`}
-                      >
-                        {match.canSaveToDb
-                          ? "Yes"
-                          : match.canAutofill
-                            ? "Local"
-                            : match.isMatched
-                              ? "No value"
-                              : "No match"}
-                      </span>
-                    </label>
+                    <tr key={match.id} className={`border-b ${!canAutofill ? "opacity-50" : ""}`}>
+                      <td className="px-5 py-3 align-top">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={uploading || !canAutofill}
+                          onChange={() => onToggle(match.id, !checked)}
+                          className="size-4"
+                          aria-label={`Apply ${match.formLabel}`}
+                        />
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <p className="text-xs font-bold">{match.formLabel}</p>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono text-muted-foreground">
+                          {displaySyncValue(currentValues?.[match.formKey])}
+                        </pre>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <p className="text-xs font-semibold">
+                          {hasSyncValue(match.xlsxLabel) ? match.xlsxLabel : "not found"}
+                        </p>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <pre className="whitespace-pre-wrap text-[11px] leading-relaxed font-mono">
+                          {displaySyncValue(match.value)}
+                        </pre>
+                      </td>
+                    </tr>
                   );
                 })}
-              </div>
-            </div>
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {selectedNoValueCount > 0 && (
-          <p className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-md px-3 py-2">
-            {selectedNoValueCount} selected field(s) have no extracted value.
-          </p>
-        )}
-        {selectedLocalOnlyCount > 0 && (
-          <p className="text-xs text-warn bg-warn/10 border border-warn/20 rounded-md px-3 py-2">
-            {selectedLocalOnlyCount} selected field(s) can be shown in the KYC cards but are not
-            written by Save KYC.
-          </p>
-        )}
-
-        {error && (
-          <p className="text-xs text-crit bg-crit/10 border border-crit/20 rounded-md px-3 py-2">
-            {error}
-          </p>
-        )}
-        {message && !error && (
-          <p className="text-xs text-success bg-success/10 border border-success/20 rounded-md px-3 py-2">
-            {message}
-          </p>
-        )}
-
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onCancel} disabled={uploading}>
-            Close
-          </Button>
-          <Button
-            type="button"
-            onClick={onConfirm}
-            disabled={uploading || selectedCount === 0 || selectedNoValueCount > 0}
-          >
-            {uploading && <Loader2 className="size-3.5 animate-spin" />}
-            Apply Selected
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <div className="px-5 py-4 border-t flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div className="space-y-1">
+            <p
+              className={`text-xs ${
+                error ? "text-crit" : message ? "text-success" : "text-muted-foreground"
+              }`}
+            >
+              {error || message || "Unchecked fields will stay unchanged."}
+            </p>
+            {selectedNoValueCount > 0 && (
+              <p className="text-xs text-warn">
+                {selectedNoValueCount} selected field(s) have no extracted value.
+              </p>
+            )}
+            {selectedLocalOnlyCount > 0 && (
+              <p className="text-xs text-warn">
+                {selectedLocalOnlyCount} selected field(s) can be shown in the KYC cards but are
+                not written by Save KYC.
+              </p>
+            )}
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={uploading}
+              className="px-4 py-2 border rounded-md text-xs font-bold hover:bg-muted disabled:opacity-40"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={uploading || selectedCount === 0 || selectedNoValueCount > 0}
+              className="px-4 py-2 bg-accent text-white rounded-md text-xs font-bold disabled:opacity-40 flex items-center gap-2"
+            >
+              {uploading && <Loader2 className="size-3.5 animate-spin" />}
+              Apply Selected
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 function SalesforceMappingModal({

@@ -9,6 +9,18 @@ import { buildRetentionGrowthTabModel } from "@/services/retention-growth-tab";
 import { markNotificationsReadServer } from "@/services/notification-read";
 import { repairAccountConstraintUpdates } from "@/services/account-constraint-repairs";
 import {
+  normalizeDate as validateDate,
+  normalizeEmail as validateEmail,
+  normalizeEnum as validateEnum,
+  normalizeId as validateId,
+  normalizeMoney as validateMoney,
+  normalizeNumber as validateNumber,
+  normalizePhone as validatePhone,
+  normalizeStringList as validateStringList,
+  normalizeText as validateText,
+  normalizeUrl as validateUrl,
+} from "@/services/validation";
+import {
   createAccountAssignmentNotifications,
   createActionItemNotifications,
   ensureContractRenewalNotifications,
@@ -51,7 +63,6 @@ const RAG_VALUES = new Set(["R", "A", "G"]);
 const ESCALATION_PRIORITY_VALUES = new Set(["P1", "P2", "P3"]);
 const OPPORTUNITY_CONFIDENCE_VALUES = new Set(["High", "Medium", "Low"]);
 const SHORT_CODE_RE = /^[A-Z0-9]{2,4}$/;
-const DAY_MS = 1000 * 60 * 60 * 24;
 
 function normalizeBooleanInput(value) {
   if (typeof value === "boolean") return value;
@@ -93,7 +104,7 @@ function normalizeAccountCreateInput(data = {}) {
     id: validateId(data.id, "Account ID"),
     name: normalizeRequiredBusinessText(data.name, "Account name"),
     shortCode: normalizeShortCode(data.shortCode),
-    industry: normalizeRequiredBusinessText(data.industry, "Industry", 160),
+    industry: normalizeRequiredBusinessText(data.industry, "Industry", 500),
     tier: validateEnum(data.tier, ACCOUNT_TIER_VALUES, "Tier"),
     contractType: validateEnum(data.contractType, CONTRACT_TYPE_VALUES, "Contract type"),
     contractValue: validateMoney(data.contractValue, "Contract value", { required: true }),
@@ -140,7 +151,7 @@ function normalizeAccountUpdateValue(column, value) {
     case "short_code":
       return normalizeShortCode(value);
     case "industry":
-      return normalizeRequiredBusinessText(value, "Industry", 160);
+      return normalizeRequiredBusinessText(value, "Industry", 500);
     case "tier":
       return validateEnum(value, ACCOUNT_TIER_VALUES, "Tier");
     case "status":
@@ -224,31 +235,6 @@ function normalizeAccountUpdateValue(column, value) {
     default:
       return value;
   }
-}
-
-function getCalendarDate(value) {
-  if (!value) return null;
-  const dateText = String(value).slice(0, 10);
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
-  if (match) {
-    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
-function getRenewalDays(row, renewalDate) {
-  const storedDays = Number(row.renewal_days);
-  if (Number.isFinite(storedDays)) return Math.round(storedDays);
-
-  const renewal = getCalendarDate(renewalDate);
-  if (!renewal) return null;
-
-  const today = new Date();
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  return Math.round((renewal.getTime() - todayStart.getTime()) / DAY_MS);
 }
 
 function mapFlatAccount(r) {
