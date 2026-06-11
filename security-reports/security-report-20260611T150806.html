@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Security Report - AETHER KAM</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --ink: #172337;
+      --muted: #607089;
+      --panel: #ffffff;
+      --line: #dbe3ef;
+      --navy: #20384a;
+      --navy-dark: #172b3a;
+      --critical: #8b1111;
+      --critical-bg: #fff1f1;
+      --high: #bd3a22;
+      --high-bg: #fff4ee;
+      --medium: #c77b12;
+      --medium-bg: #fff8e8;
+      --low: #1b78a8;
+      --low-bg: #eef8ff;
+      --ok: #0f8a4b;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, var(--navy-dark), var(--navy));
+      color: #fff;
+      padding: 28px 42px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .hero p {
+      margin: 0;
+      color: #cbd7e5;
+      font-size: 13px;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 44px));
+      margin: 24px auto 40px;
+    }
+
+    .severity-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 14px;
+      max-width: 720px;
+      margin: 0 auto 24px;
+    }
+
+    .severity-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      min-height: 86px;
+      display: grid;
+      place-items: center;
+      box-shadow: 0 4px 14px rgba(31, 47, 70, 0.08);
+      text-transform: uppercase;
+    }
+
+    .severity-card.critical { border-color: #d77; background: var(--critical-bg); color: var(--critical); }
+    .severity-card.high { border-color: #e59a7d; background: var(--high-bg); color: var(--high); }
+    .severity-card.medium { border-color: #efc46f; background: var(--medium-bg); color: var(--medium); }
+    .severity-card.low { border-color: #8ec9e8; background: var(--low-bg); color: var(--low); }
+
+    .severity-count {
+      font-size: 28px;
+      font-weight: 800;
+      line-height: 1;
+      margin-top: 8px;
+    }
+
+    .severity-label {
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      margin-bottom: 12px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      overflow: hidden;
+      box-shadow: 0 8px 22px rgba(31, 47, 70, 0.08);
+      margin-bottom: 24px;
+    }
+
+    .panel-header {
+      min-height: 42px;
+      background: var(--navy);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 16px;
+      font-weight: 800;
+    }
+
+    .panel-header small {
+      color: #d6e1ec;
+      font-weight: 700;
+    }
+
+    .panel-body {
+      padding: 16px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th {
+      background: #263e51;
+      color: #fff;
+      text-align: left;
+      font-size: 12px;
+      padding: 11px 12px;
+    }
+
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 11px 12px;
+      vertical-align: top;
+    }
+
+    tr:last-child td { border-bottom: none; }
+    code {
+      color: #31455d;
+      background: #f2f5f9;
+      border: 1px solid #e0e7f0;
+      border-radius: 4px;
+      padding: 2px 5px;
+      font-size: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 72px;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .pill.critical { color: var(--critical); background: var(--critical-bg); }
+    .pill.high { color: var(--high); background: var(--high-bg); }
+    .pill.medium { color: var(--medium); background: var(--medium-bg); }
+    .pill.low { color: var(--low); background: var(--low-bg); }
+
+    .empty-state {
+      color: var(--ok);
+      font-weight: 700;
+      padding: 18px 2px;
+    }
+
+    .notice {
+      border: 1px solid #efc46f;
+      background: #fff8e8;
+      color: #7a5300;
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      font-weight: 700;
+    }
+
+    footer {
+      color: var(--muted);
+      text-align: center;
+      font-size: 12px;
+      margin-top: 28px;
+    }
+
+    @media (max-width: 760px) {
+      .hero { padding: 24px 20px; }
+      main { width: min(100vw - 24px, 1180px); }
+      .severity-grid { grid-template-columns: repeat(2, 1fr); }
+      .panel-header { align-items: flex-start; flex-direction: column; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <h1>Security Report - AETHER KAM</h1>
+    <p>
+      Scan date: 20260611T150806<br />
+      SAST: Semgrep (p/nodejs-scan, p/secrets, p/typescript, p/react, .semgrep) &nbsp;|&nbsp;
+      SCA: npm audit &nbsp;|&nbsp;
+      Workspaces configured: api, web &nbsp;|&nbsp;
+      Workspaces scanned: root
+    </p>
+    <p>
+      Branch: Afnan/Integration &nbsp;|&nbsp;
+      Commit: da55fdc &nbsp;|&nbsp;
+      Working tree: has local changes
+    </p>
+  </header>
+
+  <main>
+    <section class="severity-grid" aria-label="Severity summary">
+      
+        <div class="severity-card critical">
+          <div class="severity-count">0</div>
+          <div class="severity-label">critical</div>
+        </div>
+      
+        <div class="severity-card high">
+          <div class="severity-count">0</div>
+          <div class="severity-label">high</div>
+        </div>
+      
+        <div class="severity-card medium">
+          <div class="severity-count">0</div>
+          <div class="severity-label">medium</div>
+        </div>
+      
+        <div class="severity-card low">
+          <div class="severity-count">0</div>
+          <div class="severity-label">low</div>
+        </div>
+      
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <span>SAST Findings (Semgrep)</span>
+        <small>0 finding(s)</small>
+      </div>
+      <div class="panel-body">
+        
+        <div class="empty-state">No SAST findings. Clean scan.</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <span>Dependency Vulnerabilities (npm audit)</span>
+        <small>0 package finding(s)</small>
+      </div>
+      <div class="panel-body">
+        
+        <div class="empty-state">No dependency vulnerabilities found by npm audit.</div>
+      </div>
+    </section>
+
+    <footer>
+      Generated by scripts/generate-report.js.
+      Custom Semgrep rules in .semgrep are included only when the folder exists.
+    </footer>
+  </main>
+</body>
+</html>
