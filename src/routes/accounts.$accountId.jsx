@@ -5164,7 +5164,7 @@ function OverviewTab({ account }) {
               setSalesforceSyncError("");
               checkSalesforceAccount();
             }}
-            disabled={checkingSalesforce || !session}
+            disabled={checkingSalesforce || !session || !editable}
             className="px-4 py-2.5 border text-xs font-bold rounded-md hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {checkingSalesforce ? (
@@ -5247,7 +5247,7 @@ function OverviewTab({ account }) {
             <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
               Assigned KAM
             </p>
-            {isHead ? (
+            {isHead && editable ? (
               <select
                 value={assignedKamId ?? ""}
                 onChange={(e) => assignKam(e.target.value)}
@@ -5269,7 +5269,7 @@ function OverviewTab({ account }) {
             )}
           </div>
         </div>
-        {isHead && (
+        {isHead && editable && (
           <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">
             Head of KAM can reassign
           </span>

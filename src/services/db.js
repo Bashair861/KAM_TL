@@ -1193,14 +1193,17 @@ export async function fetchKamUsers() {
   if (!withStatus.error) {
     return (withStatus.data ?? [])
       .filter((user) => user.is_active !== false)
-      .map((user) => ({ ...user, role: normalizeRole(user.role) }));
+      .map((user) => ({ ...user, role: normalizeRole(user.role) }))
+      .filter((user) => user.role === "KAM");
   }
 
   if (!isMissingColumnError(withStatus.error, "is_active")) throw withStatus.error;
 
   const { data, error } = await supabase.from("profiles").select("id, name, initials, role");
   if (error) throw error;
-  return (data ?? []).map((user) => ({ ...user, role: normalizeRole(user.role) }));
+  return (data ?? [])
+    .map((user) => ({ ...user, role: normalizeRole(user.role) }))
+    .filter((user) => user.role === "KAM");
 }
 
 function mapManagedUser(user) {
@@ -3691,7 +3694,7 @@ function mapNotification(n) {
     body: n.body ?? "",
     accountId: n.account_id ?? undefined,
     accountName: embeddedAccount?.name ?? "",
-    time: n.time || formatNotificationTime(n.created_at),
+    time: formatNotificationTime(n.created_at) || n.time || "",
     type: n.type,
     read: Boolean(n.read_at || n.read),
     badgeKey: n.badge_key ?? null,
