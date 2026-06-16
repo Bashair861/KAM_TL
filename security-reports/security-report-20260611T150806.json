@@ -1,0 +1,40 @@
+{
+  "projectName": "AETHER KAM",
+  "scanDate": "2026-06-11T15:08:06.015Z",
+  "git": {
+    "branch": "Afnan/Integration",
+    "commit": "da55fdc",
+    "dirty": true
+  },
+  "configuredWorkspaces": [
+    "api",
+    "web"
+  ],
+  "scannedWorkspaces": [
+    "root"
+  ],
+  "semgrep": {
+    "ok": true,
+    "skipped": false,
+    "configs": [
+      "p/nodejs-scan",
+      "p/secrets",
+      "p/typescript",
+      "p/react"
+    ],
+    "command": "C:\\Users\\afnan.tahir977\\AppData\\Roaming\\Python\\Python314\\Scripts\\semgrep.exe scan --config p/nodejs-scan --config p/secrets --config p/typescript --config p/react --json C:\\Users\\afnan.tahir977\\Documents\\Codex\\2026-05-29\\i-need-to-link-the-following\\KAM_TL",
+    "status": 7,
+    "error": null,
+    "findings": []
+  },
+  "npmAudit": [
+    {
+      "workspace": "root",
+      "command": "npm.cmd audit --json",
+      "ok": true,
+      "status": 0,
+      "error": null,
+      "findings": []
+    }
+  ]
+}
